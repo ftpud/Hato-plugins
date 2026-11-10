@@ -61,7 +61,25 @@ disabled until enabled; updates preserve enabled state. Failures during synchron
 restore the prior installed copies and generations. A manager updating itself activates after
 its requesting event completes; if its health check fails, its previous copy stays active.
 
-The migration initially downloads the full existing module set, preserving current service
-relationships. `core` controls System grouping; it does not yet make every non-core dependency
-optional. Host API additions and changed install bounds need a native rebuild/restart. Once the
-new host is running, TypeScript development and compatible package updates reload live.
+Fresh installations download the system set only: Hato essentials, Git and AI Chat. Optional
+features are installed from Marketplace as complete plugins:
+
+| Plugin | Included modules |
+| --- | --- |
+| Claude | Provider definitions, adapter/authentication policy and usage parser; usage bar |
+| Codex | Provider definitions, adapter/authentication policy and usage parser; usage bar |
+| Background Agents | Agent runner, workspace tools, persistent agent gateway and agent panel |
+| Workflows | Workflow service, execution runtime and visual editor; depends on Background Agents |
+| Remote workspaces | Remote runtime manager and remote panel |
+
+Installed and System show one row per plugin. Expand it to inspect individual modules; normal
+install, enable, disable and uninstall controls operate on the whole plugin. A fresh install
+activates its modules together after native approval. Updates keep a disabled plugin disabled,
+and add new modules to a plugin that was already enabled. Cross-plugin dependents must be disabled
+before their dependency can be removed. Existing saved provider profiles and settings are retained,
+but a named provider is offered only while its provider plugin is installed and enabled.
+
+The shared ACP client discovers `contributes.agentProviders`; it does not seed built-in provider
+profiles. Provider modules supply profile defaults, adapter metadata, auth options, usage commands,
+and parsing. The marketplace installs the Hato integration and usage UI; installing/authenticating
+the external CLI adapter remains an explicit operation on the chosen workspace machine.

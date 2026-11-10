@@ -17,7 +17,11 @@
   "stateVersion": 1,
   "description": "Agent Client Protocol client: profiles, transports, sessions, config options.",
   "author": "Hato contributors",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "pluginPackage": "core-acp",
-  "pluginType": "AI"
+  "pluginType": "AI",
+  "calls": [
+    "claude-provider",
+    "codex-provider"
+  ]
 }

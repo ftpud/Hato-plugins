@@ -8,7 +8,7 @@
       "type": "System",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "coreVersion": "^0.1.0",
       "description": "Hato essentials services and panels.",
       "dependencies": {},
@@ -31,13 +31,13 @@
     },
     {
       "id": "core-acp",
-      "name": "Agent Client Protocol",
+      "name": "AI Chat",
       "type": "AI",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "coreVersion": "^0.1.0",
-      "description": "Agent Client Protocol services and panels.",
+      "description": "Provider-independent ACP sessions, chat UI and MCP tools. Install AI providers separately.",
       "dependencies": {
         "foundation": "^0.1.0"
       },
@@ -47,9 +47,7 @@
         "ai",
         "internal-mcp",
         "internal-local-mcp",
-        "internal-remote-mcp",
         "mcp-auth",
-        "agent-runner",
         "mcp-panel"
       ]
     },
@@ -59,9 +57,9 @@
       "type": "Development",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "coreVersion": "^0.1.0",
-      "description": "Git services and panels.",
+      "description": "Git changes, branch controls, worktree tasks and history panels.",
       "dependencies": {
         "foundation": "^0.1.0"
       },
@@ -75,57 +73,79 @@
     },
     {
       "id": "claude-acp",
-      "name": "Claude ACP",
+      "name": "Claude",
       "type": "AI providers",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "coreVersion": "^0.1.0",
-      "description": "Claude ACP integration and plan usage bar. Requires the Claude adapter installed on the workspace machine.",
+      "description": "Claude provider, adapter setup and plan usage bar. Install this plugin to use Claude in chats, agents and workflows.",
       "dependencies": {
         "foundation": "^0.1.0",
         "core-acp": "^0.1.0"
       },
       "modules": [
+        "claude-provider",
         "claude-usage"
       ]
     },
     {
       "id": "codex-acp",
-      "name": "Codex ACP",
+      "name": "Codex",
       "type": "AI providers",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "coreVersion": "^0.1.0",
-      "description": "Codex ACP integration and plan usage bar. Requires the Codex adapter installed on the workspace machine.",
+      "description": "Codex provider, adapter setup and plan usage bar. Install this plugin to use Codex in chats, agents and workflows.",
       "dependencies": {
         "foundation": "^0.1.0",
         "core-acp": "^0.1.0"
       },
       "modules": [
+        "codex-provider",
         "codex-usage"
       ]
     },
     {
-      "id": "automation",
-      "name": "Workflows & agents",
+      "id": "agents",
+      "name": "Background Agents",
       "type": "Automation",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "coreVersion": "^0.1.0",
-      "description": "Workflows & agents services and panels.",
+      "description": "Persistent agent runtime, background agent panel and workspace tools. Supports local and SSH machines.",
       "dependencies": {
         "foundation": "^0.1.0",
-        "core-acp": "^0.1.0"
+        "core-acp": "^0.1.0",
+        "git": "^0.1.0"
+      },
+      "modules": [
+        "agent-runner",
+        "internal-remote-mcp",
+        "persistent-agents",
+        "agents-panel"
+      ]
+    },
+    {
+      "id": "automation",
+      "name": "Workflows",
+      "type": "Automation",
+      "core": false,
+      "author": "Hato contributors",
+      "version": "0.1.2",
+      "coreVersion": "^0.1.0",
+      "description": "Visual workflow editor and execution runtime. Uses Background Agents to run agent steps.",
+      "dependencies": {
+        "foundation": "^0.1.0",
+        "core-acp": "^0.1.0",
+        "agents": "^0.1.0"
       },
       "modules": [
         "workflows",
         "workflow-runner",
-        "workflows-panel",
-        "persistent-agents",
-        "agents-panel"
+        "workflows-panel"
       ]
     },
     {

@@ -34,17 +34,22 @@ let tab = 'marketplace';
 let search = '';
 let selection = '';
 const collapsed = new Set<string>();
-export function pluginBrowserSnapshot() { return { tab, search, selection, collapsed: [...collapsed] }; }
+const expandedModules = new Set<string>();
+export function pluginBrowserSnapshot() { return { tab, search, selection, collapsed: [...collapsed], expandedModules: [...expandedModules] }; }
 export function restorePluginBrowser(state: any) {
   tab = ['installed', 'builtin'].includes(state?.tab) ? state.tab : 'marketplace';
   search = typeof state?.search === 'string' ? state.search : '';
   selection = typeof state?.selection === 'string' ? state.selection : '';
-  collapsed.clear();
+  collapsed.clear(); expandedModules.clear();
+  if (Array.isArray(state?.expandedModules)) for (const id of state.expandedModules) if (typeof id === "string") expandedModules.add(id);
   if (Array.isArray(state?.collapsed)) for (const key of state.collapsed) if (typeof key === 'string') collapsed.add(key);
 }
 export function pluginBrowserAction(action: string, value: string) {
   if (action === 'marketSearch') search = value;
   if (action === 'marketSelect' && !value.startsWith('type:')) selection = value;
+  if (action === 'marketExpand' && value.startsWith('package:')) {
+    if (expandedModules.has(value)) expandedModules.delete(value); else expandedModules.add(value);
+  }
   if (action === 'marketExpand' && value.startsWith('type:')) {
     if (collapsed.has(value)) collapsed.delete(value); else collapsed.add(value);
   }
@@ -75,9 +80,6 @@ export function packageVersion(p: Package, plugins: PluginInfo[]) {
   if (versions.some(v => typeof v === 'string')) return versions.every(v => v === versions[0]) ? versions[0] as string : undefined;
   return receipts[p.id] || (members.every(m => m?.source === 'builtin') ? bundled.packages.find(b => b.id === p.id)?.version : undefined);
 }
-function isSystem(p: PluginInfo) {
-  return packages.find(pkg => pkg.modules.includes(p.id))?.core ?? p.source === 'builtin';
-}
 export function isNewer(target: string, current?: string) {
   if (!current) return true;
   if (!/^\d+\.\d+\.\d+$/.test(target) || !/^\d+\.\d+\.\d+$/.test(current)) return false;
@@ -85,59 +87,122 @@ export function isNewer(target: string, current?: string) {
   return (a[0] - b[0] || a[1] - b[1] || a[2] - b[2]) > 0;
 }
 export function availableUpdates(plugins: PluginInfo[]) {
-  return packages.filter(p => installed(p, plugins) && isNewer(p.version, packageVersion(p, plugins)));
+  return packages.filter(p => p.modules.some(id => plugins.some(m => m.id === id)) && isNewer(p.version, packageVersion(p, plugins)));
+}
+export function packageRows(plugins: PluginInfo[], selectedTab: string, needle = '') {
+  const owned = new Set(packages.flatMap(p => p.modules));
+  const known = packages.filter(p => {
+    const present = p.modules.some(id => plugins.some(m => m.id === id));
+    return selectedTab === 'marketplace' ? !present : present && (selectedTab === 'builtin' ? p.core : !p.core);
+  }).map(p => ({ key: `package:${p.id}`, name: p.name, description: p.description, type: p.type, package: p, plugin: undefined as PluginInfo | undefined }));
+  const unknown = selectedTab === 'marketplace' ? [] : plugins.filter(p => !owned.has(p.id) && (selectedTab === 'builtin' ? p.source === 'builtin' : p.source === 'user'))
+    .map(p => ({ key: `module:${p.id}`, name: p.name, description: `${p.id} ${p.description}`, type: String(p.metadata?.pluginType || (p.kind === 'ui' ? 'UI' : 'Services')), package: undefined as Package | undefined, plugin: p }));
+  return [...known, ...unknown].filter(p => !needle || `${p.name} ${p.description} ${p.type} ${p.package?.modules.join(' ') || ''}`.toLowerCase().includes(needle))
+    .sort((a,b) => a.name.localeCompare(b.name));
+}
+function moduleOrder(members: PluginInfo[]) {
+  const seen = new Set<string>(), result: PluginInfo[] = [];
+  const visit = (m: PluginInfo) => {
+    if (seen.has(m.id)) return;
+    seen.add(m.id);
+    for (const id of m.dependencies || []) { const dep = members.find(m => m.id === id); if (dep) visit(dep); }
+    result.push(m);
+  };
+  members.forEach(visit); return result;
+}
+export async function managePackage(ctx: ModuleContext, action: string, id: string, plugins: PluginInfo[]) {
+  if (!['enable','disable','uninstall'].includes(action)) throw Error('Unknown plugin action');
+  const pkg = packages.find(p => p.id === id);
+  if (!pkg) throw Error('Unknown plugin');
+  const members = plugins.filter(m => pkg.modules.includes(m.id));
+  if (action === 'enable') {
+    if (members.length !== pkg.modules.length) throw Error('Complete this plugin installation first');
+    // Include installed module dependencies, but never download or disable another plugin implicitly.
+    const required = new Set(plan(packages, id, bundled.coreVersion).flatMap(p => p.modules));
+    const include = (id: string) => { const m = plugins.find(m => m.id === id); for (const dep of m?.dependencies || []) if (!required.has(dep)) { required.add(dep); include(dep); } };
+    [...required].forEach(include);
+    const ordered = moduleOrder(plugins.filter(m => required.has(m.id)));
+    for (const m of ordered) if (!m.enabled || !m.active || m.pendingApprovals?.length) {
+      const result = await ctx.host.plugins.enable(m.id);
+      if (!result.active) throw Error(`${m.name}: ${result.error || 'could not start'}`);
+    }
+    return `${pkg.name} enabled`;
+  }
+  if (pkg.core) throw Error('Manage individual system modules in the expanded plugin tree');
+  const ids = new Set(pkg.modules), outsiders = new Set<string>();
+  for (const m of members) for (const dep of await ctx.host.plugins.dependents(m.id)) if (!ids.has(dep)) outsiders.add(dep);
+  if (outsiders.size) {
+    const names = [...new Set([...outsiders].map(id => packages.find(p => p.modules.includes(id))?.name || id))];
+    throw Error(`Disable dependent plugins first: ${names.join(', ')}`);
+  }
+  if (action === 'uninstall' && members.some(m => m.source !== 'user')) throw Error('Development or baseline modules can be disabled, but not uninstalled');
+  const ordered = moduleOrder(members).reverse();
+  for (const m of ordered) if (m.enabled) await ctx.host.plugins.disable(m.id);
+  if (action === 'uninstall') for (const m of ordered) await ctx.host.plugins.uninstall(m.id);
+  return `${pkg.name} ${action === 'uninstall' ? 'uninstalled' : 'disabled'}`;
 }
 export function marketNodes(plugins: PluginInfo[], busy: boolean, renderPlugin: (p: PluginInfo) => UiNode): UiNode[] {
-  const needle = search.trim().toLowerCase();
-  const items = (tab === 'marketplace'
-    ? packages.filter(p => !p.modules.some(id => plugins.some(m => m.id === id))).map(p => ({ key: `package:${p.id}`, name: p.name, description: p.description, type: p.type, package: p, plugin: undefined as PluginInfo | undefined }))
-    : plugins.filter(p => tab === 'builtin' ? isSystem(p) : !isSystem(p)).map(p => ({ key: `module:${p.id}`, name: p.name, description: `${p.id} ${p.description}`, type: String(p.metadata?.pluginType || packages.find(pkg => pkg.modules.includes(p.id))?.type || '') || (p.kind === 'ui' ? 'UI' : 'Services'), package: undefined as Package | undefined, plugin: p })))
-    .filter(p => !needle || `${p.name} ${p.description} ${p.type}`.toLowerCase().includes(needle))
-    .sort((a, b) => a.name.localeCompare(b.name));
-  const selected = items.find(p => p.key === selection) || items[0];
-  if (selected) selection = selected.key;
+  const needle = search.trim().toLowerCase(), items = packageRows(plugins, tab, needle);
+  const child = selection.startsWith('module:') ? plugins.find(p => p.id === selection.slice(7)) : undefined;
+  const selected = items.find(p => p.key === selection || child && p.package?.modules.includes(child.id)) || items[0];
+  const selectedModule = child && selected?.package?.modules.includes(child.id) ? child : selected?.plugin;
+  if (selected && !selectedModule) selection = selected.key;
   const rows: TreeRow[] = [];
+  const status = (p: Package) => {
+    const members = plugins.filter(m => p.modules.includes(m.id));
+    if (members.length !== p.modules.length) return 'Incomplete';
+    if (members.every(m => !m.enabled)) return 'Off';
+    if (members.some(m => !m.enabled)) return 'Partly enabled';
+    return members.some(m => m.lastError && !m.active) ? 'Needs attention' : members.some(m => !m.active) ? 'Starting…' : 'Enabled';
+  };
   for (const type of [...new Set(items.map(p => p.type))].sort()) {
-    const key = `type:${type}`, children = items.filter(p => p.type === type), expanded = !collapsed.has(key) || !!needle;
-    rows.push({ key, label: type, depth: 0, expandable: true, expanded, selected: false, badge: String(children.length), weight: 'semibold' });
-    if (expanded) rows.push(...children.map(p => ({ key: p.key, label: p.name, depth: 1, expandable: false, expanded: false, selected: selected?.key === p.key,
-      badge: p.plugin ? (!p.plugin.enabled ? 'Off' : p.plugin.lastError && !p.plugin.active ? 'Failed' : '') : p.package?.version })));
+    const key = `type:${type}`, entries = items.filter(p => p.type === type), expanded = !collapsed.has(key) || !!needle;
+    rows.push({ key, label: type, depth: 0, expandable: true, expanded, selected: false, badge: String(entries.length), weight: 'semibold' });
+    if (!expanded) continue;
+    for (const item of entries) {
+      const expandable = tab !== 'marketplace' && !!item.package, expanded = expandedModules.has(item.key);
+      rows.push({ key: item.key, label: item.name, depth: 1, expandable, expanded, selected: selected?.key === item.key && !selectedModule,
+        badge: item.package ? tab === 'marketplace' ? item.package.version : status(item.package) : item.plugin?.enabled ? '' : 'Off' });
+      if (expandable && expanded) for (const id of item.package!.modules) {
+        const m = plugins.find(m => m.id === id); if (!m) continue;
+        rows.push({ key: `module:${m.id}`, label: m.name, depth: 2, expandable: false, expanded: false, selected: selectedModule?.id === m.id, badge: m.enabled ? '' : 'Off' });
+      }
+    }
   }
   const details: UiNode[] = [];
-  if (selected?.plugin) {
-    const pkg = packages.find(p => p.modules.includes(selected.plugin!.id));
-    details.push(renderPlugin(selected.plugin));
-    if (pkg) {
-      const v = packageVersion(pkg, plugins);
-      details.push({ type: 'label', key: 'package', text: `${pkg.name} · ${v || pkg.version} · ${pkg.type}`, color: 'muted', size: 'xs', wrap: true });
-      if (isNewer(pkg.version, v)) details.push({ type: 'row', key: 'package-actions', children: [
-        { type: 'button', key: 'update', text: 'Update package', action: 'plugin:marketInstall', value: pkg.id, disabled: busy, small: true },
-      ] });
+  if (selectedModule) details.push(renderPlugin(selectedModule));
+  else if (selected?.package) {
+    const p = selected.package, members = plugins.filter(m => p.modules.includes(m.id)), has = members.length > 0;
+    const version = packageVersion(p, plugins);
+    const button = (key: string, text: string, action: string, variant?: 'primary' | 'danger'): UiNode => ({type:'button',key,text,action:`plugin:${action}`,value:p.id,small:true,disabled:busy,variant});
+    const actions: UiNode[] = [];
+    if (!has || members.length !== p.modules.length) actions.push(button('install',has ? 'Complete installation' : 'Install','marketInstall','primary'));
+    else {
+      if (isNewer(p.version,version)) actions.push(button('update','Update','marketInstall','primary'));
+      if (members.some(m => !m.enabled || !m.active)) actions.push(button('enable','Enable plugin','packageEnable','primary'));
+      if (!p.core && members.some(m => m.enabled)) actions.push(button('disable','Disable plugin','packageDisable'));
+      if (!p.core && members.every(m => m.source === 'user')) actions.push(button('uninstall','Uninstall','packageUninstall','danger'));
     }
-  } else if (selected?.package) {
-    const p = selected.package;
     details.push(
-      { type: 'label', key: 'name', text: p.name, size: 'lg', weight: 'semibold', wrap: true },
-      { type: 'label', key: 'author', text: `By ${p.author} · ${p.type} · ${p.version}`, color: 'muted', size: 'sm', wrap: true },
-      { type: 'row', key: 'install-actions', children: [{ type: 'button', key: 'install', text: 'Install', action: 'plugin:marketInstall', value: p.id, disabled: busy, variant: 'primary' }] },
-      { type: 'label', key: 'description', text: p.description, wrap: true },
-      { type: 'label', key: 'compatibility', text: `Requires Hato ${p.coreVersion}`, size: 'xs', color: 'muted' },
-      { type: 'label', key: 'dependencies', text: `Dependencies: ${Object.keys(p.dependencies).join(', ') || 'None'}`, size: 'xs', color: 'muted', wrap: true });
-  } else details.push({ type: 'label', key: 'empty', text: needle ? 'No matching plugins.' : tab === 'marketplace' ? 'All catalogue plugins are already installed. Check for more plugins using Refresh.' : 'No plugins installed.', color: 'muted', wrap: true });
+      {type:'label',key:'name',text:p.name,size:'lg',weight:'semibold',wrap:true},
+      {type:'label',key:'author',text:`${p.type} · ${version || p.version} · By ${p.author}`,color:'muted',size:'xs',wrap:true},
+      ...(actions.length ? [{type:'row',key:'package-actions',gap:8,wrap:true,children:actions} as UiNode] : []),
+      {type:'label',key:'description',text:p.description,wrap:true,size:'sm'},
+      {type:'divider',key:'contents-divider'},
+      {type:'label',key:'contents-title',text:`Included modules (${p.modules.length})`,weight:'semibold',size:'sm'},
+      ...p.modules.map(id => {const m=plugins.find(m=>m.id===id);return {type:'label',key:`includes:${id}`,text:`${m?.name || id}${has ? m ? m.enabled ? ' · Enabled' : ' · Off' : ' · Missing' : ''}`,size:'xs',color:'muted',wrap:true} as UiNode;}),
+      {type:'label',key:'dependencies',text:`Requires: ${Object.keys(p.dependencies).map(id=>packages.find(p=>p.id===id)?.name || id).join(', ') || 'None'}`,size:'xs',color:'muted',wrap:true});
+  } else details.push({type:'label',key:'empty',text:needle?'No matching plugins.':tab==='marketplace'?'All available plugins are already installed.':'No plugins installed.',color:'muted',wrap:true});
   return [{ type: 'tabs', key: 'plugin-tabs', height: 474, style: { gap: 12 }, tabs: [{ key: 'marketplace', label: 'Marketplace' }, { key: 'installed', label: 'Installed' }, { key: 'builtin', label: 'System' }], active: tab, action: 'plugin:marketTab', children: [{ type: 'column', key: tab, height: 430, gap: 0, style: { borderWidth: 1, borderColor: 'border', radius: 8 }, children: [
     { type: 'row', key: 'toolbar', gap: 8, padding: 12, style: { borderBottom: 1, borderColor: 'border' }, children: [
       { type: 'textInput', key: 'plugin-search', value: search, placeholder: 'Search plugins…', changeAction: 'plugin:marketSearch', grow: true },
       { type: 'button', key: 'refresh', text: 'Refresh', action: 'plugin:marketRefresh', disabled: busy, small: true },
-      ...(availableUpdates(plugins).length ? [{ type: 'button', key: 'update-all', text: `Update all (${availableUpdates(plugins).length})`, action: 'plugin:marketUpdateAll', disabled: busy, small: true, variant: 'primary' } as UiNode] : []),
-      ...(tab === 'installed' ? [
-        { type: 'button', key: 'folder', text: 'Install from folder…', action: 'plugin:install', disabled: busy, small: true } as UiNode,
-        { type: 'button', key: 'rescan', text: 'Rescan', action: 'plugin:rescan', disabled: busy, small: true } as UiNode] : []),
+      ...(availableUpdates(plugins).length ? [{type:'button',key:'update-all',text:`Update all (${availableUpdates(plugins).length})`,action:'plugin:marketUpdateAll',disabled:busy,small:true,variant:'primary'} as UiNode] : []),
+      ...(tab === 'installed' ? [{type:'button',key:'folder',text:'Install from folder…',action:'plugin:install',disabled:busy,small:true} as UiNode] : []),
     ] },
     { type: 'row', key: 'browser', height: 374, gap: 0, align: 'stretch', children: [
-      { type: 'column', key: 'list', width: 260, padding: 8, borderSide: 'right', children: [
-        { type: 'tree', key: 'plugin-tree', rows, rowHeight: 30, indent: 12, rowGap: 0, selectAction: 'plugin:marketSelect', expandAction: 'plugin:marketExpand', grow: true },
-      ] },
-      { type: 'column', key: selected?.key || 'details', grow: true, scroll: true, gap: 16, padding: 20, children: details },
+      {type:'column',key:'list',width:260,padding:8,borderSide:'right',children:[{type:'tree',key:'plugin-tree',rows,rowHeight:30,indent:12,rowGap:0,selectAction:'plugin:marketSelect',expandAction:'plugin:marketExpand',grow:true}]},
+      {type:'column',key:selectedModule?.id || selected?.key || 'details',grow:true,scroll:true,gap:16,padding:20,children:details},
     ] },
   ] }] }];
 }
@@ -159,7 +224,7 @@ async function installPackages(ctx: ModuleContext, ids: string[], plugins: Plugi
     if (ids.includes(p.id)) return true;
     const current = packageVersion(p, plugins);
     const requirements = selected.flatMap(dependent => dependent.dependencies[p.id] ? [dependent.dependencies[p.id]] : []);
-    return !current || isNewer(p.version, current) || requirements.some(range => !satisfies(current, range));
+    return !current || isNewer(p.version, current) || requirements.some(range => !satisfies(current, range)) || p.modules.some(id => plugins.find(m => m.id === id)?.pendingApprovals?.length);
   });
   const files: { id: string; manifest: string; code: string }[] = [];
   // Fetch the entire dependency closure from one pinned revision before asking to install.
@@ -194,5 +259,11 @@ async function installPackages(ctx: ModuleContext, ids: string[], plugins: Plugi
     for (const p of changed) receipts[p.id] = p.version;
     await ctx.modules.call('persistence', 'settings.set', { key: 'plugins.receipts.v1', value: receipts });
   } finally { await ctx.host.capabilities.release(grant.grant); }
-  return `Updated ${changed.length} package${changed.length === 1 ? '' : 's'}. Enabled plugins reload live; enable new plugins in Installed.`;
+  const current = (await ctx.host.plugins.list()).plugins;
+  for (const id of ids) {
+    const pkg = packages.find(p => p.id === id)!;
+    const previous = plugins.filter(m => pkg.modules.includes(m.id));
+    if (!previous.length || previous.some(m => m.enabled)) await managePackage(ctx, 'enable', id, current);
+  }
+  return `Installed ${ids.map(id => packages.find(p => p.id === id)?.name || id).join(', ')}. All included modules are managed together.`;
 }

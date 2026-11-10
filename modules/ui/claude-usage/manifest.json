@@ -5,6 +5,7 @@
   "entry": "src/index.ts",
   "moduleApiVersion": 1,
   "dependencies": [
+    "claude-provider",
     "acp",
     "persistence"
   ],
@@ -23,7 +24,7 @@
     ]
   },
   "author": "Hato contributors",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "pluginPackage": "claude-acp",
   "pluginType": "AI providers"
 }

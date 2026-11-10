@@ -3,22 +3,25 @@
 // project root / worktree: local child process for local workspaces, SSH exec for remote ones.
 // No local fallback, no implicit clone, no auto-install.
 import { reportedUsage, type ReportedUsage } from "@hato/sdk/context-usage";
+import { agentProviders, providerProfiles, type AgentProvider } from "@hato/sdk/agent-providers";
 import { imageAttachments } from "@hato/sdk/images";
-import { applyClaudeRateLimit, parseClaudeUsage, parseCodexStatus, type LimitProvider, type LimitsSnapshot } from "@hato/sdk/usage-limits";
+import { type LimitProvider, type LimitsSnapshot } from "@hato/sdk/usage-limits";
 import type { AppModule, Handle, ModuleContext } from "@hato/sdk/types";
 import { errMsg, JsonRpcPeer, rpcError, targetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 
 const PROTOCOL_VERSION = 1;
-const DEFAULT_PROFILES = [
-  { id: "codex", machineId: "*", provider: "codex", name: "Codex (codex-acp)", executable: "codex-acp", args: [], envRefs: {}, enabled: true },
-  { id: "claude", machineId: "*", provider: "claude", name: "Claude (claude-agent-acp)", executable: "claude-agent-acp", args: [], envRefs: {}, enabled: true },
-];
-
-/** Known ACP adapters that can be installed/updated on request (npm global packages). */
-export const ADAPTERS = [
-  { id: "claude", name: "Claude (claude-agent-acp)", pkg: "@agentclientprotocol/claude-agent-acp", bin: "claude-agent-acp" },
-  { id: "codex", name: "Codex (codex-acp)", pkg: "@agentclientprotocol/codex-acp", bin: "codex-acp" },
-];
+async function providers(ctx: ModuleContext) { return agentProviders((await ctx.host.plugins.list()).plugins); }
+async function providerById(ctx: ModuleContext, id: string): Promise<AgentProvider> {
+  const found = (await providers(ctx)).find(p => p.id === id);
+  if (!found) throw new Error(`Provider '${id}' is unavailable. Install or enable its plugin in Marketplace.`);
+  return found;
+}
+async function environmentPolicy(ctx: ModuleContext, profile: any) {
+  const auth = (await providers(ctx)).find(p => p.id === profile.provider)?.auth;
+  if (!auth) return [];
+  const saved = await ctx.modules.call('persistence', 'settings.get', { key: auth.key });
+  return (saved == null ? auth.default : !!saved) ? auth.envRemove : [];
+}
 
 interface Conn {
   conversationId: string;
@@ -26,6 +29,8 @@ interface Conn {
   machineId: string;
   cwd: string;
   profileId: string;
+  providerId?: string;
+  providerModule?: string;
   proc: Handle;
   pid: number;
   peer: JsonRpcPeer;
@@ -52,36 +57,37 @@ interface Conn {
 const conns = new Map<string, Conn>();
 
 // ---- plan usage limits ---------------------------------------------------------------------------
-// Published at `acp.limits` as { claude, codex }. Refreshed by a short-lived hidden ACP session that
-// runs the adapter's local usage command (no model call), and passively from live Claude turns.
-const LIMIT_COMMAND: Record<LimitProvider, string> = { claude: "/usage", codex: "/status" };
-let limits: Record<LimitProvider, LimitsSnapshot | null> = { claude: null, codex: null };
+// Published at `acp.limits`, keyed by contributed provider IDs. Providers own usage commands
+// and parsing; the shared transport runs probes and forwards session updates.
+let limits: Record<LimitProvider, LimitsSnapshot | null> = {};
 const probes = new Map<LimitProvider, Promise<LimitsSnapshot>>();
 function publishLimits(ctx: ModuleContext) { ctx.state.set("acp.limits", limits as any); }
 function setLimits(ctx: ModuleContext, provider: LimitProvider, snap: LimitsSnapshot) { limits = { ...limits, [provider]: snap }; publishLimits(ctx); }
 
-async function probeLimits(ctx: ModuleContext, provider: LimitProvider, workspaceId: string): Promise<LimitsSnapshot> {
+async function probeLimits(ctx: ModuleContext, providerId: LimitProvider, workspaceId: string): Promise<LimitsSnapshot> {
+  const definition = await providerById(ctx, providerId);
+  if (!definition.usageCommand) throw new Error('This provider does not offer usage checks');
   const desc: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId });
   const all = await profiles(ctx);
-  const profile = all.find((p: any) => p.enabled && p.provider === provider && (p.machineId === desc.machineId || p.machineId === "*"));
-  if (!profile) throw new Error(`no enabled ${provider} agent profile for ${desc.machineId}`);
+  const profile = all.find((p: any) => p.enabled && p.provider === providerId && (p.machineId === desc.machineId || p.machineId === "*"));
+  if (!profile) throw new Error(`no enabled ${providerId} agent profile for ${desc.machineId}`);
   const det = await detect(ctx, desc, profile.executable);
   if (!det.found) throw new Error(`${profile.executable} was not found on ${desc.machineId}`);
   const g = await workspaceGrant(ctx, desc, "process");
   const env: Record<string, string> = { ...(profile.envRefs || {}) };
   if (det.pathEnv) env.PATH = det.pathEnv;
-  const envRemove: string[] = [];
-  if (provider === "claude" && (await authSettings(ctx)).claudeSubscription) for (const k of CLAUDE_API_VARS) { envRemove.push(k); delete env[k]; }
+  const envRemove = await environmentPolicy(ctx, profile);
+  for (const key of envRemove) delete env[key];
   const proc = await ctx.host.process.spawn(g.grant, {
     target: await targetFor(ctx, desc), executable: desc.location === "ssh" ? profile.executable : det.path,
     args: profile.args || [], cwd: desc.rootAbsolutePath, env, envRemove, loginShell: desc.location === "ssh",
   });
   const peer = new JsonRpcPeer((line) => ctx.host.process.write(proc.handle, line + "\n"), 1);
-  let text = "", rateLimit: any = null;
+  let text = ""; const updates: any[] = [];
   peer.onNotification = (method, params) => {
     const u = method === "session/update" ? params?.update : null;
     if (u?.sessionUpdate === "agent_message_chunk" && u.content?.type === "text") text += u.content.text;
-    if (u?.sessionUpdate === "usage_update" && u._meta?.["_claude/rateLimit"]) rateLimit = u._meta["_claude/rateLimit"];
+    if (u?.sessionUpdate === "usage_update") updates.push(u);
   };
   peer.onRequest = async (method) => { if (method === "session/request_permission") return { outcome: { outcome: "cancelled" } }; throw rpcError(-32601, `method not supported by client: ${method}`); };
   const subs = [
@@ -91,16 +97,14 @@ async function probeLimits(ctx: ModuleContext, provider: LimitProvider, workspac
     await withTimeout(peer.request("initialize", { protocolVersion: PROTOCOL_VERSION, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
       clientInfo: { name: "hato", title: "Hato usage meter", version: "0.1.0" } }), 60000, "initialize");
     const session: any = await withTimeout(peer.request("session/new", { cwd: desc.rootAbsolutePath, mcpServers: [] }), 120000, "session/new");
-    await withTimeout(peer.request("session/prompt", { sessionId: session.sessionId, prompt: [{ type: "text", text: LIMIT_COMMAND[provider] }] }), 90000, LIMIT_COMMAND[provider]);
+    await withTimeout(peer.request("session/prompt", { sessionId: session.sessionId, prompt: [{ type: "text", text: definition.usageCommand }] }), 90000, definition.usageCommand);
   } finally {
     for (const sub of subs) await sub.close().catch(() => {});
     await ctx.host.process.closeStdin(proc.handle).catch(() => {});
     await ctx.host.process.terminate(proc.handle).catch(() => {});
   }
-  const parsed = provider === "claude" ? parseClaudeUsage(text) : parseCodexStatus(text);
-  let snap: LimitsSnapshot = { provider, windows: parsed.windows, plan: parsed.plan, updatedAt: Date.now(), source: "probe", error: null };
-  if (!snap.windows.length && rateLimit) snap = { ...applyClaudeRateLimit(null, rateLimit)!, source: "probe" };
-  if (!snap.windows.length) snap.error = /not logged in|API key/i.test(text) ? `${provider} is not using a subscription login; plan limits are unavailable` : "the agent reported no plan limits";
+  const snap: LimitsSnapshot = await ctx.modules.call(definition.module, 'parseLimits', { text, updates });
+  if (!snap.windows.length) snap.error = /not logged in|API key/i.test(text) ? `${definition.name} is not using a subscription login; plan limits are unavailable` : 'the agent reported no plan limits';
   return snap;
 }
 
@@ -117,8 +121,7 @@ function publicState(c: Conn | undefined) {
 function emitStatus(ctx: ModuleContext, c: Conn) { ctx.events.emit("acp.status", publicState(c) as any); }
 
 async function profiles(ctx: ModuleContext) {
-  const rows = await ctx.modules.call("persistence", "acpProfiles.list");
-  return rows;
+  return providerProfiles(ctx);
 }
 
 async function resolveProfile(ctx: ModuleContext, id: string, machineId: string) {
@@ -175,11 +178,13 @@ async function npmRunner(ctx: ModuleContext, desc: WorkspaceDescriptor) {
   return { ok: true as const, error: "", run };
 }
 
-const CLAUDE_API_VARS = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
-
-async function authSettings(ctx: ModuleContext): Promise<{ claudeSubscription: boolean }> {
-  const v = await ctx.modules.call("persistence", "settings.get", { key: "acp.claude.useSubscription" });
-  return { claudeSubscription: v === null || v === undefined ? true : !!v };
+async function authSettings(ctx: ModuleContext): Promise<Record<string, boolean>> {
+  const values: Record<string, boolean> = {};
+  for (const p of await providers(ctx)) if (p.auth) {
+    const v = await ctx.modules.call('persistence', 'settings.get', { key: p.auth.key });
+    values[p.auth.field] = v == null ? p.auth.default : !!v;
+  }
+  return values;
 }
 
 async function start(ctx: ModuleContext, a: any) {
@@ -189,25 +194,20 @@ async function start(ctx: ModuleContext, a: any) {
   const profile = await resolveProfile(ctx, a.profileId, desc.machineId);
   const det = await detect(ctx, desc, profile.executable);
   if (!det.found) {
-    throw new Error(`ACP adapter '${profile.executable}' was not found on ${desc.machineId}. Install and authenticate it on that machine (e.g. npm i -g @agentclientprotocol/codex-acp or @agentclientprotocol/claude-agent-acp), or point the profile to an absolute path. Hato never installs agents automatically.`);
+    throw new Error(`ACP adapter '${profile.executable}' was not found on ${desc.machineId}. Use Manage agents to install and authenticate it on that machine, or point the profile to an absolute path. Hato never installs agents automatically.`);
   }
   const g = await workspaceGrant(ctx, desc, "process");
   const env: Record<string, string> = { ...(profile.envRefs || {}) };
   if (det.pathEnv) env.PATH = det.pathEnv;
-  // Claude subscription mode (default): keep API-key variables from the shell/profile away from the
-  // adapter so it authenticates with the user's Claude login instead of billing an API account.
-  const auth = await authSettings(ctx);
-  const envRemove: string[] = [];
-  if (profile.provider === "claude" && auth.claudeSubscription) {
-    for (const k of CLAUDE_API_VARS) { envRemove.push(k); delete env[k]; }
-  }
+  const envRemove = await environmentPolicy(ctx, profile);
+  for (const key of envRemove) delete env[key];
   const spawned = await ctx.host.process.spawn(g.grant, {
     target: await targetFor(ctx, desc),
     executable: desc.location === "ssh" ? profile.executable : det.path,
     args: profile.args || [], cwd: desc.rootAbsolutePath, env, envRemove, loginShell: desc.location === "ssh",
   });
   const c: Conn = {
-    conversationId: a.conversationId, workspaceId: desc.id, machineId: desc.machineId, cwd: desc.rootAbsolutePath, profileId: profile.id,
+    conversationId: a.conversationId, workspaceId: desc.id, machineId: desc.machineId, cwd: desc.rootAbsolutePath, profileId: profile.id, providerId: profile.provider, providerModule: profile.providerModule,
     proc: spawned.handle, pid: spawned.pid, peer: null as any, sessionId: null, agentInfo: null, agentCapabilities: null, steering: false, authMethods: [],
     configOptions: null, modes: null, models: null, commands: [], usage: null, status: "starting", error: null, stderrTail: "",
     mcp: { enabled: !!a.mcp, status: a.mcp ? "pending" : "disabled" }, executablePath: det.path, startedAt: Date.now(),
@@ -264,7 +264,7 @@ async function start(ctx: ModuleContext, a: any) {
   } catch (e: any) {
     c.status = "error";
     const auth = c.authMethods && c.authMethods.length && /auth/i.test(errMsg(e));
-    c.error = auth ? `Agent requires authentication on ${c.machineId} (${c.authMethods.map((m: any) => m.name || m.id).join(", ")}). Authenticate the adapter there (e.g. 'codex login'), then reconnect. Details: ${errMsg(e)}` : errMsg(e);
+    c.error = auth ? `Agent requires authentication on ${c.machineId} (${c.authMethods.map((m: any) => m.name || m.id).join(", ")}). Authenticate the adapter there then reconnect. Details: ${errMsg(e)}` : errMsg(e);
     emitStatus(ctx, c);
     await ctx.host.process.terminate(c.proc).catch(() => {});
     throw new Error(c.error!);
@@ -291,8 +291,12 @@ async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
       else if (u.sessionUpdate === "current_mode_update" && c.modes) { c.modes = { ...c.modes, currentModeId: u.currentModeId }; emitStatus(ctx, c); }
       else if (u.sessionUpdate === "usage_update") {
         c.usage = reportedUsage(u); emitStatus(ctx, c);
-        const rl = u._meta?.["_claude/rateLimit"];
-        if (rl) { const next = applyClaudeRateLimit(limits.claude, rl); if (next) setLimits(ctx, "claude", { ...next, plan: limits.claude?.plan ?? null }); }
+        if (c.providerModule && c.providerId) {
+          const providerId = c.providerId;
+          void ctx.modules.call(c.providerModule, 'sessionLimits', { update: u, previous: limits[providerId] || null })
+            .then((next: LimitsSnapshot | null) => { if (next) setLimits(ctx, providerId, next); })
+            .catch((e) => ctx.log.warn('Provider usage update:', errMsg(e)));
+        }
       }
       else if (u.sessionUpdate === "available_commands_update") { c.commands = u.availableCommands || []; }
       ctx.events.emit("acp.update", { conversationId: c.conversationId, update: u });
@@ -322,15 +326,15 @@ const mod: AppModule = {
   id: "acp",
   moduleApiVersion: 1,
   async activate(ctx, prev) {
-    const existing = await profiles(ctx);
-    for (const p of DEFAULT_PROFILES) if (!existing.some((x: any) => x.id === p.id)) await ctx.modules.call("persistence", "acpProfiles.upsert", { profile: p });
-    if (prev?.limits) limits = { claude: prev.limits.claude || null, codex: prev.limits.codex || null };
-    for (const k of Object.keys(limits) as LimitProvider[]) if (limits[k]?.loading) limits[k] = { ...limits[k]!, loading: false };
+    if (prev?.limits) limits = { ...prev.limits };
+    for (const k of Object.keys(limits)) if (limits[k]?.loading) limits[k] = { ...limits[k]!, loading: false };
     publishLimits(ctx);
     // Hot-swap hand-over: re-attach live agent processes; the kernel replays buffered stdout.
     if (prev && Array.isArray(prev.conns)) {
+      const available = await profiles(ctx);
       for (const s of prev.conns) {
-        const c: Conn = { ...s, peer: null as any };
+        const p = available.find((p: any) => p.id === s.profileId);
+        const c: Conn = { ...s, providerId: s.providerId || p?.provider, providerModule: s.providerModule || p?.providerModule, peer: null as any };
         conns.set(c.conversationId, c);
         if (c.status === "ready" || c.status === "busy") await wire(ctx, c, s.nextId, s.partial);
       }
@@ -346,7 +350,7 @@ const mod: AppModule = {
     return { ok: true };
   },
   snapshot() {
-    return { limits, conns: Array.from(conns.values()).map((c) => ({ ...publicState(c), proc: c.proc, stderrTail: c.stderrTail, nextId: c.peer ? c.peer.nextRequestId : 1, partial: c.peer ? c.peer.partial : "" })) };
+    return { limits, conns: Array.from(conns.values()).map((c) => ({ ...publicState(c), proc: c.proc, providerId: c.providerId, providerModule: c.providerModule, stderrTail: c.stderrTail, nextId: c.peer ? c.peer.nextRequestId : 1, partial: c.peer ? c.peer.partial : "" })) };
   },
   methods: {
     profiles: async (ctx, a) => {
@@ -356,7 +360,9 @@ const mod: AppModule = {
     saveProfile: async (ctx, a) => { await ctx.modules.call("persistence", "acpProfiles.upsert", { profile: a.profile }); return null; },
     authSettings: (ctx) => authSettings(ctx),
     async setAuthSettings(ctx, a) {
-      if (typeof a.claudeSubscription === "boolean") await ctx.modules.call("persistence", "settings.set", { key: "acp.claude.useSubscription", value: a.claudeSubscription });
+      for (const p of await providers(ctx)) if (p.auth && typeof a[p.auth.field] === 'boolean') {
+        await ctx.modules.call('persistence', 'settings.set', { key: p.auth.key, value: a[p.auth.field] });
+      }
       ctx.events.emit("acp.authChanged", await authSettings(ctx));
       return authSettings(ctx);
     },
@@ -441,7 +447,8 @@ const mod: AppModule = {
     /** Latest plan usage limits, refreshed through a hidden ACP session when older than `maxAgeMs`
      *  (default 60 s) or when `force`. Concurrent refreshes share one probe. */
     async limits(ctx, a) {
-      const provider: LimitProvider = a?.provider === "codex" ? "codex" : "claude";
+      const provider = String(a?.provider || '');
+      await providerById(ctx, provider);
       const cur = limits[provider];
       const maxAge = Number.isFinite(a?.maxAgeMs) ? Number(a.maxAgeMs) : 60000;
       if (!a?.workspaceId || (!a.force && cur && !cur.error && Date.now() - cur.updatedAt < maxAge)) return cur;
@@ -458,9 +465,12 @@ const mod: AppModule = {
     /** Installed/latest versions of the known adapters on the workspace's machine. */
     async adapters(ctx, a) {
       const desc: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
+      const definitions = await providers(ctx);
+      if (!definitions.length) return [];
       const npm = await npmRunner(ctx, desc);
       const out: any[] = [];
-      for (const ad of ADAPTERS) {
+      for (const definition of definitions) {
+        const ad = { id: definition.id, name: definition.profile.name, ...definition.adapter };
         const row: any = { id: ad.id, name: ad.name, pkg: ad.pkg, bin: ad.bin, machineId: desc.machineId, installed: null, latest: null, path: null, error: null };
         try {
           if (!npm.ok) throw new Error(npm.error);
@@ -481,8 +491,8 @@ const mod: AppModule = {
      *  Only accepted from ai-sessions, which obtains the user's approval first. */
     async installAdapter(ctx, a, meta) {
       if (meta.caller !== "ai-sessions") throw new Error("adapter installation must be requested through ai-sessions (approval required)");
-      const ad = ADAPTERS.find((x) => x.id === a.adapterId);
-      if (!ad) throw new Error(`unknown adapter ${a.adapterId}`);
+      const definition = await providerById(ctx, String(a.adapterId));
+      const ad = { id: definition.id, ...definition.adapter };
       const desc: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
       const npm = await npmRunner(ctx, desc);
       if (!npm.ok) throw new Error(npm.error);

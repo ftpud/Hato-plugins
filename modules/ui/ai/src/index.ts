@@ -299,7 +299,7 @@ const mod: AppModule = {
             { type: "label", key: "workspace", text: view.workspace.name || ws?.name || "Workspace chats", weight: "semibold" },
             { type: "label", key: "count", text: `${view.conversations.length} saved conversation${view.conversations.length === 1 ? "" : "s"}`, color: "muted", size: "xs" },
           ] },
-          { type: "button", key: "new-chat", text: "New chat", iconSvg: uiIcons.plus, action: "newChat", style: chatStyle.primary, tooltip: "Start a chat with the current chat’s settings" },
+          { type: "button", key: "new-chat", text: view.profiles.length ? "New chat" : "Browse providers", iconSvg: uiIcons.plus, action: "newChat", style: chatStyle.primary, tooltip: "Start a chat with the current chat’s settings" },
         ] },
         { type: "textInput", key: "session-search", value: historyQuery, placeholder: "Search sessions or providers…", changeAction: "searchSessions" },
         { type: "column", key: "session-list", scroll: true, maxHeight: 440, gap: 6, children: sessions.length ? sessions.map((c: any): UiNode => {
@@ -337,7 +337,7 @@ const mod: AppModule = {
           if (option?.description) fields.push({ type: "label", key: field.key + "-hint", text: option.description, size: "sm", color: "muted", wrap: true });
         }
         fields.push({ type: "select", key: "policy", label: "Approval policy", options: POLICIES, value: conv.approvalPolicy, action: "setPolicy", buttonStyle: chatStyle.fieldControl });
-        if (profile?.provider === "claude") fields.push({ type: "toggle", key: "claude-sub", label: "Use Claude subscription", checked: view.auth?.claudeSubscription !== false, action: "toggleClaudeSub", tooltip: "Uses your Claude login instead of the shell API key. Applies on reconnect." });
+        if (profile?.authOption) fields.push({ type: "toggle", key: "provider-auth", label: profile.authOption.label, checked: view.auth?.[profile.authOption.field] !== false, action: "toggleProviderAuth", tooltip: profile.authOption.description });
         fields.push({ type: "label", key: "loc", text: `${live?.machineId || view.workspace.machineId} · ${view.workspace.root}`, size: "xs", color: "muted", wrap: true });
         fields.push({ type: "row", key: "connection", gap: 8, children: [
           { type: "button", key: "connect", text: connected ? "Disconnect" : "Connect", action: connected ? "disconnect" : "connect", style: chatStyle.control },
@@ -431,13 +431,16 @@ const mod: AppModule = {
         ] });
       }
     } else if (ws && view) kids.push({ type: "column", key: "empty", padding: 24, gap: 12, grow: true, children: [
-      { type: "label", key: "title", text: "Start a conversation", size: "lg", weight: "bold" },
-      { type: "label", key: "hint", text: "Ask your agent to build, explore or fix something in this workspace.", wrap: true, color: "muted" },
-      { type: "button", key: "start", text: "New chat", iconSvg: uiIcons.plus, action: "newChat", style: chatStyle.primary, variant: "primary" },
+      { type: "label", key: "title", text: view.profiles.length ? "Start a conversation" : "Choose your AI provider", size: "lg", weight: "bold" },
+      { type: "label", key: "hint", text: view.profiles.length ? "Ask your agent to build, explore or fix something in this workspace." : "Install Claude, Codex or another provider from Marketplace to start chatting.", wrap: true, color: "muted" },
+      { type: "button", key: "start", text: view.profiles.length ? "New chat" : "Browse providers", iconSvg: uiIcons.plus, action: "newChat", style: chatStyle.primary, variant: "primary" },
     ] });
     return { type: "column", key: "ai-root", style: chatStyle.root, gap: 0, grow: true, children: kids };
   },
   async onEvent(ctx, ev) {
+    if (ev.action === "newChat" && view && !view.profiles.length) {
+      ctx.events.emit("settings.open", { category: "plugins" }); return;
+    }
     if (ev.action === "resizeComposer") {
       const sizes = (ev.value as any)?.sizes;
       if (!Array.isArray(sizes) || sizes.length !== 2 || sizes.some((n: any) => typeof n !== "number" || !Number.isFinite(n) || n <= 0)) return;
@@ -525,7 +528,11 @@ const mod: AppModule = {
         await loadAdapters(ctx);
         return;
       }
-      if (ev.action === "toggleClaudeSub") { await ctx.modules.call("acp", "setAuthSettings", { claudeSubscription: !!ev.value }); return; }
+      if (ev.action === "toggleProviderAuth") {
+        const p = view?.profiles.find((p: any) => p.id === view?.active?.conversation?.acpProfileId);
+        if (p?.authOption) await ctx.modules.call("acp", "setAuthSettings", { [p.authOption.field]: !!ev.value });
+        return;
+      }
       if (ev.action === "newChat" && ws) { await call("create", { workspaceId: ws.id, profileId: conv?.acpProfileId }); historyOpen = false; settingsOpen = false; modelsOpen = false; }
       else if (ev.action === "selectConv" && ws) { await call("select", { workspaceId: ws.id, conversationId: ev.value }); historyOpen = false; settingsOpen = false; modelsOpen = false; }
       else if (!conv) return;

@@ -17,7 +17,8 @@ const published = JSON.parse(execFileSync('git',['show','HEAD:catalogue.json'],{
 const bumped = [];
 for (const pkg of source.packages) {
   const old = published.packages.find(p => p.id === pkg.id);
-  const changed = !old || pkg.modules.some(id => {
+  const metadata = value => { const {version,artifacts,...rest}=value;return JSON.stringify(rest); };
+  const changed = !old || metadata(pkg) !== metadata(old) || pkg.modules.some(id => {
     const artifact = old.artifacts.find(a => a.id === id);
     if (!artifact) return true;
     const kind = ['services','ui'].find(k => fs.existsSync(`modules/${k}/${id}/manifest.json`));

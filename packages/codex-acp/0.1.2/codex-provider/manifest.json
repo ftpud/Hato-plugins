@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 2,
+  "id": "codex-provider",
+  "name": "Codex provider",
+  "kind": "service",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [],
+  "capabilities": [],
+  "provides": [
+    "ai.provider"
+  ],
+  "contributes": {
+    "agentProviders": [
+      {
+        "id": "codex",
+        "name": "Codex",
+        "profile": {
+          "id": "codex",
+          "name": "Codex (codex-acp)",
+          "executable": "codex-acp",
+          "args": []
+        },
+        "adapter": {
+          "pkg": "@agentclientprotocol/codex-acp",
+          "bin": "codex-acp"
+        },
+        "usageCommand": "/status"
+      }
+    ]
+  },
+  "version": "0.1.2",
+  "pluginPackage": "codex-acp",
+  "pluginType": "AI providers",
+  "description": "Codex profile, adapter setup, authentication policy and usage parsing."
+}

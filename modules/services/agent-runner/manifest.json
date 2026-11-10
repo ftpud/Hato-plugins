@@ -21,7 +21,7 @@
     "internal-remote-mcp"
   ],
   "author": "Hato contributors",
-  "version": "0.1.1",
-  "pluginPackage": "core-acp",
-  "pluginType": "AI"
+  "version": "0.1.2",
+  "pluginPackage": "agents",
+  "pluginType": "Automation"
 }

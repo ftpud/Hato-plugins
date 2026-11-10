@@ -31,7 +31,7 @@
     ]
   },
   "author": "Hato contributors",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "pluginPackage": "core-acp",
   "pluginType": "AI"
 }

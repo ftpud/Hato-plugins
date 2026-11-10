@@ -1,3 +1,4 @@
+import { providerProfiles } from "@hato/sdk/agent-providers";
 import type { AppModule, ModuleContext, DaemonTarget } from "@hato/sdk/types";
 import { sshConnect, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { workspaceSkills } from "../../files/src/skills";
@@ -65,7 +66,7 @@ async function oauthHeaders(ctx:ModuleContext,list:AgentMcp[]):Promise<Record<st
 }
 async function catalog(ctx:ModuleContext,workspaceId:string) {
   const d:WorkspaceDescriptor=await ctx.modules.call("workspace","resolve",{workspaceId});
-  const profiles=(await ctx.modules.call("persistence","acpProfiles.list")).filter((p:any)=>p.enabled&&(p.machineId==="*"||p.machineId===d.machineId));
+  const profiles=(await providerProfiles(ctx)).filter((p:any)=>p.enabled&&(p.machineId==="*"||p.machineId===d.machineId));
   const skills=await workspaceSkills(ctx,d);
   const grant=await workspaceGrant(ctx,d,"fs");
   const agentFiles:{name:string;path:string}[]=[];

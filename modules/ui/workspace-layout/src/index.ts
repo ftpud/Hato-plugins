@@ -348,7 +348,7 @@ function modulesModal(): UiNode {
       { type: "label", key: "plugin-path", text: `Installed plugins: ${runtimePaths.dataDir}/plugins`, size: "xs", mono: true, wrap: true } as UiNode,
       { type: "label", key: "artifact-path", text: `Saved module builds: ${runtimePaths.dataDir}/artifacts`, size: "xs", mono: true, wrap: true } as UiNode,
     ] : []),
-    { type: "label", key: "storage-hint", text: "The app bundle supplies the native executable, tools and initial modules. Packaged launches copy module sources into a writable runtime. Installed plugins are managed in Settings → Plugins; a plugin folder needs manifest.json and runnable JavaScript. Workflow scripts are commands saved with workflow definitions, executed on the workspace machine.", size: "xs", color: "muted", wrap: true },
+    { type: "label", key: "storage-hint", text: "Manage plugins and live updates in Settings → Plugins. Each plugin can include services, panels and bar items. Workflow commands run on the workspace machine.", size: "xs", color: "muted", wrap: true },
     { type: "row", key: "upd-bar", gap: 6, align: "center", children: [
       { type: "label", key: "upd-sum", text: scanningUpd ? "Checking module sources for updates…" : updSummary.available.length ? `${updSummary.available.length} local build(s) differ from active modules` : updSummary.errors.length ? "No local changes ready to activate." : "All modules match their local sources.", size: "sm", color: updSummary.available.length ? "warning" : "muted", grow: true },
       { type: "button", key: "upd-all", text: `Build & activate changes (${updSummary.available.length})`, action: "activateAll", small: true, variant: "primary", disabled: !!busy || !updSummary.available.length },

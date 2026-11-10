@@ -1,4 +1,4 @@
-import { marketNodes, marketTab, refreshMarket, installPackage, updateAllPackages, pluginBrowserAction, pluginBrowserSnapshot, restorePluginBrowser } from './marketplace';
+import { marketNodes, marketTab, refreshMarket, installPackage, updateAllPackages, managePackage, pluginBrowserAction, pluginBrowserSnapshot, restorePluginBrowser } from './marketplace';
 import type { AppModule, ModuleContext, PluginInfo, SettingsExport, SettingsSection, SettingField, UiNode } from "@hato/sdk/types";
 import { parseOrder, SPACER_PREFIX } from "@hato/sdk/settings-order";
 import { uiTable, normalizeTableStyle } from "@hato/sdk/ui-table";
@@ -83,6 +83,11 @@ const mod: AppModule = {
   async activate(ctx, prev) {
     restorePluginBrowser(prev?.pluginBrowser);
     open = !!prev?.open; query = prev?.query || "";
+    ctx.events.on("settings.open", (args: any) => {
+      open = true; query = ""; selectedCategory = args?.category || "plugins";
+      if (selectedCategory === "plugins") marketTab("marketplace");
+      void refresh(ctx);
+    });
     ctx.events.on("workspace-layout.tableStyleChanged", () => ctx.ui.invalidate());
     selectedCategory = typeof prev?.selectedCategory === "string" ? prev.selectedCategory : "";
     // Refresh disk discovery when the plugin/settings UI loads, including newly built panels.
@@ -267,6 +272,9 @@ async function pluginAction(ctx: ModuleContext, action: string, value: any) {
     case "marketRefresh": return run("Checking marketplace…", async () => { await refreshMarket(ctx); return "Marketplace is up to date"; });
     case "rollback": return run("Restoring previous plugin…", async () => { await ctx.host.plugins.rollback(String(value)); return "Previous version restored; active plugins reload live"; });
     case "marketUpdateAll": return run("Updating plugins…", () => updateAllPackages(ctx, plugins));
+    case "packageEnable": return run("Enabling plugin…", () => managePackage(ctx, 'enable', String(value), plugins));
+    case "packageDisable": return run("Disabling plugin…", () => managePackage(ctx, 'disable', String(value), plugins));
+    case "packageUninstall": return run("Uninstalling plugin…", () => managePackage(ctx, 'uninstall', String(value), plugins));
     case "marketInstall": return run("Installing package…", () => installPackage(ctx, String(value), plugins));
     case "setRoot": return run("Changing window root…", async () => { await ctx.host.plugins.setRoot(typeof value === "string" ? value : null); return null; });
     case "uninstall": return run(`Uninstalling ${value}…`, async () => { await ctx.host.plugins.uninstall(String(value)); return `Uninstalled ${value}`; });
