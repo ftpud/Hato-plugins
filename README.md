@@ -1,59 +1,67 @@
-# Plugin packages and marketplace
+# Hato plugins
 
-The public repository is https://github.com/ftpud/Hato-plugins. `catalogue.json`
-is its index. App code and editable sources remain in Hato; the marketplace contains
-prebuilt JS and manifests, exported with `node tools/export-plugins.mjs DESTINATION`
-after `npm run modules:build`. Review changes before committing and pushing that repository.
-A package groups multiple existing runtime modules without renaming their stable IDs.
-Authors choose a free-form `type` used for browser grouping.
+This repository owns Hato's TypeScript application: services, UI panels, manifests, catalogue,
+build tools, and versioned marketplace artifacts. The native host and shared SDK live in
+[Hato](https://github.com/ftpud/Hato). There is no second plugin source tree in the host repository.
 
-Settings → Plugins offers Installed packages, Marketplace, Check for updates and download,
-with individual module enable/disable/removal controls below. Fetches pin all files to
-one Git commit. Dependency planning checks exact, caret and tilde semver requirements,
-rejects cycles and incompatible Hato versions, then downloads manifests and bundles.
-Native installation and permission approval remain enforced by the kernel.
-New modules stay disabled; existing enabled modules retain their enabled preference.
-Install receipts are saved after success. Package installation is sequential, not an
-atomic multi-module transaction; an error can leave some modules updated and must be retried.
-Updating the requesting manager stores its new seed without unloading the active request;
-the browser reports that a restart is needed to load that manager update. Other enabled
-modules load their installed updates immediately.
+## Develop with live reload
 
-## Review of existing modules
+The normal development checkout is `Hato/Hato-plugins/`. From the Hato directory:
 
-| Package | Bundle policy | Modules / rationale |
-| --- | --- | --- |
-| foundation | Core | persistence, workspace, projects, files, terminals, workspace-layout, settings, module-dev, explorer, viewer, terminal-panel, projects-panel, left-sidebar, sidebar: startup, storage, navigation and recovery |
-| core-acp | Core | acp, ai-sessions, ai, internal-mcp, internal-local-mcp, internal-remote-mcp, mcp-auth, agent-runner: generic protocol/chat and agent bridge |
-| git | Core (requested) | git, git-panel, git-branch, git-changes, git-tasks: Git service, panel, branch/status bars and task worktrees |
-| claude-acp | Add-on | claude-usage: provider plan bar; depends on generic ACP |
-| codex-acp | Add-on | codex-usage: provider plan bar; depends on generic ACP |
-| automation | Add-on candidate | workflows, workflow-runner, workflows-panel, persistent-agents, agents-panel |
-| remote | Add-on candidate | remote-runtime, remote-panel |
+```sh
+npm ci
+npm run plugins:setup
+npm run dev
+```
 
-This catalogue records intended packaging, not a completed dependency refactor. Existing
-releases still bundle every module. Do not delete add-on sources from the app distribution
-yet: workspace/projects/internal MCP have calls into git-tasks, persistent-agents and related
-services. Those calls need explicit optional-service handling first. Remote runtime startup
-and existing saved workspaces also need migration coverage before removing it from seeds.
-Provider-specific defaults, adapter setup, authentication policy, usage refresh and parsing
-still live in ACP; they must move behind a provider contribution contract before core-acp
-can accurately be called provider-independent. Claude/Codex packages currently group the
-existing usage panels, not the full extracted adapter integrations.
+Edit `Hato-plugins/modules/services/` or `Hato-plugins/modules/ui/`. The watcher rebuilds changed
+bundles and the host activates them live. SDK edits also rebuild consumers. The native kernel
+keeps workspace resources and supplies each new generation with the old generation's snapshot.
+`canSwap` vetoes and failed health checks keep the old generation active.
 
-## Versioning
+`npm run dev` opts into trusted local reload with `--dev-watch`; marketplace overrides for
+checkout IDs stay on disk but do not shadow the editable code in this mode. Normal launches
+use installed overrides. Existing in-app module build, stage, activate, and rollback tools
+still work against this checkout, without restarting the app for TypeScript edits.
 
-`plugins.catalogue.json` is the source catalogue. Bump a package version when publishing
-changed artifacts. `coreVersion` currently tracks package.json's 0.1.0 app/module release;
-keep them aligned on releases. Supported requirement syntax deliberately excludes wildcards,
-OR expressions and prereleases. Built-in packages remain present in the public repository
-so they can receive updates separately from an application release.
+From this repository you can also run `npm ci`, `npm test`, `npm run build`, or `npm run watch`.
+The builder finds the SDK at `../sdk` (nested checkout) or `../Hato/sdk` (sibling checkout).
+Set `HATO_SDK_ROOT` to another SDK location for builds. For typechecking a custom layout, adjust
+the `@hato/sdk/*` paths and ambient declaration includes in `tsconfig.json`.
 
-## Native boundary and activation
+## Publish updates
 
-Bundled IDs may be overridden by approved installed copies. Removing an override exposes
-the bundled copy again on rescan/startup. Install prepares a candidate folder before replacing
-the previous folder, and requests permission escalation before loading the new copy.
-The kernel still validates capabilities and module calls. Core changes and new Settings
-permission bounds require a native rebuild/restart. Bundling TypeScript alone does not
-activate the marketplace in an already running app.
+```sh
+npm run release:prepare
+```
+
+This builds plugins, bumps patch versions for changed packages, updates member manifests,
+rebuilds catalogue consumers, and exports new artifact directories with SHA-256 digests.
+It preserves older version directories. It does not commit or push. Review and publish this
+repository, then run `npm run plugins:lock` in Hato to pin that published revision for new installs.
+Commit the new host lock with the corresponding native release. Plugin-only releases do not
+require an app release: existing users can check for updates and update installed packages live.
+
+`plugins.catalogue.json` owns package membership, types, dependencies, and compatibility.
+`catalogue.json` is generated for download clients; `packages/` contains generated, self-contained
+JavaScript and manifests. Application settings and policy belong in the TypeScript sources.
+
+## Install and update
+
+The host app ships `plugins.lock.json`, not plugin sources or bundles. First launch downloads
+and verifies its pinned set into `<data>/runtime/plugins`. Subsequent launches work offline;
+verified cached downloads also repair missing or damaged baseline files. Installed plugins,
+settings, and rollback artifacts persist across host application upgrades.
+
+Settings → Plugins separates Marketplace, Installed, and System. The list is searchable and
+grouped by type. Marketplace excludes packages with installed members. Refresh discovers updates;
+Update all prepares the dependency closure from one pinned repository revision, verifies artifacts,
+and submits one native install request. Permission approval stays in the host. New plugins stay
+disabled until enabled; updates preserve enabled state. Failures during synchronous activation
+restore the prior installed copies and generations. A manager updating itself activates after
+its requesting event completes; if its health check fails, its previous copy stays active.
+
+The migration initially downloads the full existing module set, preserving current service
+relationships. `core` controls System grouping; it does not yet make every non-core dependency
+optional. Host API additions and changed install bounds need a native rebuild/restart. Once the
+new host is running, TypeScript development and compatible package updates reload live.
