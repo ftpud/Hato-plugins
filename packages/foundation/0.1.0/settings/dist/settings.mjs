@@ -150,7 +150,7 @@ var plugins_catalogue_default = {
 };
 
 // modules/ui/settings/src/marketplace.ts
-var REPOSITORY = "ftpud/Hota-plugins";
+var REPOSITORY = "ftpud/Hato-plugins";
 function satisfies(version2, range) {
   const parse = (s) => /^\d+\.\d+\.\d+$/.test(s) ? s.split(".").map(Number) : null;
   const v = parse(version2), r = parse(range.replace(/^[\^~]/, ""));
