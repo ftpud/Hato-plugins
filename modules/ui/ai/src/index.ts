@@ -14,12 +14,13 @@ import type { AgentView } from "@hato/sdk/persistent-agents";
 let background:{workspaceId:string;id:string}|null=null;
 let backgroundPage:AgentView|null=null;
 let backgroundTimer:ReturnType<typeof setInterval>|null=null;
+let backgroundSessions:any[]=[];
 let normalDraft:string|undefined;
 let normalAttachments:ImageAttachment[]=[];
 const backgroundDrafts=new Map<string,string>();
 const requests=new Map<string,{resolve:(value:any)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>}>();
 function persistent(ctx:ModuleContext,method:string,args:any={}) {
-  const selection=background;
+  const selection=background || (ws ? {workspaceId:ws.id} : null);
   if(!selection)return Promise.reject(new Error("No background session selected"));
   const requestId=crypto.randomUUID();
   return new Promise<any>((resolve,reject)=>{
@@ -38,7 +39,9 @@ async function openBackground(ctx:ModuleContext,selection:any) {
   draft=backgroundDrafts.get(selection.id)||"";attachments=[];resetChatWindows();publishSession(ctx);
   if(backgroundTimer)clearInterval(backgroundTimer);
   backgroundTimer=setInterval(()=>{void load(ctx);},1500);
-  ctx.events.emit("ai.chatOpened",{});await load(ctx);
+  ctx.events.emit("ai.chatOpened",{});
+  await ctx.modules.call("workspace", "view.patch", { workspaceId: selection.workspaceId, patch: { ui: { aiBackgroundSession: selection.id } } });
+  await load(ctx);
 }
 function leaveBackground(ctx:ModuleContext) {
   if(background)backgroundDrafts.set(background.id,draft||"");
@@ -131,7 +134,7 @@ async function load(ctx: ModuleContext) {
       if(background!==selection||ws?.id!==selection.workspaceId)return;
       backgroundPage=page;
       const session=page.session;
-      view={profiles:[session.profile],conversations:[],activeId:session.id,active:{
+      view={workspace:{name:ws.name},profiles:[session.profile],conversations:backgroundSessions.map(s=>({id:s.id,title:s.name,acpProfileId:s.profile.id,status:s.status})),activeId:session.id,active:{
         conversation:{id:session.id,title:session.name,acpProfileId:session.profile.id,status:session.status,approvalPolicy:session.autopilot?"autopilot":"ask",mcpSelection:session.mcps.map(m=>m.id)},
         live:{...session,profileId:session.profile.id},messages:page.messages,windowed:true,hasOlder:page.before!==null,hasLoadedOlder:false,hasNewer:historyBefore.length>0,
         busy:["busy","waiting"].includes(session.status),steering:page.queued.length,
@@ -222,7 +225,7 @@ const mod: AppModule = {
     await restoreComposer(ctx);
     workspaceSkillState = ctx.state.get("files.skills") || null;
     ctx.state.watch("files.skills", (value: any) => { workspaceSkillState = value; ctx.ui.invalidate(); });
-    ctx.state.watch("workspace.selected", (v: any) => { const changed = ws?.id !== v?.id; ws = v; if(changed){void restoreComposer(ctx);if(background)leaveBackground(ctx);void load(ctx);} });
+    ctx.state.watch("workspace.selected", (v: any) => { const changed = ws?.id !== v?.id; ws = v; if(changed){void restoreComposer(ctx);if(background)leaveBackground(ctx);const saved=v?.view?.ui?.aiBackgroundSession;if(saved)void openBackground(ctx,{workspaceId:v.id,id:saved});else void load(ctx);} });
     ctx.events.on("persistent-agents.chatResponse",(response:any)=>{
       const pending=requests.get(response?.requestId);if(!pending)return;
       requests.delete(response.requestId);clearTimeout(pending.timer);
@@ -242,7 +245,8 @@ const mod: AppModule = {
       await openBackground(ctx,prev.background);
       normalDraft=prev.normalDraft;normalAttachments=prev.normalAttachments||[];
       draft=prev.draft||"";
-    }else await load(ctx);
+    }else if(ws?.view?.ui?.aiBackgroundSession) await openBackground(ctx,{workspaceId:ws.id,id:ws.view.ui.aiBackgroundSession});
+    else await load(ctx);
   },
   deactivate(){if(backgroundTimer)clearInterval(backgroundTimer);backgroundTimer=null;for(const p of requests.values()){clearTimeout(p.timer);p.reject(new Error("Chat module reloaded"));}requests.clear();},
   snapshot: () => background ? ({ draft, attachments, background, normalDraft, normalAttachments, composerFractions: [...composerFractions] }) : ({draft,attachments,composerFractions: [...composerFractions]}),
@@ -275,7 +279,7 @@ const mod: AppModule = {
       iconButton("new", "plus", "newChat", "New chat"),
       iconButton("history-toggle", "message-square", "toggleHistory", "Chat history"),
     ] };
-    if(background)header.children=header.children.filter(n=>!["new","history-toggle"].includes(n.key)).map(n=>n.key==="auto"?{...n,tooltip:"Autopilot: approve this background agent's tool permissions and Git task creation automatically, even while Hato is closed."}:n);
+    if(background)header.children=header.children.map(n=>n.key==="auto"?{...n,tooltip:"Autopilot: approve this background agent's tool permissions and Git task creation automatically, even while Hato is closed."}:n);
     const kids: UiNode[] = [header];
     if(background) {
       kids.push({type:"row",key:"background-session",padding:8,gap:6,children:[
@@ -454,7 +458,36 @@ const mod: AppModule = {
       ctx.ui.invalidate(); return;
     }
     if(ev.action==="draftChanged"){draft=String(ev.value||"");ctx.ui.invalidate();return;}
-    if(ev.action==="backToChats"){leaveBackground(ctx);await load(ctx);return;}
+    if(ev.action==="backToChats"){
+      await ctx.modules.call("workspace","view.patch",{workspaceId:ws.id,patch:{ui:{aiBackgroundSession:null}}});
+      leaveBackground(ctx);await load(ctx);return;
+    }
+    if(ev.action==="newChat"&&ws) {
+      if(busy)return;
+      const workspaceId=ws.id, current=view?.active?.conversation;
+      busy="newChat";ctx.ui.invalidate();
+      try {
+        const available=await ctx.host.plugins.list();
+        if(!available.plugins.some(p=>p.id==="persistent-agents"&&p.active))throw new Error("Enable Background Agents in Marketplace to start a chat that runs while Hato is closed.");
+        const catalog=await persistent(ctx,"catalog");
+        if(ws?.id!==workspaceId)return;
+        const profileId=catalog.profiles.some((p:any)=>p.id===current?.acpProfileId)?current.acpProfileId:catalog.profiles[0]?.id;
+        if(!profileId)throw new Error("Install and enable an AI provider for this workspace first.");
+        const session=await persistent(ctx,"create",{profileId,name:"Chat",model:backgroundPage?.session.model||"",skills:[],mcps:["internal-remote-mcp"],agentFile:catalog.agentFiles.some((f:any)=>f.path==="AGENTS.md")?"AGENTS.md":null});
+        if(ws?.id===workspaceId)await openBackground(ctx,{workspaceId,id:session.id});
+      }catch(e){error=errMsg(e);}finally{busy=null;ctx.ui.invalidate();}
+      return;
+    }
+    if(background&&ev.action==="toggleHistory") {
+      historyOpen=!historyOpen;
+      if(historyOpen)try{backgroundSessions=await persistent(ctx,"list");await load(ctx);}catch(e){error=errMsg(e);}
+      ctx.ui.invalidate();return;
+    }
+    if(background&&ev.action==="searchSessions"){historyQuery=String(ev.value||"");ctx.ui.invalidate();return;}
+    if(background&&ev.action==="selectConv") {
+      if(backgroundSessions.some(s=>s.id===ev.value))await openBackground(ctx,{workspaceId:ws.id,id:ev.value});
+      return;
+    }
     if(background && !["toggleModels","searchModels","toggleSettings","openLink"].includes(ev.action)) {
       const selection=background;
       let actionError:string|null=null;

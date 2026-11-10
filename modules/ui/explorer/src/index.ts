@@ -19,9 +19,19 @@ let searchSoon: () => void = () => {};
 let contentMode = false;
 /** .gitignored files are hidden unless the user shows them. */
 let showIgnored = false;
+let gitFiles: { path: string; kind: string }[] = [];
+let gitVersion = 0;
 let grep: any = null;
 let grepSoon: () => void = () => {};
 
+async function refreshGit(ctx: ModuleContext) {
+  const version = ++gitVersion, workspaceId = ws?.id;
+  if (!workspaceId) { gitFiles = []; return; }
+  try {
+    const status = await ctx.modules.call("git", "status", { workspaceId }, { timeoutMs: 45000 });
+    if (version === gitVersion && workspaceId === ws?.id) { gitFiles = status.files || []; ctx.ui.invalidate(); }
+  } catch { if (version === gitVersion) { gitFiles = []; ctx.ui.invalidate(); } }
+}
 async function loadDir(ctx: ModuleContext, path: string, version = epoch) {
   if (!ws || pending.has(path) || dirs.has(path)) return;
   const workspaceId = ws.id;
@@ -31,6 +41,45 @@ async function loadDir(ctx: ModuleContext, path: string, version = epoch) {
     if (version === epoch) { dirs.set(path, listing.entries.filter((entry: Entry) => entry.name !== ".DS_Store")); error = null; }
   } catch (e) { if (version === epoch) error = errMsg(e); }
   finally { if (version === epoch) pending.delete(path); ctx.ui.invalidate(); }
+}
+// Refresh cached listings in place so watch events never blank the visible tree.
+let refreshing = false;
+let refreshAgain = false;
+async function refreshTree(ctx: ModuleContext) {
+  if (refreshing) { refreshAgain = true; return; }
+  refreshing = true;
+  try {
+    do {
+      refreshAgain = false;
+      const version = epoch, workspaceId = ws?.id;
+      if (!workspaceId) return;
+      const paths = [...dirs.keys()];
+      const listings = await Promise.all(paths.map(async path => {
+        try {
+          const listing = await ctx.modules.call("files", "list", { workspaceId, relativeDir: path, showHidden: true, hideIgnored: !showIgnored });
+          return [path, listing.entries.filter((entry: Entry) => entry.name !== ".DS_Store")] as const;
+        } catch (e) { if (version === epoch) error = errMsg(e); return null; }
+      }));
+      if (version !== epoch) { refreshAgain = true; continue; }
+      for (const listing of listings) if (listing) dirs.set(listing[0], listing[1]);
+      if (query.trim()) await search(ctx, true);
+      ctx.ui.invalidate();
+    } while (refreshAgain);
+  } finally { refreshing = false; }
+}
+async function compactChildren(ctx: ModuleContext, parent: string, version = epoch) {
+  let budget = 64;
+  const compact = async (path: string): Promise<void> => {
+    if (version !== epoch || budget-- <= 0 || path === ".git") return;
+    await loadDir(ctx, path, version);
+    const children = dirs.get(path);
+    if (children?.length === 1 && children[0].kind === "dir") await compact(children[0].relativePath);
+  };
+  const folders = (dirs.get(parent) || []).filter(entry => entry.kind === "dir");
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(4, folders.length) }, async () => {
+    while (cursor < folders.length && version === epoch && budget > 0) await compact(folders[cursor++].relativePath);
+  }));
 }
 async function search(ctx: ModuleContext, refresh = false) {
   const version = ++searchVersion;
@@ -59,12 +108,15 @@ async function reveal(ctx: ModuleContext) {
   ctx.ui.invalidate();
 }
 async function reset(ctx: ModuleContext, saved?: any) {
+  gitFiles = []; gitVersion++;
+  void refreshGit(ctx);
   const version = ++epoch; searchVersion++; ctx.ui.invalidate(); dirs = new Map(); pending = new Set(); filterCollapsed = new Set(); results = null; searching = false; error = null;
   expanded = new Set(saved?.expanded || ws?.view?.ui?.explorerTree?.expanded || []);
   query = saved?.query || ""; grep = null;
   if (saved && typeof saved.showIgnored === "boolean") showIgnored = saved.showIgnored;
   if (saved && typeof saved.contentMode === "boolean") contentMode = saved.contentMode;
   await loadDir(ctx, ".");
+  await compactChildren(ctx, ".", version);
   if (version !== epoch) return;
   for (const path of [...expanded].sort()) { await loadDir(ctx, path, version); if (version !== epoch) return; }
   if (query) await search(ctx);
@@ -76,10 +128,12 @@ const mod: AppModule = {
     grepSoon = debounce(() => { void search(ctx); }, 450);
     ws = ctx.state.get("workspace.selected") || null;
     ctx.state.watch("workspace.selected", (next: any) => { const changed = ws?.id !== next?.id; ws = next; if (changed) void reset(ctx); else ctx.ui.invalidate(); });
+    const gitSoon = debounce(() => { void refreshGit(ctx); }, 300);
+    ctx.events.on("git.changed", (event: any) => { if (event.workspaceId === ws?.id) gitSoon(); });
     ctx.events.on("files.changed", (event: any) => {
       if (event.workspaceId !== ws?.id) return;
       // Keep expansion, query and selection when replacing stale directory listings.
-      void reset(ctx, { expanded: [...expanded], query, showIgnored, contentMode });
+      void refreshTree(ctx); gitSoon();
     });
     const savedView = ws?.view?.ui?.explorerTree;
     await reset(ctx, prev?.workspaceId === ws?.id ? prev : savedView ? { showIgnored: !!savedView.showIgnored, contentMode: false } : null);
@@ -114,7 +168,13 @@ const mod: AppModule = {
       if (pending.size && !dirs.has(".")) children.push({ type: "progress", key: "loading", indeterminate: true });
       if (filtering && !searching && !rows.length && !error && !(grepping && query.trim().length < 2)) children.push({ type: "label", key: "empty", text: grepping ? "No files contain this text." : "No matching files.", color: "muted", padding: 12 });
       if (!filtering && !pending.size && !loaded) children.push({ type: "label", key: "empty", text: "This folder is empty.", color: "muted", padding: 12 });
-      children.push({ type: "tree", key: "files", rowHeight: 21, rowGap: 0, rows: rows.map((row) => pending.has(row.key) ? { ...row, badge: "…" } : row), selectAction: "open", expandAction: "expand", grow: true });
+      children.push({ type: "tree", key: "files", rowHeight: 28, rowGap: 2, indent: 18, iconSize: 17,
+        collapsedIconSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m9 5 7 7-7 7"/></svg>',
+        expandedIconSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m5 9 7 7 7-7"/></svg>', rows: rows.map(row => {
+          const change = gitFiles.find(file => file.path === row.key);
+          const below = row.expandable && gitFiles.some(file => file.path.startsWith(row.key + "/"));
+          return { ...row, badge: pending.has(row.key) ? "…" : change ? ({ modified: "M", added: "A", deleted: "D", renamed: "R", untracked: "U", conflicted: "!", copied: "C", typechange: "T" } as Record<string, string>)[change.kind] || "M" : below ? "•" : "" };
+        }), selectAction: "open", expandAction: "expand", style: { fontWeight: 400 }, grow: true });
     }
     return { type: "column", key: "explorer-root", gap: 4, padding: 8, grow: true, children };
   },
@@ -140,14 +200,14 @@ const mod: AppModule = {
       }
       if (ev.action === "collapseAll") { expanded.clear(); query = ""; results = null; searchVersion++; searching = false; }
       else if (ev.action === "reveal") { await reveal(ctx); }
-      else if (ev.action === "refresh") { const saved = await mod.snapshot!(ctx); await ctx.modules.call("files", "search", { workspaceId, query: "", refresh: true }); if (version !== epoch) return; await reset(ctx, saved); }
+      else if (ev.action === "refresh") { await ctx.modules.call("files", "search", { workspaceId, query: "", refresh: true }); if (version !== epoch) return; await refreshTree(ctx); }
       else if (["open", "expand"].includes(ev.action) && ev.rowKey) {
         const entry = (query.trim() ? filteredEntries() : [...dirs.values()].flat()).find((item: Entry) => item.relativePath === ev.rowKey);
         if (!entry) return;
         if (entry.kind === "dir") {
           if (query.trim()) { if (filterCollapsed.has(entry.relativePath)) filterCollapsed.delete(entry.relativePath); else filterCollapsed.add(entry.relativePath); }
           else if (expanded.has(entry.relativePath)) expanded.delete(entry.relativePath);
-          else { expanded.add(entry.relativePath); await loadDir(ctx, entry.relativePath); }
+          else { expanded.add(entry.relativePath); await loadDir(ctx, entry.relativePath); await compactChildren(ctx, entry.relativePath, version); }
         } else if (ev.action === "open") await ctx.modules.call("workspace", "view.patch", { workspaceId: ws.id, patch: { previewPath: entry.relativePath } });
       }
       if (version !== epoch) return;

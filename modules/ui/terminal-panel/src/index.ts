@@ -13,6 +13,31 @@ let error: string | null = null;
 let terminals = new Map<string, any>();
 let loading = new Map<string, Promise<void>>();
 let busy = new Set<string>();
+let activityTimer: ReturnType<typeof setInterval> | null = null;
+let activityBusy = false;
+let cursors = new Map<string, number>();
+let unread = new Set<string>();
+async function checkActivity(ctx: ModuleContext) {
+  if (!ws || activityBusy) return;
+  const version = epoch, workspaceId = ws.id;
+  activityBusy = true;
+  try {
+    const all = blocks(layout), keys = all.flatMap(block => block.keys);
+    const activity = await ctx.modules.call("terminals", "activity", { workspaceId, keys });
+    if (version !== epoch) return;
+    const active = new Set(blocks(layout).map(block => block.active));
+    let changed = false;
+    for (const item of activity) {
+      if (typeof item.cursor !== "number") continue;
+      const previous = cursors.get(item.key);
+      cursors.set(item.key, item.cursor);
+      if (!active.has(item.key) && previous !== undefined && item.cursor > previous && !unread.has(item.key)) { unread.add(item.key); changed = true; }
+      if (active.has(item.key) && unread.delete(item.key)) changed = true;
+    }
+    if (changed) ctx.ui.invalidate();
+  } catch { /* A transient connection failure must not disrupt the terminal. */ }
+  finally { activityBusy = false; }
+}
 const uid = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 async function attach(ctx: ModuleContext, block: Block, restart = false) {
   if (!ws) return;
@@ -37,7 +62,7 @@ async function save(ctx: ModuleContext) {
   } } });
 }
 function reset(saved?: any) {
-  epoch++; terminals = new Map(); loading = new Map(); busy = new Set(); error = null;
+  epoch++; cursors = new Map(); unread = new Set(); terminals = new Map(); loading = new Map(); busy = new Set(); error = null;
   layout = restore(saved || ws?.view?.ui?.terminalLayout, ws?.view?.ui?.terminalTabs);
 }
 async function attachVisible(ctx: ModuleContext) { await Promise.all(blocks(layout).map(block => attach(ctx, block))); }
@@ -51,8 +76,8 @@ function renderNode(node: Node): UiNode {
   return { type: "column", key: node.id, gap: 3, padding: 4, grow: true, children: [
     { type: "row", key: "tabs", gap: 3, wrap: true, children: [
       ...node.keys.map((key): UiNode => ({ type: "row", key, gap: 0, style: terminalTabStyle(node.active === key), children: [
-        { type: "button", key: "select", iconSvg: sidebarIcons.terminal, text: `Terminal ${all.flatMap(b => b.keys).indexOf(key) + 1}`,
-          action: `select:${key}`, small: true, variant: "ghost", style: tabButtonStyle(node.active === key, true), disabled: locked },
+        { type: "button", key: "select", iconSvg: sidebarIcons.terminal, text: `Terminal ${all.flatMap(b => b.keys).indexOf(key) + 1}${unread.has(key) ? " •" : ""}`,
+          action: `select:${key}`, middleClickAction: `close:${key}`, small: true, variant: "ghost", style: tabButtonStyle(node.active === key, true), disabled: locked },
         { type: "button", key: "close", text: "", iconSvg: uiIcons["x"], action: `close:${key}`, small: true, variant: "ghost",
           style: tabButtonStyle(node.active === key, true), tooltip: "Close terminal", disabled: locked },
       ] })),
@@ -71,14 +96,22 @@ const mod: AppModule = {
   async activate(ctx, prev) {
     ws = ctx.state.get("workspace.selected") || null;
     reset(prev && prev.workspaceId === ws?.id ? prev.layout : undefined);
+    if (prev?.workspaceId === ws?.id) {
+      cursors = new Map(prev.cursors || []);
+      unread = new Set(prev.unread || []);
+    }
     ctx.state.watch("workspace.selected", (value: any) => {
       const changed = ws?.id !== value?.id; ws = value;
       if (changed) { reset(); void attachVisible(ctx); ctx.ui.invalidate(); }
     });
     ctx.events.on("terminals.changed", () => ctx.ui.invalidate());
     await attachVisible(ctx);
+    void checkActivity(ctx);
+    activityTimer = setInterval(() => { void checkActivity(ctx); }, 1500);
+    (activityTimer as any).unref?.();
   },
-  snapshot: () => ({ workspaceId: ws?.id || null, layout }),
+  async deactivate() { if (activityTimer) clearInterval(activityTimer); activityTimer = null; },
+  snapshot: () => ({ workspaceId: ws?.id || null, layout, cursors: [...cursors], unread: [...unread] }),
   canSwap: async () => ({ ok: !busy.size && !loading.size, reason: "Terminal operation in progress" }),
   render(): UiNode { return { type: "column", key: "terminal-root", grow: true, children: [
     ...(error ? [{ type: "status", key: "err", text: error, level: "error" } as UiNode] : []), renderNode(layout),
@@ -92,6 +125,7 @@ const mod: AppModule = {
       ctx.ui.invalidate(); return;
     }
     const [name, target] = ev.action.split(":");
+    if (name === "select") unread.delete(target);
     const block = name === "select" || name === "close" ? blocks(layout).find(b => b.keys.includes(target)) : blocks(layout).find(b => b.id === target) || (!target ? blocks(layout)[0] : undefined);
     if (!block || busy.has(block.id) || loading.has(block.active)) return;
     const version = epoch, workspaceId = ws.id;

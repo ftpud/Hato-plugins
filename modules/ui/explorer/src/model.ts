@@ -32,16 +32,25 @@ export function directories(entries: Entry[]): Map<string, Entry[]> {
 export function treeRows(dirs: Map<string, Entry[]>, expanded: Set<string>, selected: string | null, filtering = false, filterCollapsed = new Set<string>()): TreeRow[] {
   const rows: TreeRow[] = [];
   const visit = (parent: string, depth: number) => {
-    for (const entry of [...(dirs.get(parent) || [])].sort((a, b) => Number(b.kind === "dir") - Number(a.kind === "dir") || a.name.localeCompare(b.name))) {
+    for (let entry of [...(dirs.get(parent) || [])].sort((a, b) => Number(b.kind === "dir") - Number(a.kind === "dir") || a.name.localeCompare(b.name))) {
       if (rows.length >= 5000) return;
+      let label = entry.name;
+      const seen = new Set<string>();
+      while (entry.kind === "dir" && !seen.has(entry.relativePath)) {
+        seen.add(entry.relativePath);
+        const children = dirs.get(entry.relativePath);
+        if (children?.length !== 1 || children[0].kind !== "dir") break;
+        entry = children[0];
+        label += "/" + entry.name;
+      }
       const folder = entry.kind === "dir";
       const open = folder && (filtering ? !filterCollapsed.has(entry.relativePath) : expanded.has(entry.relativePath));
       const kind = fileIcon(entry) || "file";
       const drawing = folder ? open ? fileIcons.folderOpen : fileIcons.folder : fileIcons[kind as keyof typeof fileIcons] || fileIcons.file;
       // Soften only the explorer's icons; keep the shared tab drawings unchanged.
-      const softDrawing = drawing.replace('stroke-width="1.7"', 'stroke-width="1.5" stroke-opacity="0.7"');
+      const softDrawing = drawing.replace('stroke-width="1.7"', 'stroke-width="1.3" stroke-opacity="0.7"');
       const iconColor: TreeRow["iconColor"] = kind === "config" ? "warning" : ["text", "code"].includes(kind) ? "accent" : "muted";
-      rows.push({ iconSvg: softDrawing, iconColor, key: entry.relativePath, label: entry.name, depth, expandable: folder, expanded: open, selected: entry.relativePath === selected, icon: fileIcon(entry) });
+      rows.push({ iconSvg: softDrawing, iconColor, key: entry.relativePath, label, depth, expandable: folder, expanded: open, selected: entry.relativePath === selected, icon: fileIcon(entry) });
       if (open) visit(entry.relativePath, depth + 1);
     }
   };

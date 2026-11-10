@@ -147,7 +147,7 @@ function panelHeader(id: string, mode: "dock" | "float" | "window"): UiNode {
 function panelBody(id: string, mode: "dock" | "float" | "window"): UiNode {
   const collapsed = mode === "dock" && !!layout.collapsed[id];
   return { type: "column", key: "panel-" + id, grow: true, bg: "panel", ...(appearanceTheme === "anime" ? { style: { radius: 16, borderWidth: 1, borderColor: "border", shadow: "lg" as const, padding: 6 } } : {}), children: [
-    ...(mode === "dock" || layout.showPanelControls ? [panelHeader(id, mode)] : []),
+    ...((mode === "dock" && (layout.showPanelTitles || collapsed)) || (mode !== "dock" && layout.showPanelControls) ? [panelHeader(id, mode)] : []),
     ...(collapsed ? [] : [{ type: "slot", key: "slot", module: PANELS[id].slot, grow: true } as UiNode]),
   ] };
 }
@@ -305,6 +305,7 @@ function layoutMenu(): UiNode {
     { type: "divider", key: "d1" },
     { type: "label", key: "h2", text: "Panels", weight: "bold", size: "sm" },
     { type: "toggle", key: "collapsed-tray", label: "Show collapsed panels tray", checked: layout.showCollapsedTray, action: "toggleCollapsedTray", tooltip: "Restore buttons for collapsed panels. Sidebar buttons also restore them." },
+    { type: "toggle", key: "panel-titles", label: "Show panel titles", checked: layout.showPanelTitles, action: "togglePanelTitles" },
     { type: "toggle", key: "panel-controls", label: "Show panel control buttons", checked: layout.showPanelControls, action: "togglePanelControls", tooltip: "Show collapse, float, detach, hide and dock buttons in panel headers. Panels remain accessible from Layout and the sidebar." },
     ...panelRows,
     { type: "divider", key: "d2" },
@@ -496,6 +497,7 @@ const mod: AppModule = {
     }, { key: "workspace-chrome", title: "Bars & panel controls", group: "Workspace", layout: "table", fields: [
       { key: "showLeftSidebar", label: "Left sidebar", type: "toggle", value: layout.showLeftSidebar },
       { key: "showRightSidebar", label: "Right sidebar", type: "toggle", value: layout.showRightSidebar },
+      { key: "showPanelTitles", label: "Panel titles", type: "toggle", value: layout.showPanelTitles },
       { key: "showPanelControls", label: "Panel header buttons", type: "toggle", value: layout.showPanelControls },
       { key: "showCollapsedTray", label: "Collapsed panels tray", type: "toggle", value: layout.showCollapsedTray,
         description: "Show restore buttons for collapsed panels under the workspace. Sidebar buttons restore collapsed panels either way." },
@@ -657,6 +659,7 @@ const mod: AppModule = {
         break;
       }
       case "toggleCollapsedTray": set(ctx, { ...layout, showCollapsedTray: typeof v === "boolean" ? v : !layout.showCollapsedTray }); break;
+      case "togglePanelTitles": set(ctx, { ...layout, showPanelTitles: typeof v === "boolean" ? v : !layout.showPanelTitles }); break;
       case "togglePanelControls": set(ctx, { ...layout, showPanelControls: typeof v === "boolean" ? v : !layout.showPanelControls }); break;
       case "openSettings": await ctx.modules.call("settings", "open"); break;
       case "openPlugins": await ctx.modules.call("settings", "open", { category: "plugins" }); break;

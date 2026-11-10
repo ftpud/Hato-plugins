@@ -66,6 +66,7 @@ function scheduleSaves(ctx: ModuleContext, now = false) {
 }
 
 let tabs: string[] = [];
+let tabMenu: string | null = null;
 let generation = 0;
 function restoreTabs() {
   const saved = ws?.view?.ui?.viewerTabs;
@@ -207,7 +208,7 @@ const mod: AppModule = {
     const title = current ? (diff ? `Changes in ${current.relativePath}` : current.relativePath) : ws?.view?.previewPath || "No file selected";
     const kids: UiNode[] = [
       { type: "row", key: "tabs", gap: 3, wrap: true, children: tabs.map((path): UiNode => ({ type: "row", key: path, gap: 0, style: fileTabStyle(ws?.view?.previewPath === path), children: [
-        { type: "button", key: "select", iconSvg: fileIcons.file, text: tabLabel(path), tooltip: diffTabPath(path) ? `Changes in ${diffTabPath(path)}` : path, action: `select:${path}`, small: true, variant: "ghost", style: tabButtonStyle(ws?.view?.previewPath === path) },
+        { type: "button", key: "select", iconSvg: fileIcons.file, text: tabLabel(path), tooltip: diffTabPath(path) ? `Changes in ${diffTabPath(path)}` : path, action: `select:${path}`, middleClickAction: `close:${path}`, contextAction: `tabMenu:${path}`, small: true, variant: "ghost", style: tabButtonStyle(ws?.view?.previewPath === path) },
         { type: "button", key: "close", text: "", iconSvg: uiIcons["x"], tooltip: `Close ${path}`, action: `close:${path}`, small: true, variant: "ghost", style: tabButtonStyle(ws?.view?.previewPath === path) },
       ] })) },
 
@@ -241,7 +242,11 @@ const mod: AppModule = {
         { type: "label", key: "lang", text: diff ? (current.truncated ? "diff (truncated)" : "") : current && showMetadata ? `${current.language} · ${current.size} B${current.truncated ? " (truncated)" : ""}` : "", size: "xs", color: "muted" },
       ] }
     );
-    return { type: "column", key: "viewer-root", gap: 3, padding: 4, grow: true, children: kids };
+    if (tabMenu && tabs.includes(tabMenu)) kids.push({ type: "popover", key: "tab-menu", top: 32, left: 4, maxHeight: 90, style: { background: "panel", padding: 6, radius: 6, borderWidth: 1, borderColor: "border" }, closeAction: "dismissTabMenu", children: [
+      { type: "button", key: "right", text: "Close all to the right", action: "closeRight", variant: "ghost" },
+      { type: "button", key: "all", text: "Close all", action: "closeAll", variant: "ghost" },
+    ] });
+    return { type: "column", key: "viewer-root", style: { position: "relative" }, gap: 3, padding: 4, grow: true, children: kids };
   },
   async onEvent(ctx, ev) {
     if (!ws) return;
@@ -277,15 +282,29 @@ const mod: AppModule = {
         const path = resolveWorkspaceLink(String(ev.value || ""), ws.rootAbsolutePath, base);
         if (!path) throw new Error(`Cannot open link outside the workspace: ${ev.value}`);
         await ctx.modules.call("workspace", "view.patch", { workspaceId: ws.id, patch: { previewPath: path } });
+      } else if (ev.action === "dismissTabMenu") { tabMenu = null;
+      } else if (ev.action.startsWith("tabMenu:")) { tabMenu = ev.action.slice(8);
+      } else if (ev.action === "closeRight" || ev.action === "closeAll") {
+        const index = tabs.indexOf(tabMenu || "");
+        if (index < 0) return;
+        const closing = ev.action === "closeAll" ? [...tabs] : tabs.slice(index + 1);
+        tabMenu = null;
+        for (const path of closing) await mod.onEvent!(ctx, { action: `close:${path}`, key: "menu", inputs: {} });
       } else if (ev.action.startsWith("select:")) {
         const path = ev.action.slice(7);
         if (tabs.includes(path)) await ctx.modules.call("workspace", "view.patch", { workspaceId: ws.id, patch: { previewPath: path } });
       } else if (ev.action.startsWith("close:")) {
-        const path = ev.action.slice(6), index = tabs.indexOf(path);
+        const path = ev.action.slice(6), workspaceId = ws.id;
+        let index = tabs.indexOf(path);
         if (index < 0) return;
+        tabMenu = null;
         // Closing a tab commits its edits even when autosave is off.
         const pending = bufferFor(path);
-        if (pending?.state === "dirty") void save(ctx, pending);
+        if (pending?.state === "dirty") await save(ctx, pending);
+        if (ws?.id !== workspaceId) return;
+        index = tabs.indexOf(path);
+        if (index < 0) return;
+        if (unsaved(pending)) throw new Error(`Cannot close ${path}: save or resolve its unsaved changes first.`);
         tabs.splice(index, 1);
         // Move selection before persisting tabs so the watcher cannot reopen the closed file.
         const previewPath = ws.view?.previewPath === path ? tabs[Math.min(index, tabs.length - 1)] || null : ws.view?.previewPath;

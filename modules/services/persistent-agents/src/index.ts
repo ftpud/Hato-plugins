@@ -205,7 +205,7 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     },1500);
     // The AI module owns this request namespace; native event enforcement prevents spoofing it.
     // Keep this UI adapter allowlist narrow instead of exposing arbitrary module calls.
-    const allowed=new Set(["view","send","cancel","stop","reconnect","setModel","setAutopilot","reviewPermission","clear"]);
+    const allowed=new Set(["create","catalog","list","view","send","cancel","stop","reconnect","setModel","setAutopilot","reviewPermission","clear"]);
     ctx.events.on("mcp-panel.request",async(request:any)=>{
       if(typeof request?.requestId!=="string"||!["listMcps","saveMcp","removeMcp","probeMcp","signInMcp","signOutMcp","cancelSignInMcp"].includes(request.method))return;
       try{const value=await mod.methods![request.method](ctx,request.args||{},{caller:"mcp-panel"});ctx.events.emit("persistent-agents.mcpResponse",{requestId:request.requestId,value});}

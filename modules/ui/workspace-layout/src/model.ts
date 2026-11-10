@@ -65,6 +65,7 @@ export interface Layout {
   v: 1;
   settingsButton?: true;
   showPanelControls: boolean;
+  showPanelTitles: boolean;
   /** Show the "Collapsed" tray of restore buttons under the panels. */
   showCollapsedTray: boolean;
   showLeftSidebar: boolean;
@@ -106,6 +107,7 @@ function baseLayout(): Layout {
     v: 1,
     settingsButton: true,
     showPanelControls: true,
+    showPanelTitles: true,
     showCollapsedTray: true,
     showLeftSidebar: true,
     showRightSidebar: true,
@@ -270,6 +272,7 @@ export function repair(raw: any): Layout {
   if (!raw.settingsButton && !l.bars.top.items.includes("settings") && !l.bars.bottom.items.includes("settings")) l.bars.top.items.push("settings");
   l.bars.top.visible = true;
   l.settingsButton = true;
+  l.showPanelTitles = raw.showPanelTitles !== false;
   l.showPanelControls = raw.showPanelControls !== false;
   l.showCollapsedTray = raw.showCollapsedTray !== false;
   l.showLeftSidebar = raw.showLeftSidebar !== false;

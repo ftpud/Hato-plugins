@@ -104,6 +104,15 @@ const mod: AppModule = {
       ctx.events.emit("terminals.changed", { workspaceId: a.workspaceId });
       return null;
     },
+    async activity(ctx, a) {
+      const keys = [...new Set<string>((Array.isArray(a.keys) ? a.keys : []).filter((key: unknown) => typeof key === "string"))].slice(0, 128);
+      return Promise.all(keys.map(async key => {
+        const handle = await ctx.host.resources.lookup(keyFor(a.workspaceId, key));
+        if (!handle) return { key, cursor: null };
+        try { const output = await ctx.host.pty.read(handle, { limitBytes: 1 }); return { key, cursor: output.endCursor }; }
+        catch { return { key, cursor: null }; }
+      }));
+    },
     async lookup(ctx, a) { return ctx.host.resources.lookup(keyFor(a.workspaceId, a.key)); },
     async info(ctx, a) {
       const h = await ctx.host.resources.lookup(keyFor(a.workspaceId, a.key));

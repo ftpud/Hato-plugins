@@ -31,5 +31,8 @@
   "author": "Hato contributors",
   "version": "0.1.2",
   "pluginPackage": "foundation",
-  "pluginType": "System"
+  "pluginType": "System",
+  "calls": [
+    "git"
+  ]
 }
