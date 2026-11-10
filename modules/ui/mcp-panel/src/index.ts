@@ -1,3 +1,4 @@
+import { filterInput } from "@hato/sdk/filter-style";
 // MCP servers panel: browse, add, edit, enable and remove the MCP servers background agents can
 // use. Local servers run a command on the agent's machine; remote servers connect over HTTPS with
 // no auth, a bearer token, or OAuth sign-in in the browser (handled by the mcp-auth service).
@@ -305,7 +306,7 @@ const mod: AppModule = { id: "mcp-panel", moduleApiVersion: 1,
         btn("add", "Add", "add", { icon: uiIcons.plus, variant: "primary", tooltip: "Add MCP server" }),
       ] },
     ];
-    if (mine.length > 3 || query) children.push({ type: "textInput", key: "filter", prefixSvg: uiIcons.search, placeholder: "Filter servers", value: filter, changeAction: "filter" });
+    if (mine.length > 3 || query) children.push({ type: "textInput", key: "filter", ...filterInput, prefixSvg: uiIcons.search, placeholder: "Filter servers", value: filter, changeAction: "filter" });
     if (error && !draft) children.push({ type: "status", key: "error", level: "error", text: error });
     if (notice) children.push({ type: "row", key: "notice", gap: 6, align: "center", children: [{ type: "status", key: "s", level: "success", text: notice, grow: true }, btn("x", "", "dismiss", { icon: uiIcons.x, variant: "ghost", disabled: false })] });
     const visibleMine = mine.filter(match);

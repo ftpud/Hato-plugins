@@ -1,3 +1,4 @@
+import { filterInput } from "@hato/sdk/filter-style";
 import { marketNodes, marketTab, refreshMarket, installPackage, updateAllPackages, managePackage, pluginBrowserAction, pluginBrowserSnapshot, restorePluginBrowser } from './marketplace';
 import type { AppModule, ModuleContext, PluginInfo, SettingsExport, SettingsSection, SettingField, UiNode } from "@hato/sdk/types";
 import { parseOrder, SPACER_PREFIX } from "@hato/sdk/settings-order";
@@ -110,7 +111,7 @@ const mod: AppModule = {
     const all = categories(ctx), needle = query.trim().toLowerCase();
     const list = all.filter(c => !needle || [c.title, c.section?.description, ...(c.section?.fields || []).flatMap(f => [f.label, f.description])].join(" ").toLowerCase().includes(needle));
     if (!list.length) return { type: "modal", key: "settings-modal", title: "Settings", width: 1080, closeAction: "close", style: { padding: 20, gap: 16, radius: 12 }, children: [
-      { type: "textInput", key: "settings-search", value: query, changeAction: "search", placeholder: "Search settings…" },
+      { type: "textInput", key: "settings-search", ...filterInput, value: query, changeAction: "search", placeholder: "Search settings…" },
       { type: "label", key: "none", text: "No matching settings.", color: "muted" },
     ] };
     // Default to the first module-contributed category (e.g. Appearance), else Plugins.
@@ -145,7 +146,7 @@ const mod: AppModule = {
     const groups = ["Appearance", "Workspace", "Editor & Git", "AI & tools", "Tools & runtime", "Advanced"];
     const navigation: UiNode[] = [
       { type: "column", key: "navigation-search", style: { paddingX: 6, paddingY: 8 }, children: [
-        { type: "textInput", key: "settings-search", value: query, changeAction: "search", placeholder: "Search settings…" },
+        { type: "textInput", key: "settings-search", ...filterInput, value: query, changeAction: "search", placeholder: "Search settings…" },
       ] },
     ];
     for (const group of [...groups, ...new Set(list.map(categoryGroup).filter(g => !groups.includes(g)))]) {

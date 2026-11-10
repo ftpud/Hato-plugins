@@ -1,3 +1,4 @@
+import { filterInput } from "@hato/sdk/filter-style";
 // ai: ACP chat panel. Layout and control handlers only; conversation state lives in ai-sessions,
 // protocol in acp, and approval authority in the kernel's native chrome.
 import { CHAT_MESSAGE_LIMIT, CHAT_HISTORY_LIMIT, messageWindow } from "@hato/sdk/chat-window";
@@ -305,7 +306,7 @@ const mod: AppModule = {
           ] },
           { type: "button", key: "new-chat", text: view.profiles.length ? "New chat" : "Browse providers", iconSvg: uiIcons.plus, action: "newChat", style: chatStyle.primary, tooltip: "Start a chat with the current chat’s settings" },
         ] },
-        { type: "textInput", key: "session-search", value: historyQuery, placeholder: "Search sessions or providers…", changeAction: "searchSessions" },
+        { type: "textInput", key: "session-search", ...filterInput, value: historyQuery, placeholder: "Search sessions or providers…", changeAction: "searchSessions" },
         { type: "column", key: "session-list", scroll: true, maxHeight: 440, gap: 6, children: sessions.length ? sessions.map((c: any): UiNode => {
           const provider = view.profiles.find((p: any) => p.id === c.acpProfileId)?.name || "Agent";
           const selected = c.id === view.activeId;
@@ -425,7 +426,7 @@ const mod: AppModule = {
         const filtered = model.options.filter((o) => `${o.label} ${modelDetails(o.value)?.description || ""}`.toLowerCase().includes(modelQuery.toLowerCase()));
         kids.push({ type: "popover", key: "model-picker", closeAction: "toggleModels", style: { ...chatStyle.picker, background: "background" }, children: [
           { type: "row", key: "search-row", gap: 8, padding: 10, children: [
-            { type: "textInput", key: "model-search", value: modelQuery, placeholder: "Search models", changeAction: "searchModels", grow: true },
+            { type: "textInput", key: "model-search", ...filterInput, value: modelQuery, placeholder: "Search models", changeAction: "searchModels", grow: true },
             iconButton("close", "x", "toggleModels", "Close models"),
           ] },
           { type: "divider", key: "divider" },

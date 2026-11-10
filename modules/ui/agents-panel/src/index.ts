@@ -1,3 +1,4 @@
+import { filterInput } from "@hato/sdk/filter-style";
 import type {AppModule,ModuleContext,UiNode} from "@hato/sdk/types";
 import type {AgentSession} from "@hato/sdk/persistent-agents";
 import {uiIcons} from "@hato/sdk/ui-icons";
@@ -98,7 +99,7 @@ const mod:AppModule={id:"agents-panel",moduleApiVersion:1,
  snapshot:()=>({workspaceId:ws?.id,selected,filter,editor,showWorkflow}),
  render():UiNode {
   const children:UiNode[]=[{type:"row",key:"header",gap:3,children:[
-    {type:"textInput",key:"agent-filter",prefixSvg:uiIcons.search,placeholder:"Filter agents",value:filter,changeAction:"filter",grow:true},
+    {type:"textInput",key:"agent-filter",...filterInput,prefixSvg:uiIcons.search,placeholder:"Filter agents",value:filter,changeAction:"filter",grow:true},
     {type:"button",key:"workflow-toggle",text:workflowCount()?String(workflowCount()):"",iconSvg:workflowIcon,action:"toggleWorkflow",small:true,variant:showWorkflow?"primary":"ghost",
       tooltip:showWorkflow?"Showing workflow agents — click to hide them":`Show workflow agents${workflowCount()?` (${workflowCount()} hidden)`:""}`},
     {type:"button",key:"new",text:"",iconSvg:uiIcons.plus,action:"new",small:true,variant:"ghost",tooltip:"Create agent"},

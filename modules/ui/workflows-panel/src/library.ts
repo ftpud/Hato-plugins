@@ -1,3 +1,4 @@
+import { filterInput } from "@hato/sdk/filter-style";
 // Workflow library: one card per workflow, like HatoPad's run panel. A collapsed card shows its
 // name, live status and quick-start buttons (plus a narrow live tree while a run is active); an
 // expanded card shows the run selector and controls, the compact block tree, pauses, run errors
@@ -14,7 +15,7 @@ export const definitionOf = (wf: string): WorkflowDefinition | undefined => (S.s
 function toolbar(): UiNode[] {
   return [
     { type: "row", key: "toolbar", gap: 4, children: [
-      { type: "textInput", key: "wf-filter", prefixSvg: uiIcons.search, placeholder: "Filter workflows", value: S.filter, changeAction: "filter", grow: true } as UiNode,
+      { type: "textInput", key: "wf-filter", ...filterInput, prefixSvg: uiIcons.search, placeholder: "Filter workflows", value: S.filter, changeAction: "filter", grow: true } as UiNode,
       { type: "select", key: "template", value: S.newTemplate, action: "template", width: 150,
         options: (S.catalog?.templates || [{ id: "blank", name: "Blank workflow" }]).map((t: any) => ({ value: t.id, label: t.name })) } as UiNode,
       icon("new", uiIcons.plus, "create", "Create a workflow from the selected template", { disabled: !S.ws || S.busy }),

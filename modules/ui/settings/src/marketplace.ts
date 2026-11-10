@@ -1,3 +1,4 @@
+import { filterInput } from "@hato/sdk/filter-style";
 import type { ModuleContext, PluginInfo, TreeRow, UiNode } from '@hato/sdk/types';
 import { sha256HexAsync } from '@hato/sdk/sha256';
 import bundled from '../../../../plugins.catalogue.json';
@@ -195,7 +196,7 @@ export function marketNodes(plugins: PluginInfo[], busy: boolean, renderPlugin: 
   } else details.push({type:'label',key:'empty',text:needle?'No matching plugins.':tab==='marketplace'?'All available plugins are already installed.':'No plugins installed.',color:'muted',wrap:true});
   return [{ type: 'tabs', key: 'plugin-tabs', height: 474, style: { gap: 12 }, tabs: [{ key: 'marketplace', label: 'Marketplace' }, { key: 'installed', label: 'Installed' }, { key: 'builtin', label: 'System' }], active: tab, action: 'plugin:marketTab', children: [{ type: 'column', key: tab, height: 430, gap: 0, style: { borderWidth: 1, borderColor: 'border', radius: 8 }, children: [
     { type: 'row', key: 'toolbar', gap: 8, padding: 12, style: { borderBottom: 1, borderColor: 'border' }, children: [
-      { type: 'textInput', key: 'plugin-search', value: search, placeholder: 'Search plugins…', changeAction: 'plugin:marketSearch', grow: true },
+      { type: 'textInput', key: 'plugin-search', ...filterInput, value: search, placeholder: 'Search plugins…', changeAction: 'plugin:marketSearch', grow: true },
       { type: 'button', key: 'refresh', text: 'Refresh', action: 'plugin:marketRefresh', disabled: busy, small: true },
       ...(availableUpdates(plugins).length ? [{type:'button',key:'update-all',text:`Update all (${availableUpdates(plugins).length})`,action:'plugin:marketUpdateAll',disabled:busy,small:true,variant:'primary'} as UiNode] : []),
       ...(tab === 'installed' ? [{type:'button',key:'folder',text:'Install from folder…',action:'plugin:install',disabled:busy,small:true} as UiNode] : []),

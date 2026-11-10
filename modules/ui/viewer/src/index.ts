@@ -253,17 +253,17 @@ const mod: AppModule = {
           // A fence longer than any backtick run keeps the source literal inside the code body.
           let fence = "```";
           for (const run of block.code.matchAll(/`+/g)) if (run[0].length >= fence.length) fence = "`".repeat(run[0].length + 1);
-          content.push({ type: "column", key: `shell:${block.start}`, gap: 0,
-            style: { borderWidth: 1, borderColor: "border", radius: 6, background: "field" }, children: [
-              { type: "row", key: "header", gap: 8, align: "center", style: { background: "panel", borderBottom: 1, borderColor: "border", paddingX: 10, paddingY: 3, minHeight: 30 }, children: [
+          content.push({ type: "column", key: `shell:${block.start}`, style: { paddingY: 12 }, children: [{ type: "column", key: "shell-card", gap: 0,
+            style: { borderWidth: 1, borderColor: "border", radius: 8, background: "field" }, children: [
+              { type: "row", key: "header", gap: 8, align: "center", style: { background: "panel", borderBottom: 1, borderColor: "border", paddingX: 14, paddingY: 6, minHeight: 36 }, children: [
                 { type: "label", key: "language", text: block.language.toUpperCase(), size: "xs", color: "muted", grow: true },
                 { type: "button", key: "run", text: "", action: "runShellBlock", value: block.start, variant: "ghost", small: true,
                   iconSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="m7 4 14 8-14 8Z"/></svg>',
                   iconSize: 16, style: { color: "success", background: "surface", radius: 7, paddingX: 7, paddingY: 4 },
                   tooltip: `Run in block terminal · shell block ${index + 1}` },
               ] },
-              { type: "markdown", key: "code", text: fence + "\n" + block.code + (block.code.endsWith("\n") ? "" : "\n") + fence, inline: true },
-            ] });
+              { type: "markdown", key: "code", codeBlockStyle: { borderWidth: 0, background: "transparent", paddingX: 16, paddingY: 14 }, text: fence + "\n" + block.code + (block.code.endsWith("\n") ? "" : "\n") + fence, inline: true },
+            ] }] });
           offset = block.end;
         }
         if (offset < markdownText.length) content.push({ type: "markdown", key: `md:${offset}`, text: markdownText.slice(offset), inline: true, linkAction: "openLink" });

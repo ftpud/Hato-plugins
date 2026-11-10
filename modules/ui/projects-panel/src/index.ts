@@ -1,3 +1,4 @@
+import { filterInput } from "@hato/sdk/filter-style";
 // projects-panel: left tree of projects and their Git task worktrees.
 // Clicking a row selects a workspace; clicking the chevron expands/collapses (separate events).
 import type { AppModule, ModuleContext, TreeRow, UiNode } from "@hato/sdk/types";
@@ -138,7 +139,7 @@ const mod: AppModule = {
     const visibleRows = rows();
     const children: UiNode[] = [
       { type: "row", key: "hdr", gap: 3, children: [
-        { type: "textInput", key: "project-filter", prefixSvg: uiIcons.search, placeholder: "Filter projects", value: filter, changeAction: "filter", grow: true },
+        { type: "textInput", key: "project-filter", ...filterInput, prefixSvg: uiIcons.search, placeholder: "Filter projects", value: filter, changeAction: "filter", grow: true },
         { type: "button", key: "add-project", text: "", iconSvg: uiIcons["plus"], action: "showAdd", small: true, variant: "ghost", tooltip: "Add project", disabled: !!busy },
         { type: "button", key: "refresh", text: "", iconSvg: uiIcons["refresh"], action: "refresh", small: true, variant: "ghost", tooltip: "Refresh projects", disabled: !!busy },
       ] },
