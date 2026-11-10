@@ -50,17 +50,23 @@ function branchRow(branch: GitBranch): UiNode {
   const expanded = actionsFor === branch.ref;
   const local = branch.ref.startsWith("refs/heads/");
   const locked = !!branch.worktree && !branch.current;
-  const action = (key: string, text: string, icon: string, disabled = false, danger = false): UiNode => button(key, text, "editBranch", {
-    value: key, iconSvg: icon, grow: true, disabled: !!busy || disabled, variant: "ghost",
-    style: { background: "panel", color: danger ? "danger" : "muted", radius: 8, paddingX: 10, paddingY: 7, minHeight: 32, justify: "start" },
+  const action = (key: string, text: string, icon: string, disabled = false, danger = false): UiNode => ({
+    type: "column", key, grow: true, children: [{ type: "row", key: "content", gap: 6, padding: 6,
+      style: { background: "panel", radius: 7, minHeight: 32 }, children: [
+        button("icon", "", disabled ? "noop" : "editBranch", { value: key, iconSvg: icon, width: 22, variant: "ghost", disabled: !!busy || disabled, style: { color: danger ? "danger" : "muted", paddingX: 0, background: "transparent" } }),
+        { type: "column", key: "label", grow: true, children: [{ type: "choice", key: "action", text, action: disabled ? "noop" : "editBranch", value: key, mark: "", selected: false,
+          style: { background: "transparent", color: danger ? "danger" : "muted", borderWidth: 0, padding: 0, radius: 0, opacity: disabled ? 0.45 : 1 } }] },
+      ] }],
   });
   const children: UiNode[] = [
     { type: "row", key: "row", gap: 8, align: "center", children: [
-      button("checkout", branch.name, "checkout", { value: branch.ref, iconSvg: uiIcons["git-branch"], variant: "ghost", grow: true,
-        style: { color: branch.current ? "primary" : "text", background: "transparent", paddingX: 8, paddingY: 8, minHeight: 38, fontWeight: 400, justify: "start" },
-        disabled: !!busy || branch.current || locked, tooltip: branch.current ? "Current branch" : locked ? "Checked out in another worktree" : `Check out ${branch.name}` }),
-      ...(branch.current ? [{ type: "label", key: "current", text: "✓", color: "primary", size: "sm" } as UiNode] : []),
-      button("actions", "⋮", "branchActions", { value: branch.ref, variant: "ghost", tooltip: `Actions for ${branch.name}`, style: { color: "muted", paddingX: 8, minHeight: 32 } }),
+      button("branch-icon", "", branch.current || locked ? "noop" : "checkout", { value: branch.ref, iconSvg: uiIcons["git-branch"], width: 22, variant: "ghost",
+        style: { color: branch.current ? "primary" : "muted", background: "transparent", paddingX: 0 } }),
+      { type: "column", key: "branch-label", grow: true, children: [{ type: "choice", key: "checkout", text: branch.name,
+        action: branch.current || locked ? "noop" : "checkout", value: branch.ref, selected: branch.current, mark: "✓",
+        style: { background: "transparent", borderWidth: 0, paddingX: 0, paddingY: 4, minHeight: 30, radius: 0 },
+        tooltip: branch.current ? "Current branch" : locked ? "Checked out in another worktree" : `Check out ${branch.name}` }] },
+      button("actions", "⋮", "branchActions", { value: branch.ref, width: 22, variant: "ghost", tooltip: `Actions for ${branch.name}`, style: { color: "muted", paddingX: 0, minHeight: 30 } }),
     ] },
   ];
   if (branch.worktree && !branch.current) children.push({ type: "label", key: "worktree", text: "In another worktree", color: "muted", size: "xs", tooltip: branch.worktree, padding: 6 });
@@ -82,7 +88,7 @@ function branchRow(branch: GitBranch): UiNode {
       children.push({ type: "column", key: "edit", gap: 8, padding: 8, children: fields });
     }
   }
-  return { type: "column", key: branch.ref, gap: 2, padding: 4, style: { radius: 10, background: expanded ? "surface" : branch.current ? "selection" : "transparent" }, children };
+  return { type: "column", key: branch.ref, gap: 2, padding: 6, style: { radius: 8, background: expanded ? "surface" : branch.current ? "selection" : "transparent" }, children };
 }
 
 const mod: AppModule = {
@@ -126,7 +132,7 @@ const mod: AppModule = {
     ];
     if (error) children.push({ type: "status", key: "error", text: error, level: "error" });
     if (busy || loading) children.push({ type: "progress", key: "loading", indeterminate: true, label: busy || "Refreshing branches…" });
-    children.push({ type: "scroll", key: "branches", height: Math.min(360, Math.max(48, filtered.length * 48 + (actionsFor ? edit ? 240 : 100 : 0))), children: filtered.map(branchRow) });
+    children.push({ type: "scroll", key: "branches", height: Math.min(360, Math.max(48, filtered.length * 42 + (actionsFor ? edit ? 240 : 100 : 0))), children: filtered.map(branchRow) });
     if (!filtered.length) children.push({ type: "label", key: "empty", text: query ? "No matching branches." : tab === "remote" ? "No remote-tracking branches. Fetch using Git to update this list." : "No local branches.", color: "muted", size: "sm", wrap: true });
     if (creating) children.push({ type: "column", key: "create-form", gap: 5, children: [
       { type: "label", key: "from", text: source ? `From ${source.replace(/^refs\/(heads|remotes)\//, "")}` : "From the current HEAD", size: "xs", color: "muted" },
@@ -134,11 +140,12 @@ const mod: AppModule = {
       { type: "row", key: "create-actions", gap: 6, children: [button("create", "Create & checkout", "createBranch", { variant: "primary", disabled: !!busy || !branchName.trim() }), button("cancel", "Cancel", "cancelCreate", { variant: "ghost" })] },
     ] });
     children.push({ type: "divider", key: "footer-divider" }, { type: "row", key: "footer", gap: 5, children: [
-      button("new", "Create a branch", "showCreate", { iconSvg: uiIcons.plus, variant: "ghost", grow: true }),
+      button("new-icon", "", "showCreate", { iconSvg: uiIcons.plus, width: 22, variant: "ghost", style: { color: "primary", paddingX: 0 } }),
+      { type: "column", key: "new", grow: true, children: [{ type: "choice", key: "create-label", text: "Create a branch", action: "showCreate", value: "", selected: false, mark: "", style: { background: "transparent", color: "primary", borderWidth: 0, paddingX: 0, paddingY: 6 } }] },
       { type: "label", key: "esc", text: "esc to close", color: "muted", size: "xs" },
     ] });
     return { type: "dropdown", key: "branch-menu", text: `${title}  ⌄`, iconSvg: uiIcons["git-branch"], variant: "ghost", action: "toggle", open,
-      disabled: !workspaceId || catalog?.repo === false, menuWidth: 440, maxHeight: 620, tooltip: `Current branch: ${title}${error ? `\n${error}` : ""}`,
+      disabled: !workspaceId || catalog?.repo === false, menuWidth: 360, maxHeight: 620, tooltip: `Current branch: ${title}${error ? `\n${error}` : ""}`,
       style: { background: "transparent", borderWidth: 0 }, children };
   },
   async onEvent(ctx, event) {

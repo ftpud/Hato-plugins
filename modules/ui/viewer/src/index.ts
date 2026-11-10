@@ -249,11 +249,21 @@ const mod: AppModule = {
         const content: UiNode[] = [];
         let offset = 0;
         for (const [index, block] of blocks.entries()) {
-          content.push({ type: "markdown", key: `md:${offset}`, text: markdownText.slice(offset, block.end), inline: true, linkAction: "openLink" });
-          content.push({ type: "row", key: `run:${block.start}`, gap: 8, padding: 4, children: [
-            { type: "button", key: "run", text: "Run", action: "runShellBlock", value: block.start, variant: "ghost", small: true, tooltip: `Run shell block ${index + 1} in its own workspace terminal` },
-            { type: "label", key: "language", text: block.language, size: "xs", color: "muted" },
-          ] });
+          if (offset < block.start) content.push({ type: "markdown", key: `md:${offset}`, text: markdownText.slice(offset, block.start), inline: true, linkAction: "openLink" });
+          // A fence longer than any backtick run keeps the source literal inside the code body.
+          let fence = "```";
+          for (const run of block.code.matchAll(/`+/g)) if (run[0].length >= fence.length) fence = "`".repeat(run[0].length + 1);
+          content.push({ type: "column", key: `shell:${block.start}`, gap: 0,
+            style: { borderWidth: 1, borderColor: "border", radius: 6, background: "field" }, children: [
+              { type: "row", key: "header", gap: 8, align: "center", style: { background: "panel", borderBottom: 1, borderColor: "border", paddingX: 10, paddingY: 3, minHeight: 30 }, children: [
+                { type: "label", key: "language", text: block.language.toUpperCase(), size: "xs", color: "muted", grow: true },
+                { type: "button", key: "run", text: "", action: "runShellBlock", value: block.start, variant: "ghost", small: true,
+                  iconSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="m7 4 14 8-14 8Z"/></svg>',
+                  iconSize: 16, style: { color: "success", background: "surface", radius: 7, paddingX: 7, paddingY: 4 },
+                  tooltip: `Run in block terminal · shell block ${index + 1}` },
+              ] },
+              { type: "markdown", key: "code", text: fence + "\n" + block.code + (block.code.endsWith("\n") ? "" : "\n") + fence, inline: true },
+            ] });
           offset = block.end;
         }
         if (offset < markdownText.length) content.push({ type: "markdown", key: `md:${offset}`, text: markdownText.slice(offset), inline: true, linkAction: "openLink" });
