@@ -1,0 +1,348 @@
+{
+  "schemaVersion": 1,
+  "coreVersion": "0.1.0",
+  "packages": [
+    {
+      "id": "foundation",
+      "name": "Hato essentials",
+      "type": "System",
+      "core": true,
+      "author": "Hato contributors",
+      "version": "0.1.0",
+      "coreVersion": "^0.1.0",
+      "description": "Hato essentials services and panels.",
+      "dependencies": {},
+      "modules": [
+        "persistence",
+        "workspace",
+        "projects",
+        "files",
+        "terminals",
+        "workspace-layout",
+        "settings",
+        "module-dev",
+        "explorer",
+        "viewer",
+        "terminal-panel",
+        "projects-panel",
+        "left-sidebar",
+        "sidebar"
+      ],
+      "artifacts": [
+        {
+          "id": "persistence",
+          "manifest": "packages/foundation/0.1.0/persistence/manifest.json",
+          "bundle": "packages/foundation/0.1.0/persistence/dist/persistence.mjs"
+        },
+        {
+          "id": "workspace",
+          "manifest": "packages/foundation/0.1.0/workspace/manifest.json",
+          "bundle": "packages/foundation/0.1.0/workspace/dist/workspace.mjs"
+        },
+        {
+          "id": "projects",
+          "manifest": "packages/foundation/0.1.0/projects/manifest.json",
+          "bundle": "packages/foundation/0.1.0/projects/dist/projects.mjs"
+        },
+        {
+          "id": "files",
+          "manifest": "packages/foundation/0.1.0/files/manifest.json",
+          "bundle": "packages/foundation/0.1.0/files/dist/files.mjs"
+        },
+        {
+          "id": "terminals",
+          "manifest": "packages/foundation/0.1.0/terminals/manifest.json",
+          "bundle": "packages/foundation/0.1.0/terminals/dist/terminals.mjs"
+        },
+        {
+          "id": "workspace-layout",
+          "manifest": "packages/foundation/0.1.0/workspace-layout/manifest.json",
+          "bundle": "packages/foundation/0.1.0/workspace-layout/dist/workspace-layout.mjs"
+        },
+        {
+          "id": "settings",
+          "manifest": "packages/foundation/0.1.0/settings/manifest.json",
+          "bundle": "packages/foundation/0.1.0/settings/dist/settings.mjs"
+        },
+        {
+          "id": "module-dev",
+          "manifest": "packages/foundation/0.1.0/module-dev/manifest.json",
+          "bundle": "packages/foundation/0.1.0/module-dev/dist/module-dev.mjs"
+        },
+        {
+          "id": "explorer",
+          "manifest": "packages/foundation/0.1.0/explorer/manifest.json",
+          "bundle": "packages/foundation/0.1.0/explorer/dist/explorer.mjs"
+        },
+        {
+          "id": "viewer",
+          "manifest": "packages/foundation/0.1.0/viewer/manifest.json",
+          "bundle": "packages/foundation/0.1.0/viewer/dist/viewer.mjs"
+        },
+        {
+          "id": "terminal-panel",
+          "manifest": "packages/foundation/0.1.0/terminal-panel/manifest.json",
+          "bundle": "packages/foundation/0.1.0/terminal-panel/dist/terminal-panel.mjs"
+        },
+        {
+          "id": "projects-panel",
+          "manifest": "packages/foundation/0.1.0/projects-panel/manifest.json",
+          "bundle": "packages/foundation/0.1.0/projects-panel/dist/projects-panel.mjs"
+        },
+        {
+          "id": "left-sidebar",
+          "manifest": "packages/foundation/0.1.0/left-sidebar/manifest.json",
+          "bundle": "packages/foundation/0.1.0/left-sidebar/dist/left-sidebar.mjs"
+        },
+        {
+          "id": "sidebar",
+          "manifest": "packages/foundation/0.1.0/sidebar/manifest.json",
+          "bundle": "packages/foundation/0.1.0/sidebar/dist/sidebar.mjs"
+        }
+      ]
+    },
+    {
+      "id": "core-acp",
+      "name": "Agent Client Protocol",
+      "type": "AI",
+      "core": true,
+      "author": "Hato contributors",
+      "version": "0.1.0",
+      "coreVersion": "^0.1.0",
+      "description": "Agent Client Protocol services and panels.",
+      "dependencies": {
+        "foundation": "^0.1.0"
+      },
+      "modules": [
+        "acp",
+        "ai-sessions",
+        "ai",
+        "internal-mcp",
+        "internal-local-mcp",
+        "internal-remote-mcp",
+        "mcp-auth",
+        "agent-runner",
+        "mcp-panel"
+      ],
+      "artifacts": [
+        {
+          "id": "acp",
+          "manifest": "packages/core-acp/0.1.0/acp/manifest.json",
+          "bundle": "packages/core-acp/0.1.0/acp/dist/acp.mjs"
+        },
+        {
+          "id": "ai-sessions",
+          "manifest": "packages/core-acp/0.1.0/ai-sessions/manifest.json",
+          "bundle": "packages/core-acp/0.1.0/ai-sessions/dist/ai-sessions.mjs"
+        },
+        {
+          "id": "ai",
+          "manifest": "packages/core-acp/0.1.0/ai/manifest.json",
+          "bundle": "packages/core-acp/0.1.0/ai/dist/ai.mjs"
+        },
+        {
+          "id": "internal-mcp",
+          "manifest": "packages/core-acp/0.1.0/internal-mcp/manifest.json",
+          "bundle": "packages/core-acp/0.1.0/internal-mcp/dist/internal-mcp.mjs"
+        },
+        {
+          "id": "internal-local-mcp",
+          "manifest": "packages/core-acp/0.1.0/internal-local-mcp/manifest.json",
+          "bundle": "packages/core-acp/0.1.0/internal-local-mcp/dist/internal-local-mcp.mjs"
+        },
+        {
+          "id": "internal-remote-mcp",
+          "manifest": "packages/core-acp/0.1.0/internal-remote-mcp/manifest.json",
+          "bundle": "packages/core-acp/0.1.0/internal-remote-mcp/dist/internal-remote-mcp.mjs"
+        },
+        {
+          "id": "mcp-auth",
+          "manifest": "packages/core-acp/0.1.0/mcp-auth/manifest.json",
+          "bundle": "packages/core-acp/0.1.0/mcp-auth/dist/mcp-auth.mjs"
+        },
+        {
+          "id": "agent-runner",
+          "manifest": "packages/core-acp/0.1.0/agent-runner/manifest.json",
+          "bundle": "packages/core-acp/0.1.0/agent-runner/dist/agent-runner.mjs"
+        },
+        {
+          "id": "mcp-panel",
+          "manifest": "packages/core-acp/0.1.0/mcp-panel/manifest.json",
+          "bundle": "packages/core-acp/0.1.0/mcp-panel/dist/mcp-panel.mjs"
+        }
+      ]
+    },
+    {
+      "id": "git",
+      "name": "Git",
+      "type": "Development",
+      "core": true,
+      "author": "Hato contributors",
+      "version": "0.1.0",
+      "coreVersion": "^0.1.0",
+      "description": "Git services and panels.",
+      "dependencies": {
+        "foundation": "^0.1.0"
+      },
+      "modules": [
+        "git",
+        "git-panel",
+        "git-branch",
+        "git-changes",
+        "git-tasks"
+      ],
+      "artifacts": [
+        {
+          "id": "git",
+          "manifest": "packages/git/0.1.0/git/manifest.json",
+          "bundle": "packages/git/0.1.0/git/dist/git.mjs"
+        },
+        {
+          "id": "git-panel",
+          "manifest": "packages/git/0.1.0/git-panel/manifest.json",
+          "bundle": "packages/git/0.1.0/git-panel/dist/git-panel.mjs"
+        },
+        {
+          "id": "git-branch",
+          "manifest": "packages/git/0.1.0/git-branch/manifest.json",
+          "bundle": "packages/git/0.1.0/git-branch/dist/git-branch.mjs"
+        },
+        {
+          "id": "git-changes",
+          "manifest": "packages/git/0.1.0/git-changes/manifest.json",
+          "bundle": "packages/git/0.1.0/git-changes/dist/git-changes.mjs"
+        },
+        {
+          "id": "git-tasks",
+          "manifest": "packages/git/0.1.0/git-tasks/manifest.json",
+          "bundle": "packages/git/0.1.0/git-tasks/dist/git-tasks.mjs"
+        }
+      ]
+    },
+    {
+      "id": "claude-acp",
+      "name": "Claude ACP",
+      "type": "AI providers",
+      "core": false,
+      "author": "Hato contributors",
+      "version": "0.1.0",
+      "coreVersion": "^0.1.0",
+      "description": "Claude ACP integration and plan usage bar. Requires the Claude adapter installed on the workspace machine.",
+      "dependencies": {
+        "foundation": "^0.1.0",
+        "core-acp": "^0.1.0"
+      },
+      "modules": [
+        "claude-usage"
+      ],
+      "artifacts": [
+        {
+          "id": "claude-usage",
+          "manifest": "packages/claude-acp/0.1.0/claude-usage/manifest.json",
+          "bundle": "packages/claude-acp/0.1.0/claude-usage/dist/claude-usage.mjs"
+        }
+      ]
+    },
+    {
+      "id": "codex-acp",
+      "name": "Codex ACP",
+      "type": "AI providers",
+      "core": false,
+      "author": "Hato contributors",
+      "version": "0.1.0",
+      "coreVersion": "^0.1.0",
+      "description": "Codex ACP integration and plan usage bar. Requires the Codex adapter installed on the workspace machine.",
+      "dependencies": {
+        "foundation": "^0.1.0",
+        "core-acp": "^0.1.0"
+      },
+      "modules": [
+        "codex-usage"
+      ],
+      "artifacts": [
+        {
+          "id": "codex-usage",
+          "manifest": "packages/codex-acp/0.1.0/codex-usage/manifest.json",
+          "bundle": "packages/codex-acp/0.1.0/codex-usage/dist/codex-usage.mjs"
+        }
+      ]
+    },
+    {
+      "id": "automation",
+      "name": "Workflows & agents",
+      "type": "Automation",
+      "core": false,
+      "author": "Hato contributors",
+      "version": "0.1.0",
+      "coreVersion": "^0.1.0",
+      "description": "Workflows & agents services and panels.",
+      "dependencies": {
+        "foundation": "^0.1.0",
+        "core-acp": "^0.1.0"
+      },
+      "modules": [
+        "workflows",
+        "workflow-runner",
+        "workflows-panel",
+        "persistent-agents",
+        "agents-panel"
+      ],
+      "artifacts": [
+        {
+          "id": "workflows",
+          "manifest": "packages/automation/0.1.0/workflows/manifest.json",
+          "bundle": "packages/automation/0.1.0/workflows/dist/workflows.mjs"
+        },
+        {
+          "id": "workflow-runner",
+          "manifest": "packages/automation/0.1.0/workflow-runner/manifest.json",
+          "bundle": "packages/automation/0.1.0/workflow-runner/dist/workflow-runner.mjs"
+        },
+        {
+          "id": "workflows-panel",
+          "manifest": "packages/automation/0.1.0/workflows-panel/manifest.json",
+          "bundle": "packages/automation/0.1.0/workflows-panel/dist/workflows-panel.mjs"
+        },
+        {
+          "id": "persistent-agents",
+          "manifest": "packages/automation/0.1.0/persistent-agents/manifest.json",
+          "bundle": "packages/automation/0.1.0/persistent-agents/dist/persistent-agents.mjs"
+        },
+        {
+          "id": "agents-panel",
+          "manifest": "packages/automation/0.1.0/agents-panel/manifest.json",
+          "bundle": "packages/automation/0.1.0/agents-panel/dist/agents-panel.mjs"
+        }
+      ]
+    },
+    {
+      "id": "remote",
+      "name": "Remote workspaces",
+      "type": "Connectivity",
+      "core": false,
+      "author": "Hato contributors",
+      "version": "0.1.0",
+      "coreVersion": "^0.1.0",
+      "description": "Remote workspaces services and panels.",
+      "dependencies": {
+        "foundation": "^0.1.0"
+      },
+      "modules": [
+        "remote-runtime",
+        "remote-panel"
+      ],
+      "artifacts": [
+        {
+          "id": "remote-runtime",
+          "manifest": "packages/remote/0.1.0/remote-runtime/manifest.json",
+          "bundle": "packages/remote/0.1.0/remote-runtime/dist/remote-runtime.mjs"
+        },
+        {
+          "id": "remote-panel",
+          "manifest": "packages/remote/0.1.0/remote-panel/manifest.json",
+          "bundle": "packages/remote/0.1.0/remote-panel/dist/remote-panel.mjs"
+        }
+      ]
+    }
+  ]
+}
