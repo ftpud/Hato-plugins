@@ -24,7 +24,7 @@
     ]
   },
   "author": "Hato contributors",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "pluginPackage": "claude-acp",
   "pluginType": "AI providers"
 }

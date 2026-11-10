@@ -27,7 +27,7 @@
   "stateVersion": 1,
   "description": "Desktop gateway for independent background agents owned by local and SSH daemons.",
   "author": "Hato contributors",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "pluginPackage": "agents",
   "pluginType": "Automation"
 }

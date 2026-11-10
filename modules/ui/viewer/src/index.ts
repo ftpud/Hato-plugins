@@ -11,6 +11,8 @@ import { resolveWorkspaceLink } from "@hato/sdk/links";
 import { diffTabPath } from "@hato/sdk/git";
 import { uiIcons } from "@hato/sdk/ui-icons";
 
+import { languageDefinitions, languageForPath, workspacePath, validPosition, type LanguageDefinition } from "@hato/sdk/languages";
+
 import { shellBlocks } from "./markdown";
 
 let showMetadata = true;
@@ -80,6 +82,16 @@ function runShellBlock(ctx: ModuleContext, args: object) {
   });
 }
 let generation = 0;
+let languages: LanguageDefinition[] = [];
+let languageService = false;
+let languageError: string | null = null;
+let navigation: { workspaceId: string; path: string; key: string; line: number; character: number } | null = null;
+async function refreshLanguages(ctx: ModuleContext) {
+  const { plugins } = await ctx.host.plugins.list();
+  languages = languageDefinitions(plugins);
+  languageService = plugins.some(p => p.id === "language-service" && p.enabled && !!p.active);
+  ctx.ui.invalidate();
+}
 function restoreTabs() {
   const saved = ws?.view?.ui?.viewerTabs;
   tabs = Array.isArray(saved) ? saved.filter((p: unknown) => typeof p === "string") : [];
@@ -152,6 +164,8 @@ const mod: AppModule = {
       shellRequests.delete(result.requestId); clearTimeout(pending.timer);
       if (result.error) pending.reject(new Error(result.error)); else pending.resolve();
     });
+    await refreshLanguages(ctx);
+    ctx.events.on("kernel.modules.changed", () => { void refreshLanguages(ctx).catch(e => ctx.log.warn(errMsg(e))); });
     const saved = await ctx.modules.call("persistence", "settings.get", { key: "viewer.showMetadata" });
     showMetadata = typeof saved === "boolean" ? saved : true;
     const savedMarkdown = await ctx.modules.call("persistence", "settings.get", { key: "viewer.renderMarkdown" });
@@ -209,7 +223,7 @@ const mod: AppModule = {
     ctx.events.on("files.changed", (e: any) => { if (e?.workspaceId === ws?.id) void refreshFromDisk(ctx); });
     ctx.state.watch("workspace.selected", (v: any) => {
       const changed = ws?.id !== v?.id; ws = v;
-      if (changed) { generation++; current = null; loadingPath = null; restoreTabs(); }
+      if (changed) { languageError = null; navigation = null; generation++; current = null; loadingPath = null; restoreTabs(); }
       void load(ctx);
     });
     await load(ctx);
@@ -222,6 +236,20 @@ const mod: AppModule = {
     if (autosave) await Promise.all([...buffers.values()].filter(b => b.state === "dirty").map(b => save(ctx, b)));
   },
   snapshot: () => ({ current, buffers: Object.fromEntries([...buffers].filter(([, b]) => b.state !== "clean" || b.mtime != null).map(([d, b]) => [d, { ...b, inflight: false }])) }),
+  methods: {
+    async "editor.definitions"(ctx, a) {
+      const buffer = buffers.get(a.document);
+      if (!languageService || !buffer || buffer.workspaceId !== a.workspaceId || buffer.path !== a.path || typeof a.text !== "string") return [];
+      try {
+        const locations = await ctx.modules.call("language-service", "definitions", {
+          workspaceId: buffer.workspaceId, path: buffer.path, text: a.text, position: a.position,
+          documents: [...buffers.values()].filter(b => b.workspaceId === buffer.workspaceId && b.text !== null)
+            .map(b => ({ path: b.path, text: b.text })),
+        }, { timeoutMs: 175000 });
+        languageError = null; ctx.ui.invalidate(); return locations;
+      } catch (e) { languageError = errMsg(e); ctx.ui.invalidate(); return []; }
+    },
+  },
   render(): UiNode {
     const diff = !!current?.diff;
     const markdown = current && !diff && !current.binary && (current.language === "markdown" || /\.(md|markdown)$/i.test(current.relativePath));
@@ -237,6 +265,7 @@ const mod: AppModule = {
       ] })) },
 
     ];
+    if (languageError) kids.push({ type: "status", key: "language-error", text: languageError, level: "warn" });
     if (error) kids.push({ type: "status", key: "err", text: error, level: "error" });
     if (loadingPath) kids.push({ type: "progress", key: "ld", indeterminate: true, label: `Opening ${loadingPath}…` });
     if (current && current.binary) kids.push({ type: "status", key: "bin", text: current.message, level: "info" });
@@ -272,8 +301,13 @@ const mod: AppModule = {
     }
     else {
       const canEdit = editable && !!current && !current.binary && !current.truncated && !!current.document;
+      const language = current ? languageForPath(languages, current.relativePath) : null;
       kids.push({ type: "codeViewer", key: "code", document: current && !current.binary ? current.document : null, placeholder: ws ? "Open a file from the explorer." : "Select a workspace.", grow: true,
-        editable: canEdit, changeAction: canEdit ? "edit" : undefined, changeDebounceMs: 250 });
+        editable: canEdit, changeAction: canEdit ? "edit" : undefined, changeDebounceMs: 250,
+        language: language?.grammar, syntaxRules: language?.syntaxRules,
+        definitionMethod: languageService && language?.server && !current?.truncated ? "editor.definitions" : undefined,
+        definitionArgs: { workspaceId: ws?.id, path: current?.relativePath }, openLocationAction: "openDefinition",
+        reveal: navigation && navigation.workspaceId === ws?.id && navigation?.path === current?.relativePath ? navigation : undefined });
     }
     const buf = !diff && current?.document ? buffers.get(current.document) : undefined;
     const status = saveStatus(buf);
@@ -305,7 +339,17 @@ const mod: AppModule = {
   async onEvent(ctx, ev) {
     if (!ws) return;
     try {
-      if (ev.action === "edit") {
+      if (ev.action === "openDefinition") {
+        const value: any = ev.value || {};
+        if (value.document !== current?.document) return;
+        const path = workspacePath(ws.rootAbsolutePath, String(value.uri));
+        if (!path) throw new Error("This definition is outside the workspace or uses a virtual document URI; opening it is not supported yet.");
+        const position = value.selection?.start;
+        if (!validPosition(position)) return;
+        navigation = { workspaceId: ws.id, path, key: crypto.randomUUID(), line: position.line, character: position.character };
+        languageError = null;
+        await ctx.modules.call("workspace", "view.patch", { workspaceId: ws.id, patch: { previewPath: path } });
+      } else if (ev.action === "edit") {
         const v: any = ev.value || {};
         const b = typeof v.document === "string" ? buffers.get(v.document) : undefined;
         if (!b || typeof v.text !== "string") return;

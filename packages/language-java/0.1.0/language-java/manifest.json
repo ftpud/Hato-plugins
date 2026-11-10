@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 2,
+  "id": "language-java",
+  "name": "Java",
+  "kind": "service",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [],
+  "capabilities": [],
+  "provides": [
+    "language.provider"
+  ],
+  "runsOn": "ui",
+  "contributes": {
+    "languages": [
+      {
+        "id": "java",
+        "name": "Java",
+        "extensions": [
+          "java"
+        ],
+        "grammar": "java",
+        "server": {
+          "id": "jdtls",
+          "executable": "jdtls",
+          "args": [
+            "-data",
+            "$WORKSPACE/.hato/jdtls"
+          ],
+          "settings": {
+            "java": {
+              "configuration": {
+                "updateBuildConfiguration": "automatic"
+              }
+            }
+          },
+          "installHint": "Install Eclipse JDTLS and a supported JDK on the workspace machine; put jdtls on PATH or set its full path here."
+        }
+      }
+    ]
+  },
+  "stateVersion": 1,
+  "description": "Java syntax highlighting and go to definition through Eclipse JDTLS, locally or over SSH.",
+  "author": "Hato contributors",
+  "version": "0.1.0",
+  "pluginPackage": "language-java",
+  "pluginType": "Languages",
+  "distribution": "marketplace"
+}

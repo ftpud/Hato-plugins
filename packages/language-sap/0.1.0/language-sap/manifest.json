@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 2,
+  "id": "language-sap",
+  "name": "SAP syntax",
+  "kind": "service",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [],
+  "capabilities": [],
+  "provides": [
+    "language.provider"
+  ],
+  "runsOn": "ui",
+  "contributes": {
+    "languages": [
+      {
+        "id": "cds",
+        "name": "SAP CDS",
+        "extensions": [
+          "cds",
+          "hdbcds",
+          "ddls",
+          "asddls"
+        ],
+        "grammar": "text",
+        "syntaxRules": [
+          {
+            "pattern": "/\\*[\\s\\S]*?\\*/|//[^\\r\\n]*|--[^\\r\\n]*",
+            "capture": "comment"
+          },
+          {
+            "pattern": "'(?:''|[^'])*'|\\\"(?:\\\\.|[^\\\"\\\\])*\\\"|`(?:\\\\.|[^`\\\\])*`",
+            "capture": "string"
+          },
+          {
+            "pattern": "@[A-Za-z_][\\w.]*",
+            "capture": "attribute"
+          },
+          {
+            "pattern": "\\b(?:namespace|using|from|as|entity|aspect|type|service|context|extend|annotate|with|projection|on|select|distinct|key|virtual|localized|not|null|default|Association|Composition|of|to|many|one|actions|action|function|returns|event|enum|array|excluding|where|group|by|having|order|limit|union|join|inner|left|right|outer|cross|mixin|into|exists|case|when|then|else|end|and|or|in|like|is|between|define|view|association|composition)\\b",
+            "capture": "keyword"
+          },
+          {
+            "pattern": "\\b(?:String|LargeString|Binary|LargeBinary|Boolean|Integer|Integer16|Integer32|Integer64|UInt8|Int16|Int32|Int64|Decimal|DecimalFloat|Double|Date|Time|DateTime|Timestamp|UUID|Vector|Map)\\b",
+            "capture": "type"
+          },
+          {
+            "pattern": "\\b(?:true|false)\\b",
+            "capture": "boolean"
+          },
+          {
+            "pattern": "\\b\\d+(?:\\.\\d+)?\\b",
+            "capture": "number"
+          }
+        ]
+      },
+      {
+        "id": "sap-mta",
+        "name": "SAP MTA descriptor",
+        "extensions": [
+          "mta",
+          "mtaext"
+        ],
+        "filenames": [
+          "mta.yaml",
+          "mta.yml",
+          "mtad.yaml",
+          "mtad.yml"
+        ],
+        "grammar": "yaml"
+      },
+      {
+        "id": "sap-json",
+        "name": "SAP configuration",
+        "filenames": [
+          ".cdsrc.json",
+          ".cdsrc-private.json",
+          ".hdiconfig",
+          ".hdinamespace",
+          "xs-app.json",
+          "xs-security.json"
+        ],
+        "extensions": [
+          "hdbtabledata",
+          "hdbsynonym",
+          "hdbsynonymconfig",
+          "hdbgrants",
+          "hdbrole",
+          "hdbroleconfig"
+        ],
+        "grammar": "json"
+      },
+      {
+        "id": "sap-sql",
+        "name": "SAP HANA SQL",
+        "extensions": [
+          "hdbtable",
+          "hdbview",
+          "hdbprocedure",
+          "hdbfunction",
+          "hdbindex",
+          "hdbconstraint",
+          "hdbsequence",
+          "hdbtrigger",
+          "hdbmigrationtable"
+        ],
+        "grammar": "sql"
+      }
+    ]
+  },
+  "stateVersion": 1,
+  "description": "Syntax highlighting for SAP CDS, MTA/MTAEXT descriptors, CAP configuration and HANA artifacts. No language server required.",
+  "author": "Hato contributors",
+  "version": "0.1.0",
+  "pluginPackage": "language-sap",
+  "pluginType": "Languages",
+  "distribution": "marketplace"
+}

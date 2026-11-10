@@ -1,0 +1,150 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { build } from 'esbuild';
+const root = new URL('../', import.meta.url);
+const load = async relative => {
+  const code = (await build({entryPoints: [new URL(relative, root).pathname], bundle:true, format:'esm', platform:'node', write:false})).outputFiles[0].text;
+  return import('data:text/javascript;base64,' + Buffer.from(code).toString('base64') + '#' + Math.random());
+};
+const registry = await load('../sdk/languages.ts');
+const {LspPeer, lspFrame, decodeBase64} = await load('../sdk/lsp.ts');
+const plugin = id => ({ ...JSON.parse(fs.readFileSync(new URL(`modules/services/${id}/manifest.json`, root))), enabled:true, active:'test' });
+const all = ['language-java','language-typescript','language-sap'].map(plugin);
+
+test('marketplace languages match independently, including SAP compound names and extension descriptors', () => {
+  const langs = registry.languageDefinitions(all);
+  for (const [path, id, grammar] of [
+    ['Main.java','java','java'], ['a.mjs','javascript','javascript'], ['a.cts','typescript','typescript'],
+    ['a.jsx','javascriptreact','javascript'], ['a.tsx','typescriptreact','tsx'],
+    ['db/model.cds','cds','text'], ['view.hdbcds','cds','text'], ['view.ddls','cds','text'],
+    ['mta.yaml','sap-mta','yaml'], ['mtad.yml','sap-mta','yaml'], ['prod.mtaext','sap-mta','yaml'],
+    ['.cdsrc-private.json','sap-json','json'], ['xs-security.json','sap-json','json'],
+    ['foo.hdbgrants','sap-json','json'], ['foo.hdbprocedure','sap-sql','sql'],
+  ]) {
+    const actual = registry.languageForPath(langs, path);
+    assert.equal(actual?.id, id, path); assert.equal(actual?.grammar, grammar, path);
+  }
+  all[2].enabled = false;
+  assert.equal(registry.languageForPath(registry.languageDefinitions(all), 'model.cds'), null);
+  all[2].enabled = true;
+  assert.equal(registry.languageForPath(langs, 'unrelated.txt'), null);
+  assert.equal(registry.languageForPath(langs, 'unrelated.java.bak'), null);
+  assert.ok(!registry.languageForPath(langs, 'prod.mtaext').server);
+});
+
+test('URI mapping preserves remote identities, spaces, Unicode and drive letters; blocks traversal and non-file targets', () => {
+  for (const root of ['/srv/my project/日本語', 'C:\\Users\\dev\\project', '/']) {
+    const uri = registry.documentUri(root, 'src/a #é.ts');
+    assert.equal(registry.workspacePath(root, uri), 'src/a #é.ts');
+  }
+  for (const uri of ['file:///etc/passwd', 'file:///srv/app-other/file.ts', 'file:///srv/app/../../etc/passwd', 'file://other/srv/app/file.ts', 'jdt://contents/Foo.class', 'https://example.com/a', 'file:///srv/app/%ZZ']) assert.equal(registry.workspacePath('/srv/app', uri), null, uri);
+  assert.throws(() => registry.documentUri('/srv/app', '../private'), /escapes/);
+  const pos = {line:2,character:4}, range = {start:pos,end:pos};
+  assert.deepEqual(registry.definitionLinks({uri:'file:///srv/app/a.ts',range}), [{targetUri:'file:///srv/app/a.ts',targetRange:range,targetSelectionRange:range}]);
+  assert.deepEqual(registry.definitionLinks([{uri:'file:///bad',range:{start:{line:-1,character:0},end:pos}}]), []);
+});
+
+test('LSP framing counts bytes and survives every byte boundary, coalescing and server requests', async () => {
+  const messages = [], writes = [];
+  const peer = new LspPeer(async frame => writes.push(frame));
+  peer.onNotification = (method, params) => messages.push([method,params]);
+  peer.onRequest = async (method, params) => ({method,params});
+  const frame = lspFrame({jsonrpc:'2.0',method:'notice',params:'é 日本語 😀'});
+  assert.equal(Number(/Content-Length: (\d+)/.exec(frame)[1]), Buffer.byteLength(frame.split('\r\n\r\n')[1]));
+  const bytes = Buffer.from(frame);
+  for (const byte of bytes) peer.feed(new Uint8Array([byte]));
+  peer.feed(Buffer.concat([bytes, bytes]));
+  assert.equal(messages.length,3); assert.equal(messages[0][1],'é 日本語 😀');
+  assert.deepEqual(decodeBase64(bytes.toString('base64')), new Uint8Array(bytes));
+  const pending = peer.request('definition',{});
+  await new Promise(r => setImmediate(r));
+  const request = JSON.parse(writes.shift().split('\r\n\r\n')[1]);
+  peer.feed(Buffer.from(lspFrame({jsonrpc:'2.0',id:request.id,result:['ok']})));
+  assert.deepEqual(await pending,['ok']);
+  peer.feed(Buffer.from(lspFrame({jsonrpc:'2.0',id:99,method:'configuration',params:{section:'java'}})));
+  await new Promise(r => setImmediate(r));
+  assert.deepEqual(JSON.parse(writes.shift().split('\r\n\r\n')[1]).result,{method:'configuration',params:{section:'java'}});
+  const timeout = peer.request('never',{},5);
+  await assert.rejects(timeout,/timed out/);
+  const broken = peer.request('broken',{});
+  peer.feed(Buffer.from('Content-Length: nope\r\n\r\n'));
+  await assert.rejects(broken,/Content-Length/);
+  assert.equal(peer.alive,false);
+  await assert.rejects(peer.request('after-close'),/Content-Length/);
+});
+
+function context(location = 'local') {
+  const handlers = {}, watchers = {}, settings = new Map(), processes = [], calls = [], sent = [];
+  const workspace = {id:'ws',name:'Fixture',location,machineId:location === 'ssh' ? 'ssh:test' : 'local',rootAbsolutePath:'/srv/project with spaces', ...(location === 'ssh' ? {ssh:{profileId:'test',host:'host',port:22,user:'dev'}} : {})};
+  let seq = 0;
+  const ctx = {moduleId:'language-service',generation:1,version:1,log:console,ui:{invalidate(){}},
+    events:{on:(name,fn)=>{handlers[name]=fn;},emit(){}},
+    state:{get:()=>workspace,set(){},watch:(key,fn)=>{watchers[key]=fn;}},
+    modules:{call:async (id,method,a)=>{
+      calls.push({id,method,a});
+      if (id === 'workspace') return workspace;
+      if (method === 'scoped.resolve') return settings.has(a.key) ? {value:settings.get(a.key)} : null;
+      if (method === 'scoped.set') { settings.set(a.key,a.value); return {applied:true,rev:1}; }
+      throw Error(`${id}.${method}`);
+    }},
+    host:{plugins:{list:async()=>({plugins:all})},capabilities:{request:async spec=>{calls.push({grant:spec});return {grant:'g'};}},
+      ssh:{connect:async spec=>{calls.push({ssh:spec});return {connection:'ssh-connection',machineId:'ssh:test'};}},
+      process:{spawn:async (_grant,spec)=>{const p={handle:`process-${++seq}`,spec,listeners:{},stopped:false}; processes.push(p);return p;},
+        write:async (handle,frame)=>{
+          const p=processes.find(p=>p.handle===handle), message=JSON.parse(frame.split('\r\n\r\n')[1]);sent.push(message);
+          if(message.id){
+            const result=message.method==='initialize'?{capabilities:{textDocumentSync:2,definitionProvider:true}}:[{uri:registry.documentUri(workspace.rootAbsolutePath,'src/target.ts'),range:{start:{line:1,character:2},end:{line:1,character:5}}}];
+            p.listeners.stdout(Buffer.from(lspFrame({jsonrpc:'2.0',id:message.id,result})).toString('base64'));
+          }
+        },terminate:async handle=>{processes.find(p=>p.handle===handle).stopped=true;}},
+      streams:{listen:async(handle,opts,data,end)=>{const p=processes.find(p=>p.handle===handle);p.listeners[opts.channel]=data;if (end) p.end=end;return {close:async()=>{}};}},
+      resources:{release:async()=>{}},
+    },
+  };
+  return {ctx,workspace,processes,calls,sent,handlers,watchers,settings};
+}
+for (const location of ['local','ssh']) test(`language service uses ${location} process scopes, synchronizes unsaved buffers and restarts dead servers`, async () => {
+  const {default:mod}=await load('modules/services/language-service/src/index.ts');
+  const c=context(location), position={line:1,character:3};
+  await mod.activate(c.ctx);
+  assert.equal(mod.methods.health(c.ctx).ok,true);
+  try {
+    const args={workspaceId:'ws',path:'src/main.ts',text:'// 😀\nconst x = target;',position,documents:[{path:'src/target.ts',text:'// unsaved\nexport const target = 1;'}]};
+    const result=await mod.methods.definitions(c.ctx,args);
+    assert.equal(result[0].targetSelectionRange.start.line,1);
+    assert.equal(c.processes.length,1);
+    assert.equal(c.processes[0].spec.cwd,c.workspace.rootAbsolutePath);
+    assert.equal(c.processes[0].spec.target.kind,location);
+    assert.equal(c.processes[0].spec.loginShell,location==='ssh');
+    assert.ok(c.calls.some(call=>call.grant?.target.kind===location));
+    const opened=c.sent.filter(m=>m.method==='textDocument/didOpen');
+    assert.equal(opened.length,2);assert.equal(opened[0].params.textDocument.text,args.documents[0].text);
+    await mod.methods.definitions(c.ctx,{...args,text:args.text+'\n// changed'});
+    const change=c.sent.find(m=>m.method==='textDocument/didChange').params;
+    assert.equal(change.textDocument.version,2);
+    assert.deepEqual(change.contentChanges[0].range.end,{line:1,character:17});
+    assert.equal(c.sent.filter(m=>m.method==='initialize').length,1);
+    c.processes[0].end(null);
+    await mod.methods.definitions(c.ctx,args);
+    assert.equal(c.processes.length,2);assert.ok(c.processes[0].stopped);
+    c.handlers['settings.change']({module:'language-service',section:'typescript-language-server',key:'executable',value:'/custom/server'});
+    await new Promise(r=>setImmediate(r));
+    assert.equal(c.settings.get('language-server.typescript-language-server.executable'),'/custom/server');
+    await mod.methods.definitions(c.ctx,args);
+    assert.equal(c.processes.at(-1).spec.executable,'/custom/server');
+  } finally {await mod.deactivate(c.ctx);}
+  assert.ok(c.processes.every(p=>p.stopped));
+});
+
+test('Java uses a workspace-specific JDTLS data directory and SAP never launches a process', async () => {
+  const {default:mod}=await load('modules/services/language-service/src/index.ts');
+  const c=context();await mod.activate(c.ctx);
+  try {
+    assert.deepEqual(await mod.methods.definitions(c.ctx,{workspaceId:'ws',path:'db/model.cds',text:'entity X {}',position:{line:0,character:2}}),[]);
+    assert.equal(c.processes.length,0);
+    await mod.methods.definitions(c.ctx,{workspaceId:'ws',path:'Main.java',text:'class Main {}',position:{line:0,character:6}});
+    assert.deepEqual(c.processes[0].spec.args,['-data','/srv/project with spaces/.hato/jdtls']);
+    assert.equal(c.processes[0].spec.executable,'jdtls');
+  } finally {await mod.deactivate(c.ctx);}
+});

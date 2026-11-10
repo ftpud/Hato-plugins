@@ -131,6 +131,7 @@ function project(c: Conv, u: any) {
       break;
     }
     case "tool_call": {
+      if (u.toolCallId && c.tools.has(u.toolCallId)) { project(c, { ...u, sessionUpdate: "tool_call_update" }); break; }
       const m = add(c, "tool", { toolCallId: u.toolCallId, title: u.title || u.kind || "tool", kind: u.kind, status: u.status || "pending", text: textOf(u.content) });
       c.tools.set(u.toolCallId, m.id);
       c.current.assistant = null; c.current.thought = null;

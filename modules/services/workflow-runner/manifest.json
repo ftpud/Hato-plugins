@@ -19,7 +19,7 @@
   "stateVersion": 1,
   "description": "Runs visual workflows on the workspace machine's daemon: definitions, durable runs, scripts, Run App processes and the workflow MCP endpoint for agent blocks.",
   "author": "Hato contributors",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "pluginPackage": "automation",
   "pluginType": "Automation"
 }

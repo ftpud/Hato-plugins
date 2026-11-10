@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 2,
+  "id": "language-typescript",
+  "name": "JavaScript & TypeScript",
+  "kind": "service",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [],
+  "capabilities": [],
+  "provides": [
+    "language.provider"
+  ],
+  "runsOn": "ui",
+  "contributes": {
+    "languages": [
+      {
+        "id": "javascript",
+        "name": "JavaScript",
+        "extensions": [
+          "js",
+          "mjs",
+          "cjs"
+        ],
+        "grammar": "javascript",
+        "server": {
+          "id": "typescript-language-server",
+          "executable": "typescript-language-server",
+          "args": [
+            "--stdio"
+          ],
+          "installHint": "On the workspace machine: npm install -g typescript-language-server typescript@6 (requires Node.js).",
+          "initializationOptions": {
+            "tsserver": {
+              "useSyntaxServer": "never"
+            }
+          },
+          "dependencySetup": {
+            "kind": "npm",
+            "packages": [
+              "typescript-language-server@5.3.0",
+              "typescript@6"
+            ],
+            "nodeMajor": 24
+          }
+        }
+      },
+      {
+        "id": "javascriptreact",
+        "name": "JavaScript JSX",
+        "extensions": [
+          "jsx"
+        ],
+        "grammar": "javascript",
+        "server": {
+          "id": "typescript-language-server",
+          "executable": "typescript-language-server",
+          "args": [
+            "--stdio"
+          ],
+          "installHint": "On the workspace machine: npm install -g typescript-language-server typescript@6 (requires Node.js).",
+          "initializationOptions": {
+            "tsserver": {
+              "useSyntaxServer": "never"
+            }
+          },
+          "dependencySetup": {
+            "kind": "npm",
+            "packages": [
+              "typescript-language-server@5.3.0",
+              "typescript@6"
+            ],
+            "nodeMajor": 24
+          }
+        }
+      },
+      {
+        "id": "typescript",
+        "name": "TypeScript",
+        "extensions": [
+          "ts",
+          "mts",
+          "cts"
+        ],
+        "grammar": "typescript",
+        "server": {
+          "id": "typescript-language-server",
+          "executable": "typescript-language-server",
+          "args": [
+            "--stdio"
+          ],
+          "installHint": "On the workspace machine: npm install -g typescript-language-server typescript@6 (requires Node.js).",
+          "initializationOptions": {
+            "tsserver": {
+              "useSyntaxServer": "never"
+            }
+          },
+          "dependencySetup": {
+            "kind": "npm",
+            "packages": [
+              "typescript-language-server@5.3.0",
+              "typescript@6"
+            ],
+            "nodeMajor": 24
+          }
+        }
+      },
+      {
+        "id": "typescriptreact",
+        "name": "TypeScript TSX",
+        "extensions": [
+          "tsx"
+        ],
+        "grammar": "tsx",
+        "server": {
+          "id": "typescript-language-server",
+          "executable": "typescript-language-server",
+          "args": [
+            "--stdio"
+          ],
+          "installHint": "On the workspace machine: npm install -g typescript-language-server typescript@6 (requires Node.js).",
+          "initializationOptions": {
+            "tsserver": {
+              "useSyntaxServer": "never"
+            }
+          },
+          "dependencySetup": {
+            "kind": "npm",
+            "packages": [
+              "typescript-language-server@5.3.0",
+              "typescript@6"
+            ],
+            "nodeMajor": 24
+          }
+        }
+      }
+    ]
+  },
+  "stateVersion": 1,
+  "description": "JavaScript, JSX, TypeScript and TSX highlighting and go to definition, locally or over SSH.",
+  "author": "Hato contributors",
+  "version": "0.1.1",
+  "pluginPackage": "language-typescript",
+  "pluginType": "Languages",
+  "distribution": "marketplace"
+}

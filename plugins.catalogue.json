@@ -8,7 +8,7 @@
       "type": "System",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.2",
+      "version": "0.1.4",
       "coreVersion": "^0.1.0",
       "description": "Hato essentials services and panels.",
       "dependencies": {},
@@ -35,7 +35,7 @@
       "type": "AI",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.2",
+      "version": "0.1.4",
       "coreVersion": "^0.1.0",
       "description": "Provider-independent ACP sessions, chat UI and MCP tools. Install AI providers separately.",
       "dependencies": {
@@ -57,7 +57,7 @@
       "type": "Development",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.2",
+      "version": "0.1.4",
       "coreVersion": "^0.1.0",
       "description": "Git changes, branch controls, worktree tasks and history panels.",
       "dependencies": {
@@ -77,7 +77,7 @@
       "type": "AI providers",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.2",
+      "version": "0.1.4",
       "coreVersion": "^0.1.0",
       "description": "Claude provider, adapter setup and plan usage bar. Install this plugin to use Claude in chats, agents and workflows.",
       "dependencies": {
@@ -95,7 +95,7 @@
       "type": "AI providers",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.2",
+      "version": "0.1.4",
       "coreVersion": "^0.1.0",
       "description": "Codex provider, adapter setup and plan usage bar. Install this plugin to use Codex in chats, agents and workflows.",
       "dependencies": {
@@ -113,7 +113,7 @@
       "type": "Automation",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "coreVersion": "^0.1.0",
       "description": "Persistent agent runtime, background agent panel and workspace tools. Supports local and SSH machines.",
       "dependencies": {
@@ -134,7 +134,7 @@
       "type": "Automation",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "coreVersion": "^0.1.0",
       "description": "Visual workflow editor and execution runtime. Uses Background Agents to run agent steps.",
       "dependencies": {
@@ -154,7 +154,7 @@
       "type": "Connectivity",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.1",
+      "version": "0.1.3",
       "coreVersion": "^0.1.0",
       "description": "Remote workspaces services and panels.",
       "dependencies": {
@@ -163,6 +163,70 @@
       "modules": [
         "remote-runtime",
         "remote-panel"
+      ]
+    },
+    {
+      "id": "language-service",
+      "name": "Language services",
+      "type": "Languages",
+      "core": false,
+      "author": "Hato contributors",
+      "version": "0.1.2",
+      "coreVersion": "^0.1.0",
+      "description": "Shared language support for local and SSH workspaces.",
+      "dependencies": {
+        "foundation": "^0.1.4"
+      },
+      "modules": [
+        "language-service"
+      ]
+    },
+    {
+      "id": "language-java",
+      "name": "Java",
+      "type": "Languages",
+      "core": false,
+      "author": "Hato contributors",
+      "version": "0.1.1",
+      "coreVersion": "^0.1.0",
+      "description": "Java highlighting and Eclipse JDTLS navigation.",
+      "dependencies": {
+        "language-service": "^0.1.2"
+      },
+      "modules": [
+        "language-java"
+      ]
+    },
+    {
+      "id": "language-typescript",
+      "name": "JavaScript & TypeScript",
+      "type": "Languages",
+      "core": false,
+      "author": "Hato contributors",
+      "version": "0.1.1",
+      "coreVersion": "^0.1.0",
+      "description": "JS/TS/JSX/TSX highlighting and language server navigation.",
+      "dependencies": {
+        "language-service": "^0.1.2"
+      },
+      "modules": [
+        "language-typescript"
+      ]
+    },
+    {
+      "id": "language-sap",
+      "name": "SAP syntax",
+      "type": "Languages",
+      "core": false,
+      "author": "Hato contributors",
+      "version": "0.1.0",
+      "coreVersion": "^0.1.0",
+      "description": "CDS, MTA/MTAEXT, CAP and HANA syntax highlighting.",
+      "dependencies": {
+        "foundation": "^0.1.0"
+      },
+      "modules": [
+        "language-sap"
       ]
     }
   ]

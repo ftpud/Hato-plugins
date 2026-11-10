@@ -34,3 +34,14 @@ test('fresh system dependency closure excludes optional features and satisfies m
  const modules=new Set(catalogue.packages.filter(p=>selected.has(p.id)).flatMap(p=>p.modules));
  for(const id of modules)for(const dependency of manifests.get(id).dependencies || [])assert.ok(modules.has(dependency),`${id} needs optional module ${dependency}`);
 });
+
+test('language packages are marketplace-only, absent from system bootstrap and never preapproved',()=>{
+ const grants=JSON.parse(fs.readFileSync(new URL('../../grants/first-party.json',import.meta.url),'utf8'));
+ for(const id of ['language-service','language-java','language-typescript','language-sap']){
+  const pkg=catalogue.packages.find(p=>p.id===id);
+  assert.equal(pkg.core,false);
+  assert.equal(pkg.type,'Languages');
+  assert.equal(manifests.get(id).distribution,'marketplace');
+  assert.equal(grants.modules[id],undefined);
+ }
+});

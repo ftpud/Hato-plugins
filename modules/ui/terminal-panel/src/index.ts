@@ -96,7 +96,7 @@ const mod: AppModule = {
   async activate(ctx, prev) {
     ws = ctx.state.get("workspace.selected") || null;
     reset(prev && prev.workspaceId === ws?.id ? prev.layout : undefined);
-    if (prev?.workspaceId === ws?.id) {
+    if (prev && prev.workspaceId === ws?.id) {
       cursors = new Map(prev.cursors || []);
       unread = new Set(prev.unread || []);
     }
@@ -156,7 +156,10 @@ const mod: AppModule = {
       try { await save(ctx); } catch (e) { error = errMsg(e); }
       ctx.ui.invalidate(); return;
     }
-    const [name, target] = ev.action.split(":");
+    // Markdown tab identifiers include colons; preserve the entire identifier after the verb.
+    const separator = ev.action.indexOf(":");
+    const name = separator < 0 ? ev.action : ev.action.slice(0, separator);
+    const target = separator < 0 ? "" : ev.action.slice(separator + 1);
     if (name === "select") unread.delete(target);
     const block = name === "select" || name === "close" ? blocks(layout).find(b => b.keys.includes(target)) : blocks(layout).find(b => b.id === target) || (!target ? blocks(layout)[0] : undefined);
     if (!block || busy.has(block.id) || loading.has(block.active)) return;

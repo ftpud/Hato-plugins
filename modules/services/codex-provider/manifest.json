@@ -29,7 +29,7 @@
       }
     ]
   },
-  "version": "0.1.2",
+  "version": "0.1.4",
   "pluginPackage": "codex-acp",
   "pluginType": "AI providers",
   "description": "Codex profile, adapter setup, authentication policy and usage parsing."

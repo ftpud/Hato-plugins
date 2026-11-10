@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 2,
+  "id": "claude-provider",
+  "name": "Claude provider",
+  "kind": "service",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [],
+  "capabilities": [],
+  "provides": [
+    "ai.provider"
+  ],
+  "contributes": {
+    "agentProviders": [
+      {
+        "id": "claude",
+        "name": "Claude",
+        "profile": {
+          "id": "claude",
+          "name": "Claude (claude-agent-acp)",
+          "executable": "claude-agent-acp",
+          "args": []
+        },
+        "adapter": {
+          "pkg": "@agentclientprotocol/claude-agent-acp",
+          "bin": "claude-agent-acp"
+        },
+        "usageCommand": "/usage",
+        "auth": {
+          "key": "acp.claude.useSubscription",
+          "field": "claudeSubscription",
+          "label": "Use Claude subscription",
+          "description": "Uses your Claude login instead of a shell API key. Applies on reconnect.",
+          "default": true,
+          "envRemove": [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN"
+          ]
+        }
+      }
+    ]
+  },
+  "version": "0.1.3",
+  "pluginPackage": "claude-acp",
+  "pluginType": "AI providers",
+  "description": "Claude profile, adapter setup, authentication policy and usage parsing."
+}

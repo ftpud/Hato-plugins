@@ -36,16 +36,20 @@ function persist(ctx:ModuleContext,s:AgentSession) {
   const json=JSON.stringify(s);
   return enqueue(()=>ctx.host.db.exec(db,"INSERT INTO sessions(id, data) VALUES(?, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data",[s.id,json]));
 }
-function message(ctx:ModuleContext,s:AgentSession,role:ChatMessage["role"],text:string,title?:string,status?:string,images?:ImageAttachment[]) {
+function message(ctx:ModuleContext,s:AgentSession,role:ChatMessage["role"],text:string,title?:string,status?:string,images?:ImageAttachment[],toolCallId?:string) {
   // Persist each protocol chunk before turn completion; read projections merge adjacent chunks.
   s.revision++;
   const turn=live.get(s.id)?.turn||0;
   return enqueue(async()=>{
+    if(role==="tool" && toolCallId) {
+      const existing=(await ctx.host.db.query<any>(db,"SELECT seq FROM messages WHERE session_id=? AND turn=? AND tool_call_id=? ORDER BY seq DESC LIMIT 1",[s.id,turn,toolCallId]))[0];
+      if(existing)return ctx.host.db.exec(db,"UPDATE messages SET text=CASE WHEN ? = '' THEN text ELSE ? END,title=COALESCE(?,title),status=COALESCE(?,status) WHERE seq=?",[text,text,title||null,status||null,existing.seq]);
+    }
     if(role==="assistant"||role==="thought") {
       const last=(await ctx.host.db.query<any>(db,"SELECT seq,role,turn FROM messages WHERE session_id=? ORDER BY seq DESC LIMIT 1",[s.id]))[0];
       if(last?.role===role&&last.turn===turn)return ctx.host.db.exec(db,"UPDATE messages SET text=text||? WHERE seq=?",[text,last.seq]);
     }
-    return ctx.host.db.exec(db,"INSERT INTO messages(session_id, role, text, title, status, turn, images_json) VALUES(?,?,?,?,?,?,?)",[s.id,role,text,title||null,status||null,turn,images?.length?JSON.stringify(images):null]);
+    return ctx.host.db.exec(db,"INSERT INTO messages(session_id, role, text, title, status, turn, images_json, tool_call_id) VALUES(?,?,?,?,?,?,?,?)",[s.id,role,text,title||null,status||null,turn,images?.length?JSON.stringify(images):null,toolCallId||null]);
   });
 }
 function publicSession(s:AgentSession) {
@@ -91,7 +95,7 @@ function update(ctx:ModuleContext,c:Live,u:any) {
     if(u.toolCallId && u.title) titles.set(u.toolCallId,u.title);
     const title=u.title||titles.get(u.toolCallId)||u.toolCallId||"Tool";
     if(titles.size>500) titles.delete(titles.keys().next().value!);
-    void message(ctx,c.session,"tool",text,title,u.status).catch(e=>ctx.log.error(errMsg(e)));
+    void message(ctx,c.session,"tool",text,title,u.status,undefined,u.toolCallId).catch(e=>ctx.log.error(errMsg(e)));
   } else if(kind==="plan") {
     void message(ctx,c.session,"plan",(u.entries||[]).map((e:any)=>`- ${e.content} (${e.status})`).join("\n")).catch(e=>ctx.log.error(errMsg(e)));
   } else if(kind==="config_option_update") { c.session.configOptions=u.configOptions||[];void persist(ctx,c.session); }
@@ -263,6 +267,7 @@ const mod:AppModule={
     db=await ctx.host.db.openNamespace("agent-runner");
     await ctx.host.db.exec(db,"CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, data TEXT NOT NULL, queue_json TEXT NOT NULL DEFAULT '[]'); CREATE TABLE IF NOT EXISTS messages(seq INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL,role TEXT NOT NULL,text TEXT NOT NULL,title TEXT,status TEXT,turn INTEGER); CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id,seq); CREATE TABLE IF NOT EXISTS permissions(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,data TEXT NOT NULL,resolved INTEGER NOT NULL DEFAULT 0)");
     const columns=await ctx.host.db.query<any>(db,"PRAGMA table_info(messages)");
+    if(!columns.some(c=>c.name==="tool_call_id"))await ctx.host.db.exec(db,"ALTER TABLE messages ADD COLUMN tool_call_id TEXT");
     if(!columns.some(c=>c.name==="images_json"))await ctx.host.db.exec(db,"ALTER TABLE messages ADD COLUMN images_json TEXT");
     for(const row of await ctx.host.db.query<any>(db,"SELECT data FROM sessions")) {
       const s:AgentSession=JSON.parse(row.data);

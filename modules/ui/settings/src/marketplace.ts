@@ -30,6 +30,16 @@ export function plan(packages:Package[], id:string, coreVersion:string):Package[
 }
 let packages:Package[]=bundled.packages as Package[];
 let base='';
+let published: Package[] = [];
+/** A published catalogue may lag behind a development checkout. Keep its newer/local offers. */
+export function mergeCatalogues(local: Package[], remote: Package[]): Package[] {
+  const merged = new Map(remote.map(p => [p.id, p]));
+  for (const p of local) {
+    const existing = merged.get(p.id);
+    if (!existing || isNewer(p.version, existing.version)) merged.set(p.id, p);
+  }
+  return [...merged.values()];
+}
 let receipts:Record<string,string>={};
 let tab = 'marketplace';
 let search = '';
@@ -63,6 +73,12 @@ export async function refreshMarket(ctx:ModuleContext){
   if(!/^[a-f0-9]{40}$/.test(commit.sha))throw Error('Invalid repository revision');
   const nextBase=`https://raw.githubusercontent.com/${REPOSITORY}/${commit.sha}/`;
   const cat=await get(nextBase+'catalogue.json');
+  const remote = validateCatalogue(cat);
+  const merged = mergeCatalogues(bundled.packages as Package[], remote);
+  for (const p of merged) plan(merged, p.id, bundled.coreVersion);
+  packages=merged;published=remote;base=nextBase;
+}
+function validateCatalogue(cat: any): Package[] {
   if(cat.schemaVersion!==1||!Array.isArray(cat.packages))throw Error('Unsupported catalogue');
   const ids=new Set<string>(), modules=new Set<string>();
   for(const p of cat.packages){
@@ -71,8 +87,9 @@ export async function refreshMarket(ctx:ModuleContext){
     for(const id of p.modules){if(!/^[a-z0-9][a-z0-9-]{0,47}$/.test(id)||modules.has(id))throw Error('Invalid or duplicate module');modules.add(id);}
   }
   for(const p of cat.packages)plan(cat.packages,p.id,bundled.coreVersion);
-  packages=cat.packages;base=nextBase;
+  return cat.packages as Package[];
 }
+
 function installed(p:Package,plugins:PluginInfo[]){return p.modules.every(id=>plugins.some(m=>m.id===id));}
 export function packageVersion(p: Package, plugins: PluginInfo[]) {
   const members = p.modules.map(id => plugins.find(m => m.id === id));
@@ -220,6 +237,11 @@ export async function updateAllPackages(ctx: ModuleContext, plugins: PluginInfo[
 }
 async function installPackages(ctx: ModuleContext, ids: string[], plugins: PluginInfo[]) {
   if (typeof ctx.host.plugins.installMany !== 'function') throw Error('This plugin update needs the new Hato host. Rebuild and restart Hato once to enable live package updates.');
+  const autoEnable = new Map(ids.map(id => {
+    const pkg = packages.find(p => p.id === id);
+    const previous = plugins.filter(m => pkg?.modules.includes(m.id));
+    return [id, !previous.length || previous.some(m => m.enabled)];
+  }));
   const selected = [...new Map(ids.flatMap(id => plan(packages, id, bundled.coreVersion)).map(p => [p.id, p])).values()];
   const changed = selected.filter(p => {
     if (ids.includes(p.id)) return true;
@@ -228,24 +250,61 @@ async function installPackages(ctx: ModuleContext, ids: string[], plugins: Plugi
     return !current || isNewer(p.version, current) || requirements.some(range => !satisfies(current, range)) || p.modules.some(id => plugins.find(m => m.id === id)?.pendingApprovals?.length);
   });
   const files: { id: string; manifest: string; code: string }[] = [];
-  // Fetch the entire dependency closure from one pinned revision before asking to install.
-  for (const p of changed) for (const moduleId of p.modules) {
-    const a = p.artifacts?.find(a => a.id === moduleId);
-    if (!a) throw Error(`Missing artifact: ${moduleId}`);
-    const read = async (path: string, digest?: string) => {
-      if (!/^packages\/[a-z0-9/._-]+$/.test(path) || path.split('/').includes('..')) throw Error('Unsafe artifact path');
-      const r = await ctx.host.net.fetch({ url: base + path, maxBytes: 8 * 1024 * 1024 });
-      if (r.status !== 200) throw Error(`Download failed: ${path}`);
-      if (digest && await sha256HexAsync(r.body) !== digest) throw Error(`Integrity mismatch: ${path}`);
-      return r.body;
-    };
-    const manifest = await read(a.manifest, a.manifestSha256), m = JSON.parse(manifest);
-    if (m.id !== moduleId || m.version !== p.version || m.moduleApiVersion !== 1 || m.pluginPackage !== p.id) throw Error('Artifact metadata mismatch');
-    files.push({ id: moduleId, manifest, code: await read(a.bundle, a.bundleSha256) });
-  }
+  let local: { grant: string; packages: Package[] } | null = null;
+  // Resolve local artifacts only when the selected version is not in the pinned published catalogue.
+  // The kernel still validates the source grant and asks to approve installation normally.
+  const localPackage = async (p: Package) => {
+    if (!local) {
+      if (typeof ctx.host.modules?.sourceInfo !== 'function') throw Error(`${p.name} ${p.version} has not been published. Install its prepared package from a development checkout or publish it first.`);
+      const source = await ctx.host.modules.sourceInfo();
+      const grant = await ctx.host.capabilities.request({ kind: 'fs', root: source.repoRoot, purpose: 'Read prepared local marketplace packages' });
+      local = { grant: grant.grant, packages: [] };
+      const file = await ctx.host.fs.read(grant.grant, 'catalogue.json', 2 * 1024 * 1024);
+      if (file.binary || file.truncated || typeof file.text !== 'string') throw Error('Invalid local marketplace catalogue');
+      local.packages = validateCatalogue(JSON.parse(file.text));
+    }
+    const candidate = local.packages.find(candidate => candidate.id === p.id && candidate.version === p.version);
+    if (!candidate || JSON.stringify(candidate.modules) !== JSON.stringify(p.modules) || JSON.stringify(candidate.dependencies) !== JSON.stringify(p.dependencies))
+      throw Error(`${p.name} ${p.version} has not been published and its local artifacts are unavailable. Prepare the marketplace packages first.`);
+    return candidate;
+  };
+  // Validate the entire dependency closure before staging/installing anything. Published artifacts
+  // all use one pinned revision; newer/unpublished development packages use their local hashes.
+  try {
+    for (const p of changed) {
+      const remote = published.find(candidate => candidate.id === p.id && candidate.version === p.version);
+      const source = remote || await localPackage(p);
+      for (const moduleId of p.modules) {
+        const a = source.artifacts?.find(a => a.id === moduleId);
+        if (!a) throw Error(`Missing artifact: ${moduleId}`);
+        const read = async (path: string, digest?: string) => {
+          if (!/^packages\/[a-z0-9/._-]+$/.test(path) || path.split('/').includes('..')) throw Error('Unsafe artifact path');
+          let body: string;
+          if (remote) {
+            const r = await ctx.host.net.fetch({ url: base + path, maxBytes: 8 * 1024 * 1024 });
+            if (r.status !== 200) throw Error(`Download failed: ${path}`);
+            body = r.body;
+          } else {
+            if (!digest) throw Error(`Missing local artifact hash: ${path}`);
+            const r = await ctx.host.fs.read(local!.grant, path, 8 * 1024 * 1024);
+            if (r.binary || r.truncated || typeof r.text !== 'string') throw Error(`Cannot read local artifact: ${path}`);
+            body = r.text;
+          }
+          if (digest && await sha256HexAsync(body) !== digest) throw Error(`Integrity mismatch: ${path}`);
+          return body;
+        };
+        const manifest = await read(a.manifest, a.manifestSha256), m = JSON.parse(manifest);
+        if (m.id !== moduleId || m.version !== p.version || m.moduleApiVersion !== 1 || m.pluginPackage !== p.id) throw Error('Artifact metadata mismatch');
+        files.push({ id: moduleId, manifest, code: await read(a.bundle, a.bundleSha256) });
+      }
+    }
+  } finally { if (local) await ctx.host.capabilities.release(local.grant); }
   const root = ctx.host.env.info().dataDir + '/marketplace-downloads/' + crypto.randomUUID();
   const grant = await ctx.host.capabilities.request({ kind: 'fs', root: ctx.host.env.info().dataDir, write: true, purpose: 'Download plugin packages' });
   try {
+    // Scoped mkdir resolves the parent before creating the leaf. Create the downloads
+    // directory first so a fresh profile can stage its very first marketplace install.
+    await ctx.host.fs.mkdir(grant.grant, ctx.host.env.info().dataDir + '/marketplace-downloads');
     await ctx.host.fs.mkdir(grant.grant, root);
     const paths: string[] = [];
     for (const f of files) {
@@ -262,9 +321,7 @@ async function installPackages(ctx: ModuleContext, ids: string[], plugins: Plugi
   } finally { await ctx.host.capabilities.release(grant.grant); }
   const current = (await ctx.host.plugins.list()).plugins;
   for (const id of ids) {
-    const pkg = packages.find(p => p.id === id)!;
-    const previous = plugins.filter(m => pkg.modules.includes(m.id));
-    if (!previous.length || previous.some(m => m.enabled)) await managePackage(ctx, 'enable', id, current);
+    if (autoEnable.get(id)) await managePackage(ctx, 'enable', id, current);
   }
   return `Installed ${ids.map(id => packages.find(p => p.id === id)?.name || id).join(', ')}. All included modules are managed together.`;
 }

@@ -141,3 +141,68 @@ test('installing Workflows enables every module of its Background Agents depende
  await fresh.managePackage({host:{plugins:{enable:async id=>{enabled.push(id);return {active:true};}}}},'enable','automation',members);
  assert.deepEqual(enabled.sort(),ids.sort());
 });
+
+test('refreshing an older published catalogue preserves unpublished offers and newer development versions', async () => {
+ const fresh=await import('data:text/javascript;base64,'+Buffer.from(result.outputFiles[0].text).toString('base64')+'#catalogue-lag');
+ const fs=await import('node:fs');
+ const catalogue=JSON.parse(fs.readFileSync(new URL('../catalogue.json',import.meta.url),'utf8'));
+ const remote={...catalogue,packages:catalogue.packages.filter(p=>!p.id.startsWith('language-')).map(p=>({...p,version:'0.1.0'}))};
+ const installed=remote.packages.flatMap(p=>p.modules.map(id=>({id,source:'builtin',enabled:true,active:id,metadata:{version:catalogue.packages.find(local=>local.id===p.id).version}})));
+ const before=fresh.packageRows(installed,'marketplace').map(p=>p.key);
+ let broken=false;
+ const ctx={modules:{call:async()=>({})},host:{net:{fetch:async({url})=>({status:broken?503:200,body:JSON.stringify(url.endsWith('commits/main')?{sha:'b'.repeat(40)}:remote)})}}};
+ await fresh.refreshMarket(ctx);
+ assert.deepEqual(fresh.packageRows(installed,'marketplace').map(p=>p.key),before);
+ assert.deepEqual(fresh.availableUpdates(installed),[],'an older published catalogue does not downgrade installed development packages');
+ broken=true;
+ await assert.rejects(fresh.refreshMarket(ctx),/HTTP 503/);
+ assert.deepEqual(fresh.packageRows(installed,'marketplace').map(p=>p.key),before,'failed refresh keeps the visible catalogue');
+ await assert.rejects(fresh.installPackage({...ctx,host:{...ctx.host,plugins:{installMany:async()=>assert.fail('must not install')}}},'language-sap',installed),/not been published/);
+ assert.deepEqual(fresh.packageRows(installed,'marketplace').map(p=>p.key),before,'failed install keeps the visible catalogue');
+});
+
+for(const corrupt of [false,true])test(`unpublished SAP plugin installs from prepared local artifacts with normal validation (corrupt=${corrupt})`,async()=>{
+ const fresh=await import('data:text/javascript;base64,'+Buffer.from(result.outputFiles[0].text).toString('base64')+'#local-'+corrupt);
+ const fs=await import('node:fs');
+ const catalogue=JSON.parse(fs.readFileSync(new URL('../catalogue.json',import.meta.url),'utf8'));
+ const remote={...catalogue,packages:catalogue.packages.filter(p=>!p.id.startsWith('language-'))};
+ const members=remote.packages.flatMap(p=>p.modules.map(id=>({id,name:id,source:'builtin',enabled:true,active:id,dependencies:[],metadata:{version:p.version}})));
+ const localRoot=fileURLToPath(new URL('../',import.meta.url)).replace(/\/$/,'');
+ const writes=new Map(),installs=[],releases=[],requests=[],directories=new Set(['/fixture-data']);
+ const ctx={modules:{call:async()=>({})},host:{
+  modules:{sourceInfo:async()=>({repoRoot:localRoot})},env:{info:()=>({dataDir:'/fixture-data'})},
+  capabilities:{request:async args=>{requests.push(args);return {grant:args.write?'write':'local-read'};},release:async g=>releases.push(g)},
+  net:{fetch:async({url})=>{
+   if(url.endsWith('commits/main'))return {status:200,body:JSON.stringify({sha:'c'.repeat(40)})};
+   assert.ok(url.endsWith('catalogue.json'),'unpublished artifacts must not be fetched from GitHub');
+   return {status:200,body:JSON.stringify(remote)};
+  }},
+  fs:{read:async(g,path)=>{
+   assert.equal(g,'local-read');
+   let text=fs.readFileSync(localRoot+'/'+path,'utf8');
+   if(corrupt&&path.endsWith('.mjs'))text+='\n// changed after export';
+   return {text,binary:false,truncated:false};
+  },mkdir:async(_grant,path)=>{
+   assert.ok(directories.has(path.slice(0,path.lastIndexOf('/'))),'the staging parent must exist before scoped mkdir');directories.add(path);
+  },writeAtomic:async(g,path,text)=>{assert.equal(g,'write');writes.set(path,text);}},
+  plugins:{list:async()=>({plugins:members}),enable:async id=>{const m=members.find(m=>m.id===id);m.enabled=true;m.active=id;return {active:true};},installMany:async paths=>{
+   installs.push(paths);
+   for(const path of paths){const m=JSON.parse(writes.get(path+'/manifest.json'));assert.equal(m.distribution,'marketplace');members.push({...m,metadata:{version:m.version},source:'user',enabled:false,active:null});}
+   return {plugins:[]};
+  }},
+ }};
+ const before=fresh.packageRows(members,'marketplace').map(p=>p.key);
+ if(corrupt){
+  await assert.rejects(fresh.installPackage(ctx,'language-sap',members),/Integrity mismatch/);
+  assert.equal(writes.size,0);assert.equal(installs.length,0);
+  assert.deepEqual(fresh.packageRows(members,'marketplace').map(p=>p.key),before);
+ }else{
+  await fresh.installPackage(ctx,'language-sap',members);
+  assert.equal(installs.length,1);assert.equal(installs[0].length,1,'satisfied system dependencies are left alone');
+  assert.ok(members.find(m=>m.id==='language-sap'&&m.source==='user'&&m.enabled));
+  const remaining=fresh.packageRows(members,'marketplace').map(p=>p.key);
+  assert.ok(remaining.includes('package:language-java'));assert.ok(remaining.includes('package:language-typescript'));
+ }
+ assert.ok(releases.includes('local-read'),'release the source grant on success and failure');
+ assert.ok(requests.some(args=>args.root===localRoot&&!args.write));
+});

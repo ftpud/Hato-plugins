@@ -128,12 +128,15 @@ const mod: AppModule = {
       if (!field || typeof field.key !== "string") continue;
       const fieldKey = JSON.stringify([active.module, active.section!.key, field.key]);
       if (field.type === "order") { options.push(orderEditor(field, fieldKey)); continue; }
-      const control: UiNode = field.type === "toggle"
+      const control: UiNode = field.type === "action"
+        ? { type: "button", key: fieldKey, text: field.buttonLabel, disabled: !!field.disabled, action: "settingAction", small: true }
+        : field.type === "toggle"
         ? { type: "toggle", key: fieldKey, label: active.section?.layout === "table" ? "" : field.label, checked: field.value, action: "change" }
+        : field.type === "text" ? { type: "textInput", key: fieldKey, value: field.value, placeholder: field.placeholder, submitAction: "change" }
         : { type: "select", key: fieldKey, value: field.value, options: field.options, action: "change", buttonStyle: { height: 32, fullWidth: true } };
       if (active.section?.layout === "table") tableRows.push({ key: fieldKey, label: field.label, description: field.description, control });
       else options.push({ type: "column", key: `${fieldKey}:field`, gap: 5, padding: 10, border: true, children: [
-        ...(field.type === "select" ? [{ type: "label", key: "label", text: field.label, size: "sm", weight: "medium" } as UiNode] : []), control,
+        ...(field.type !== "toggle" ? [{ type: "label", key: "label", text: field.label, size: "sm", weight: "medium" } as UiNode] : []), control,
         ...(field.description ? [{ type: "label", key: "description", text: field.description, size: "xs", color: "muted", wrap: true } as UiNode] : []),
       ] });
     }
@@ -195,12 +198,24 @@ const mod: AppModule = {
       if (categories(ctx).some(category => category.key === event.value)) selectedCategory = String(event.value);
       ctx.ui.invalidate(); return;
     }
+    if (event.action === "settingAction") {
+      try {
+        const [module, section, key] = JSON.parse(event.key);
+        const category = categories(ctx).find(c => c.module === module && c.section?.key === section);
+        const field = category?.section?.fields.find(f => f.key === key);
+        if (!field || field.type !== "action" || field.disabled) return;
+        ctx.events.emit("settings.action", { module, section, key });
+      } catch (e) { error = errMsg(e); ctx.ui.invalidate(); }
+      return;
+    }
     if (event.action !== "change") return;
     try {
       const [module, section, key] = JSON.parse(event.key);
       const category = categories(ctx).find(category => category.module === module && category.section?.key === section);
       if (!category || !category.section!.fields.some(field => field.key === key)) return;
-      ctx.events.emit("settings.change", { module, section, key, value: event.value });
+      const field = category.section!.fields.find(field => field.key === key)!;
+      if (field.type === "action") return;
+      ctx.events.emit("settings.change", { module, section, key, value: field.type === "text" ? event.inputs?.[event.key] ?? event.value : event.value });
     } catch (e) { error = errMsg(e); ctx.ui.invalidate(); }
   },
 };
