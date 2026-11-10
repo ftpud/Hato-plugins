@@ -369,7 +369,7 @@ const mod: AppModule = {
           { type: "image", key: "preview", image, width: 80, height: 64 },
           { type: "button", key: "remove", text: "× " + image.name, action: "removeImage", value: index, small: true, tooltip: "Remove picture" },
         ] })) });
-        composer.push({ type: "textInput", key: "prompt", style: chatStyle.textarea, changeAction:"draftChanged", pasteImageAction: background?undefined:"attachImages", maxFiles: 4, maxBytes: 5 * 1024 * 1024, placeholder: active.busy ? "Steer " + providerName + "…" : "Ask " + providerName + "…", multiline: true, fillHeight: true, grow: true, rows: 2, submitAction: "send", value: draft });
+        composer.push({ type: "textInput", key: "prompt", style: { ...chatStyle.textarea, minHeight: 72 }, changeAction:"draftChanged", pasteImageAction: background?undefined:"attachImages", maxFiles: 4, maxBytes: 5 * 1024 * 1024, placeholder: active.busy ? "Steer " + providerName + "…" : "Ask " + providerName + "…", multiline: true, fillHeight: true, grow: true, rows: 2, submitAction: "send", value: draft });
         composer.push({ type: "row", key: "act", gap: 6, children: [
           { type: "imagePicker", key: "attach", action: "attachImages", iconSvg: uiIcons.paperclip, style: chatStyle.attach, maxFiles: 4, maxBytes: 5 * 1024 * 1024,
             dialogTitle: "Attach pictures", tooltip: "Attach pictures (PNG, JPEG, WebP or GIF)", disabled: busy === "send" },
@@ -383,7 +383,8 @@ const mod: AppModule = {
         if(background){const actions=composer.find(n=>n.key==="act");if(actions&&"children" in actions)actions.children=(actions.children||[]).filter(n=>!["attach","mcp-toggle","context-usage"].includes(n.key));}
         const transcript = kids.pop()!;
         kids.push({ type: "split", key: "chat-composer-split", direction: "vertical", grow: true,
-          sizes: [1 - composerFraction, composerFraction], minSize: 96, resizeAction: "resizeComposer",
+          fixed: attachments.length ? [null, 240] : undefined,
+          sizes: [1 - Math.max(composerFraction, attachments.length ? 0.42 : 0), Math.max(composerFraction, attachments.length ? 0.42 : 0)], minSize: attachments.length ? 220 : 96, resizeAction: "resizeComposer",
           children: [transcript, { type: "column", key: "composer", style: chatStyle.composer, grow: true, gap: 6, padding: 8, children: composer }],
           tooltip: "Drag the divider above the input to resize it",
         });

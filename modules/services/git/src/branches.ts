@@ -81,3 +81,36 @@ export async function createBranch(run: Run, nameValue: unknown, from: unknown) 
   }
   await checked(run, args, "Create and checkout branch");
 }
+
+async function localBranch(run: Run, ref: unknown) {
+  const catalog = await listBranches(run);
+  const branch = findRef(catalog, ref);
+  if (!branch.ref.startsWith('refs/heads/')) throw new Error('Choose a local branch.');
+  if (branch.worktree && !branch.current) throw new Error('This branch is checked out in another worktree.');
+  await validName(run, branch.name);
+  return { catalog, branch };
+}
+export async function renameBranch(run: Run, ref: unknown, value: unknown) {
+  const { catalog, branch } = await localBranch(run, ref);
+  const name = await validName(run, value);
+  if (catalog.local.some(item => item.name === name)) throw new Error(`Branch “${name}” already exists.`);
+  await checked(run, ['branch', '--move', '--', branch.name, name], 'Rename branch');
+}
+export async function deleteBranch(run: Run, ref: unknown) {
+  const { branch } = await localBranch(run, ref);
+  if (branch.current) throw new Error('Switch to another branch before deleting this one.');
+  // Only merged branches; never discard unmerged commits or remove a remote branch here.
+  await checked(run, ['branch', '--delete', '--', branch.name], 'Delete merged branch');
+}
+export async function publishBranch(run: Run, ref: unknown, remote: unknown) {
+  const { catalog, branch } = await localBranch(run, ref);
+  if (typeof remote !== 'string' || !catalog.remotes.includes(remote) || remote.startsWith('-')) throw new Error('Choose an available remote.');
+  if (branch.unborn) throw new Error('Create a commit before publishing this branch.');
+  await checked(run, ['push', '--set-upstream', '--', remote, `${branch.ref}:${branch.ref}`], 'Publish branch');
+}
+export async function setBranchUpstream(run: Run, ref: unknown, upstream: unknown) {
+  const { catalog, branch } = await localBranch(run, ref);
+  const target = catalog.remote.find(item => item.ref === upstream);
+  if (!target) throw new Error('Choose an existing remote-tracking branch. Refresh or fetch if it is missing.');
+  await checked(run, ['branch', `--set-upstream-to=${target.ref}`, '--', branch.name], 'Set upstream');
+}

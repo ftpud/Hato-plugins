@@ -6,7 +6,7 @@ import type { AppModule, ModuleContext, RunResult } from "@hato/sdk/types";
 import { targetFor, withWorkspace, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { parseNumstat, parseStatus } from "./status";
 import { unifiedPatch } from "@hato/sdk/text-diff";
-import { listBranches, checkoutBranch, createBranch } from "./branches";
+import { listBranches, checkoutBranch, createBranch, renameBranch, deleteBranch, publishBranch, setBranchUpstream } from "./branches";
 
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const MAX_PATCH_BYTES = 4 * 1024 * 1024;
@@ -216,6 +216,30 @@ const mod: AppModule = {
       await createBranch(args => git(ctx, d, args), a.name, a.from);
       snapshots.delete(d.id);
       ctx.events.emit("git.changed", { workspaceId: d.id, worktreeChanged: true });
+      return { workspaceId: d.id, ...await listBranches(args => git(ctx, d, args)) };
+    },
+    async renameBranch(ctx, a) {
+      const d = await desc(ctx, a.workspaceId);
+      await renameBranch(args => git(ctx, d, args), a.ref, a.name);
+      ctx.events.emit("git.changed", { workspaceId: d.id });
+      return { workspaceId: d.id, ...await listBranches(args => git(ctx, d, args)) };
+    },
+    async deleteBranch(ctx, a) {
+      const d = await desc(ctx, a.workspaceId);
+      await deleteBranch(args => git(ctx, d, args), a.ref);
+      ctx.events.emit("git.changed", { workspaceId: d.id });
+      return { workspaceId: d.id, ...await listBranches(args => git(ctx, d, args)) };
+    },
+    async publishBranch(ctx, a) {
+      const d = await desc(ctx, a.workspaceId);
+      await publishBranch(args => git(ctx, d, args), a.ref, a.remote);
+      ctx.events.emit("git.changed", { workspaceId: d.id });
+      return { workspaceId: d.id, ...await listBranches(args => git(ctx, d, args)) };
+    },
+    async setUpstream(ctx, a) {
+      const d = await desc(ctx, a.workspaceId);
+      await setBranchUpstream(args => git(ctx, d, args), a.ref, a.upstream);
+      ctx.events.emit("git.changed", { workspaceId: d.id });
       return { workspaceId: d.id, ...await listBranches(args => git(ctx, d, args)) };
     },
     /** Changed files in the working tree (staged, unstaged and untracked) with line counts. */

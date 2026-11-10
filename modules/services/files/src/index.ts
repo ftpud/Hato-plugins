@@ -10,7 +10,7 @@ import type { ScopeGrant } from "@hato/sdk/types";
 
 const words = (q: string) => q.toLowerCase().trim().split(/\s+/).filter(Boolean);
 const MAX_VIEW_BYTES = 2 * 1024 * 1024;
-const docCache = new Map<string, { document: string; mtime: number | null; size: number }>();
+const docCache = new Map<string, { document: string; mtime: number | null; size: number; text?: string; truncated: boolean }>();
 
 async function desc(ctx: ModuleContext, workspaceId: string): Promise<WorkspaceDescriptor> {
   return ctx.modules.call("workspace", "resolve", { workspaceId });
@@ -162,8 +162,8 @@ const mod: AppModule = {
         if (st.kind === "dir") throw new Error(`${rel} is a directory`);
         const key = `${d.id}|${rel}`;
         const cached = docCache.get(key);
-        if (cached && cached.mtime === st.mtime && cached.size === st.size) {
-          return { workspaceId: d.id, relativePath: rel, document: cached.document, language: langFromPath(rel), size: st.size, mtime: st.mtime, binary: false, truncated: false, cached: true };
+        if (cached && cached.mtime === st.mtime && cached.size === st.size && (!a.includeText || cached.text !== undefined)) {
+          return { workspaceId: d.id, relativePath: rel, document: cached.document, language: langFromPath(rel), size: st.size, mtime: st.mtime, binary: false, truncated: cached.truncated, ...(a.includeText ? { text: cached.text } : {}), cached: true };
         }
         const r = await ctx.host.fs.read(g.grant, rel, MAX_VIEW_BYTES);
         if (r.binary) {
@@ -172,8 +172,8 @@ const mod: AppModule = {
         const language = langFromPath(rel);
         const text = r.truncated ? r.text + `\n\n… truncated: file is larger than ${MAX_VIEW_BYTES} bytes` : r.text!;
         const document = await ctx.host.ui.documentOpen(d.id, text, language, { path: rel });
-        docCache.set(key, { document, mtime: st.mtime, size: st.size });
-        return { workspaceId: d.id, relativePath: rel, document, language, size: st.size, mtime: st.mtime, binary: false, truncated: r.truncated };
+        docCache.set(key, { document, mtime: st.mtime, size: st.size, ...(a.includeText ? { text } : {}), truncated: r.truncated });
+        return { workspaceId: d.id, relativePath: rel, document, language, size: st.size, mtime: st.mtime, binary: false, truncated: r.truncated, ...(a.includeText ? { text } : {}) };
       });
     },
 

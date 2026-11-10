@@ -576,6 +576,7 @@ const mod: AppModule = {
     ws = ctx.state.get("workspace.selected") || null;
     ctx.state.watch("workspace.selected", (v: any) => { ws = v; ctx.ui.invalidate(); });
     ctx.events.on("agents-panel.openMcps", () => revealPanel(ctx, "mcps"));
+    ctx.events.on("terminal-panel.reveal", (event: any) => { if (event.workspaceId === ws?.id) revealPanel(ctx, "terminal"); });
     ctx.events.on("ai.openMcps", () => revealPanel(ctx, "mcps"));
     ctx.events.on("workflows-panel.reveal", () => revealPanel(ctx, "workflows"));
     ctx.events.on("ai.chatOpened", () => revealPanel(ctx, "ai"));

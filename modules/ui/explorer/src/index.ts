@@ -150,7 +150,7 @@ const mod: AppModule = {
     const toggle = (key: string, icon: string, on: boolean, action: string, tooltip: string): UiNode => ({ type: "button", key, text: "", iconSvg: icon, action, small: true, variant: on ? "primary" : "ghost", tooltip, disabled: !ws });
     const children: UiNode[] = [
       { type: "row", key: "filter-bar", gap: 4, align: "center", children: [
-        { type: "textInput", key: "file-filter", prefixSvg: contentMode ? uiIcons["text-search"] : uiIcons.search, placeholder: contentMode ? "Search in files" : "Filter files", value: query, changeAction: "filter", submitAction: "submitFilter", grow: true, disabled: !ws },
+        { type: "textInput", key: "file-filter", height: 34, prefixSvg: contentMode ? uiIcons["text-search"] : uiIcons.search, placeholder: contentMode ? "Search in files" : "Filter files", value: query, changeAction: "filter", submitAction: "submitFilter", grow: true, disabled: !ws },
         ...(query ? [{ type: "button", key: "clear", text: "", iconSvg: uiIcons["x"], action: "clearFilter", small: true, variant: "ghost", tooltip: "Clear filter" } as UiNode] : []),
         toggle("content-mode", uiIcons["text-search"], contentMode, "toggleContent", contentMode ? "Searching file contents — click to filter by file name" : "Search the filter text inside files"),
         toggle("show-ignored", showIgnored ? uiIcons.eye : uiIcons["eye-off"], showIgnored, "toggleIgnored", showIgnored ? "Showing .gitignored files — click to hide them" : "Show .gitignored files"),

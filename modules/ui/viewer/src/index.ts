@@ -11,6 +11,8 @@ import { resolveWorkspaceLink } from "@hato/sdk/links";
 import { diffTabPath } from "@hato/sdk/git";
 import { uiIcons } from "@hato/sdk/ui-icons";
 
+import { shellBlocks } from "./markdown";
+
 let showMetadata = true;
 let renderMarkdown = true;
 let diffMode: "split" | "unified" = "split";
@@ -47,6 +49,7 @@ async function save(ctx: ModuleContext, b: Buffer, force = false) {
   try {
     const r = await ctx.modules.call("files", "save", { workspaceId: b.workspaceId, relativePath: b.path, text, expectedMtime: b.mtime, force }, { timeoutMs: 600000 });
     b.mtime = r?.mtime ?? b.mtime;
+    if (current?.workspaceId === b.workspaceId && current.relativePath === b.path) current.text = text;
     if (b.text === text) { b.state = "clean"; b.text = null; } else b.state = "dirty";
     b.error = undefined;
   } catch (e: any) {
@@ -67,6 +70,15 @@ function scheduleSaves(ctx: ModuleContext, now = false) {
 
 let tabs: string[] = [];
 let tabMenu: string | null = null;
+const shellRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+function runShellBlock(ctx: ModuleContext, args: object) {
+  const requestId = crypto.randomUUID();
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => { shellRequests.delete(requestId); reject(new Error("Opening the shell block terminal timed out.")); }, 60000);
+    shellRequests.set(requestId, { resolve, reject, timer });
+    ctx.events.emit("viewer.runCode", { requestId, ...args });
+  });
+}
 let generation = 0;
 function restoreTabs() {
   const saved = ws?.view?.ui?.viewerTabs;
@@ -90,7 +102,7 @@ async function load(ctx: ModuleContext, force = false) {
     const diffPath = diffTabPath(path);
     const r = diffPath
       ? { ...(await ctx.modules.call("git", "diff", { workspaceId, path: diffPath }, { timeoutMs: 45000 })), diff: true, relativePath: diffPath }
-      : await ctx.modules.call("files", "open", { workspaceId, relativePath: path });
+      : await ctx.modules.call("files", "open", { workspaceId, relativePath: path, includeText: /\.(md|markdown)$/i.test(path) });
     if (mine === generation) {
       current = { ...r, workspaceId, tab: path }; error = null;
       if (!r.diff && r.document && !buffers.has(r.document)) {
@@ -134,6 +146,12 @@ const mod: AppModule = {
   id: "viewer",
   moduleApiVersion: 1,
   async activate(ctx, prev) {
+    ctx.events.on("terminal-panel.runCodeResult", (result: any) => {
+      const pending = shellRequests.get(result?.requestId);
+      if (!pending) return;
+      shellRequests.delete(result.requestId); clearTimeout(pending.timer);
+      if (result.error) pending.reject(new Error(result.error)); else pending.resolve();
+    });
     const saved = await ctx.modules.call("persistence", "settings.get", { key: "viewer.showMetadata" });
     showMetadata = typeof saved === "boolean" ? saved : true;
     const savedMarkdown = await ctx.modules.call("persistence", "settings.get", { key: "viewer.renderMarkdown" });
@@ -197,6 +215,8 @@ const mod: AppModule = {
     await load(ctx);
   },
   async deactivate(ctx) {
+    for (const pending of shellRequests.values()) { clearTimeout(pending.timer); pending.reject(new Error("Editor reloaded.")); }
+    shellRequests.clear();
     // Flush pending edits before a hot swap; unsaved buffers also survive in the snapshot.
     if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
     if (autosave) await Promise.all([...buffers.values()].filter(b => b.state === "dirty").map(b => save(ctx, b)));
@@ -208,7 +228,11 @@ const mod: AppModule = {
     const title = current ? (diff ? `Changes in ${current.relativePath}` : current.relativePath) : ws?.view?.previewPath || "No file selected";
     const kids: UiNode[] = [
       { type: "row", key: "tabs", gap: 3, wrap: true, children: tabs.map((path): UiNode => ({ type: "row", key: path, gap: 0, style: fileTabStyle(ws?.view?.previewPath === path), children: [
-        { type: "button", key: "select", iconSvg: fileIcons.file, text: tabLabel(path), tooltip: diffTabPath(path) ? `Changes in ${diffTabPath(path)}` : path, action: `select:${path}`, middleClickAction: `close:${path}`, contextAction: `tabMenu:${path}`, small: true, variant: "ghost", style: tabButtonStyle(ws?.view?.previewPath === path) },
+        { type: "button", key: "select", iconSvg: fileIcons.file, text: tabLabel(path), tooltip: diffTabPath(path) ? `Changes in ${diffTabPath(path)}` : path, action: `select:${path}`, middleClickAction: `close:${path}`, contextAction: `tabMenu:${path}`, contextMenu: [
+          { text: "Close", action: `close:${path}` },
+          { text: "Close all to the right", action: "closeRight", value: path, disabled: tabs.indexOf(path) === tabs.length - 1 },
+          { text: "Close all", action: "closeAll", value: path },
+        ], small: true, variant: "ghost", style: tabButtonStyle(ws?.view?.previewPath === path) },
         { type: "button", key: "close", text: "", iconSvg: uiIcons["x"], tooltip: `Close ${path}`, action: `close:${path}`, small: true, variant: "ghost", style: tabButtonStyle(ws?.view?.previewPath === path) },
       ] })) },
 
@@ -216,8 +240,26 @@ const mod: AppModule = {
     if (error) kids.push({ type: "status", key: "err", text: error, level: "error" });
     if (loadingPath) kids.push({ type: "progress", key: "ld", indeterminate: true, label: `Opening ${loadingPath}…` });
     if (current && current.binary) kids.push({ type: "status", key: "bin", text: current.message, level: "info" });
-    if (diff) kids.push({ type: "diff", key: "diff", document: current.document, mode: diffMode, header: false, emptyText: "No changes against HEAD.", grow: true });
-    else if (markdown && renderMarkdown) kids.push({ type: "markdown", key: "preview", document: current.document, linkAction: "openLink", grow: true });
+    if (diff) kids.push({ type: "diff", key: "diff", document: current.document, mode: diffMode, softWrap: true, header: false, emptyText: "No changes against HEAD.", grow: true });
+    else if (markdown && renderMarkdown) {
+      const markdownText = bufferFor(current.relativePath)?.text ?? current.text;
+      const blocks = typeof markdownText === "string" ? shellBlocks(markdownText) : [];
+      if (!blocks.length) kids.push({ type: "markdown", key: "preview", document: current.document, linkAction: "openLink", grow: true });
+      else {
+        const content: UiNode[] = [];
+        let offset = 0;
+        for (const [index, block] of blocks.entries()) {
+          content.push({ type: "markdown", key: `md:${offset}`, text: markdownText.slice(offset, block.end), inline: true, linkAction: "openLink" });
+          content.push({ type: "row", key: `run:${block.start}`, gap: 8, padding: 4, children: [
+            { type: "button", key: "run", text: "Run", action: "runShellBlock", value: block.start, variant: "ghost", small: true, tooltip: `Run shell block ${index + 1} in its own workspace terminal` },
+            { type: "label", key: "language", text: block.language, size: "xs", color: "muted" },
+          ] });
+          offset = block.end;
+        }
+        if (offset < markdownText.length) content.push({ type: "markdown", key: `md:${offset}`, text: markdownText.slice(offset), inline: true, linkAction: "openLink" });
+        kids.push({ type: "scroll", key: "preview", padding: 12, grow: true, children: content });
+      }
+    }
     else {
       const canEdit = editable && !!current && !current.binary && !current.truncated && !!current.document;
       kids.push({ type: "codeViewer", key: "code", document: current && !current.binary ? current.document : null, placeholder: ws ? "Open a file from the explorer." : "Select a workspace.", grow: true,
@@ -242,10 +284,12 @@ const mod: AppModule = {
         { type: "label", key: "lang", text: diff ? (current.truncated ? "diff (truncated)" : "") : current && showMetadata ? `${current.language} · ${current.size} B${current.truncated ? " (truncated)" : ""}` : "", size: "xs", color: "muted" },
       ] }
     );
-    if (tabMenu && tabs.includes(tabMenu)) kids.push({ type: "popover", key: "tab-menu", top: 32, left: 4, maxHeight: 90, style: { background: "panel", padding: 6, radius: 6, borderWidth: 1, borderColor: "border" }, closeAction: "dismissTabMenu", children: [
-      { type: "button", key: "right", text: "Close all to the right", action: "closeRight", variant: "ghost" },
-      { type: "button", key: "all", text: "Close all", action: "closeAll", variant: "ghost" },
-    ] });
+    // Compact fallback for a host that has not yet loaded the native context-menu capability.
+    if (tabMenu && tabs.includes(tabMenu)) kids.push({ type: "popover", key: "tab-menu", width: 236, top: 34, left: 4, maxHeight: 92,
+      style: { background: "panel", padding: 6, radius: 6, borderWidth: 1, borderColor: "border" }, closeAction: "dismissTabMenu", children: [
+        { type: "button", key: "right", text: "Close all to the right", action: "closeRight", value: tabMenu, variant: "ghost" },
+        { type: "button", key: "all", text: "Close all", action: "closeAll", value: tabMenu, variant: "ghost" },
+      ] });
     return { type: "column", key: "viewer-root", style: { position: "relative" }, gap: 3, padding: 4, grow: true, children: kids };
   },
   async onEvent(ctx, ev) {
@@ -258,6 +302,13 @@ const mod: AppModule = {
         b.text = v.text;
         if (b.state === "clean" || b.state === "error") b.state = "dirty";
         if (autosave && b.state === "dirty") scheduleSaves(ctx);
+      } else if (ev.action === "runShellBlock" && current && !current.diff) {
+        const text = bufferFor(current.relativePath)?.text ?? current.text;
+        const blocks = typeof text === "string" ? shellBlocks(text) : [];
+        const index = blocks.findIndex(block => block.start === ev.value);
+        const block = blocks[index];
+        if (!block || !block.code.trim()) return;
+        await runShellBlock(ctx, { workspaceId: ws.id, path: current.relativePath, block: index, code: block.code, language: block.language });
       } else if (ev.action === "save") {
         const b = current?.document ? buffers.get(current.document) : undefined;
         if (b && b.text !== null) { b.state = "dirty"; await save(ctx, b); }
@@ -285,7 +336,7 @@ const mod: AppModule = {
       } else if (ev.action === "dismissTabMenu") { tabMenu = null;
       } else if (ev.action.startsWith("tabMenu:")) { tabMenu = ev.action.slice(8);
       } else if (ev.action === "closeRight" || ev.action === "closeAll") {
-        const index = tabs.indexOf(tabMenu || "");
+        const index = tabs.indexOf(typeof ev.value === "string" ? ev.value : tabMenu || "");
         if (index < 0) return;
         const closing = ev.action === "closeAll" ? [...tabs] : tabs.slice(index + 1);
         tabMenu = null;

@@ -76,7 +76,7 @@ function renderNode(node: Node): UiNode {
   return { type: "column", key: node.id, gap: 3, padding: 4, grow: true, children: [
     { type: "row", key: "tabs", gap: 3, wrap: true, children: [
       ...node.keys.map((key): UiNode => ({ type: "row", key, gap: 0, style: terminalTabStyle(node.active === key), children: [
-        { type: "button", key: "select", iconSvg: sidebarIcons.terminal, text: `Terminal ${all.flatMap(b => b.keys).indexOf(key) + 1}${unread.has(key) ? " •" : ""}`,
+        { type: "button", key: "select", iconSvg: sidebarIcons.terminal, text: `${key.startsWith("md:") ? key.slice(3, key.lastIndexOf(":" )).split("/").pop() + " · block " + (Number(key.slice(key.lastIndexOf(":" ) + 1)) + 1) : "Terminal " + (all.flatMap(b => b.keys).indexOf(key) + 1)}${unread.has(key) ? " •" : ""}`,
           action: `select:${key}`, middleClickAction: `close:${key}`, small: true, variant: "ghost", style: tabButtonStyle(node.active === key, true), disabled: locked },
         { type: "button", key: "close", text: "", iconSvg: uiIcons["x"], action: `close:${key}`, small: true, variant: "ghost",
           style: tabButtonStyle(node.active === key, true), tooltip: "Close terminal", disabled: locked },
@@ -105,6 +105,11 @@ const mod: AppModule = {
       if (changed) { reset(); void attachVisible(ctx); ctx.ui.invalidate(); }
     });
     ctx.events.on("terminals.changed", () => ctx.ui.invalidate());
+    ctx.events.on("viewer.runCode", async (args: any) => {
+      if (typeof args?.requestId !== "string") return;
+      try { await mod.methods!.runCode(ctx, args, { caller: "viewer" }); ctx.events.emit("terminal-panel.runCodeResult", { requestId: args.requestId }); }
+      catch (e) { ctx.events.emit("terminal-panel.runCodeResult", { requestId: args.requestId, error: errMsg(e) }); }
+    });
     await attachVisible(ctx);
     void checkActivity(ctx);
     activityTimer = setInterval(() => { void checkActivity(ctx); }, 1500);
@@ -116,6 +121,33 @@ const mod: AppModule = {
   render(): UiNode { return { type: "column", key: "terminal-root", grow: true, children: [
     ...(error ? [{ type: "status", key: "err", text: error, level: "error" } as UiNode] : []), renderNode(layout),
   ] }; },
+  methods: {
+    async runCode(ctx, args) {
+      if (!ws || args.workspaceId !== ws.id) throw new Error("Select the Markdown file's workspace first.");
+      if (typeof args.path !== "string" || !Number.isSafeInteger(args.block) || args.block < 0 || typeof args.code !== "string" || !args.code.trim() || args.code.length > 32768 || args.code.includes("\0")) throw new Error("Invalid shell block.");
+      const version = epoch, workspaceId = ws.id;
+      const key = `md:${args.path}:${args.block}`;
+      let block = blocks(layout).find(b => b.keys.includes(key));
+      if (!block) {
+        block = blocks(layout)[0];
+        layout = replace(layout, block.id, { ...block, keys: [...block.keys, key], active: key });
+      } else layout = replace(layout, block.id, { ...block, active: key });
+      unread.delete(key);
+      block = blocks(layout).find(b => b.keys.includes(key))!;
+      if (busy.has(block.id)) throw new Error("Wait for this terminal operation to finish.");
+      busy.add(block.id); ctx.ui.invalidate();
+      try {
+        await attach(ctx, block);
+        if (version !== epoch) throw new Error("Workspace changed before the shell block could run.");
+        await save(ctx);
+        ctx.events.emit("terminal-panel.reveal", { workspaceId });
+        const quote = (text: string) => "'" + text.replace(/'/g, "'\\''") + "'";
+        const shell = ["bash", "zsh"].includes(args.language) ? args.language : "sh";
+        await ctx.modules.call("terminals", "runCode", { workspaceId, key, command: `${shell} -c ${quote(args.code)}` }, { timeoutMs: 10000 });
+        return { key };
+      } finally { if (version === epoch) busy.delete(block.id); ctx.ui.invalidate(); }
+    },
+  },
   async onEvent(ctx, ev) {
     if (!ws) return;
     if (ev.action === "resizeBlocks") {

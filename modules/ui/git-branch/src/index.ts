@@ -11,6 +11,8 @@ let query = "", tab: "local" | "remote" = "local";
 let actionsFor: string | null = null;
 let creating = false, source: string | null = null, branchName = "";
 let epoch = 0, mutations = 0;
+let edit: "rename" | "publish" | "upstream" | "delete" | null = null;
+let editValue = "";
 
 async function refresh(ctx: ModuleContext) {
   if (!workspaceId) return;
@@ -30,33 +32,57 @@ async function refresh(ctx: ModuleContext) {
   }
 }
 
-async function mutate(ctx: ModuleContext, method: "checkout" | "createBranch", args: object) {
+async function mutate(ctx: ModuleContext, method: "checkout" | "createBranch" | "renameBranch" | "publishBranch" | "setUpstream" | "deleteBranch", args: object) {
   if (!workspaceId || busy) return;
   const id = workspaceId;
-  ++epoch; loading = false; busy = method === "checkout" ? "Checking out branch…" : "Creating branch…";
+  ++epoch; loading = false; busy = ({ checkout: "Switching branch…", createBranch: "Creating branch…", renameBranch: "Renaming branch…", publishBranch: "Publishing branch…", setUpstream: "Setting upstream…", deleteBranch: "Deleting branch…" })[method];
   error = null; mutations++; ctx.ui.invalidate();
   try {
     const result: GitBranches = await ctx.modules.call("git", method, { workspaceId: id, ...args }, { timeoutMs: 180000 });
     if (workspaceId !== id) return;
-    ++epoch; catalog = result; open = false; creating = false; branchName = ""; actionsFor = null; dirty = false;
+    ++epoch; catalog = result; open = method !== "checkout" && method !== "createBranch"; edit = null; creating = false; branchName = ""; actionsFor = null; dirty = false;
   } catch (e) { if (workspaceId === id) { error = errMsg(e); open = true; } }
   finally { mutations--; if (workspaceId === id) { busy = null; if (dirty) void refresh(ctx); } ctx.ui.invalidate(); }
 }
 
 const button = (key: string, text: string, action: string, extra: object = {}): UiNode => ({ type: "button", key, text, action, small: true, disabled: !!busy, ...extra });
 function branchRow(branch: GitBranch): UiNode {
-  return { type: "column", key: branch.ref, gap: 3, padding: 5, style: { radius: 8, ...(branch.current ? { background: "selection" } : {}) }, children: [
-    { type: "row", key: "row", gap: 6, children: [
+  const expanded = actionsFor === branch.ref;
+  const local = branch.ref.startsWith("refs/heads/");
+  const locked = !!branch.worktree && !branch.current;
+  const action = (key: string, text: string, icon: string, disabled = false, danger = false): UiNode => button(key, text, "editBranch", {
+    value: key, iconSvg: icon, grow: true, disabled: !!busy || disabled, variant: "ghost",
+    style: { background: "panel", color: danger ? "danger" : "muted", radius: 8, paddingX: 10, paddingY: 7, minHeight: 32, justify: "start" },
+  });
+  const children: UiNode[] = [
+    { type: "row", key: "row", gap: 8, align: "center", children: [
       button("checkout", branch.name, "checkout", { value: branch.ref, iconSvg: uiIcons["git-branch"], variant: "ghost", grow: true,
-        disabled: !!busy || branch.current, tooltip: branch.current ? "Current branch" : `Check out ${branch.name}` }),
+        style: { color: branch.current ? "primary" : "text", background: "transparent", paddingX: 8, paddingY: 8, minHeight: 38, fontWeight: 400, justify: "start" },
+        disabled: !!busy || branch.current || locked, tooltip: branch.current ? "Current branch" : locked ? "Checked out in another worktree" : `Check out ${branch.name}` }),
       ...(branch.current ? [{ type: "label", key: "current", text: "✓", color: "primary", size: "sm" } as UiNode] : []),
-      button("actions", "⋮", "branchActions", { value: branch.ref, variant: "ghost", tooltip: `Actions for ${branch.name}` }),
+      button("actions", "⋮", "branchActions", { value: branch.ref, variant: "ghost", tooltip: `Actions for ${branch.name}`, style: { color: "muted", paddingX: 8, minHeight: 32 } }),
     ] },
-    ...(branch.worktree && !branch.current ? [{ type: "label", key: "worktree", text: "In another worktree", color: "muted", size: "xs", tooltip: branch.worktree } as UiNode] : []),
-    ...(actionsFor === branch.ref ? [{ type: "row", key: "actions", gap: 4, children: [
-      button("create-from", "Create branch from here", "createFrom", { value: branch.ref, iconSvg: uiIcons.plus, variant: "ghost" }),
-    ] } as UiNode] : []),
-  ] };
+  ];
+  if (branch.worktree && !branch.current) children.push({ type: "label", key: "worktree", text: "In another worktree", color: "muted", size: "xs", tooltip: branch.worktree, padding: 6 });
+  if (expanded) {
+    if (local) children.push({ type: "column", key: "actions", gap: 4, padding: 6, children: [
+      { type: "row", key: "first", gap: 4, children: [action("rename", "Rename", uiIcons.pencil, locked), action("publish", "Publish", uiIcons.remote, locked || branch.unborn || !catalog?.remotes.length)] },
+      { type: "row", key: "second", gap: 4, children: [action("upstream", "Set upstream", uiIcons["git-branch"], locked || !catalog?.remote.length), action("delete", "Delete", uiIcons.trash, locked || branch.current, true)] },
+    ] });
+    else children.push(button("create-from", "Create local branch from here", "createFrom", { value: branch.ref, iconSvg: uiIcons.plus, variant: "ghost" }));
+    if (edit) {
+      const fields: UiNode[] = [];
+      if (edit === "rename") fields.push({ type: "textInput", key: "branch-edit-name", height: 34, value: editValue, changeAction: "editValue", submitAction: "applyBranchEdit", placeholder: "New branch name" });
+      if (edit === "publish" || edit === "upstream") fields.push({ type: "select", key: "branch-edit-target", value: editValue, action: "editValue", options: edit === "publish" ? (catalog?.remotes || []).map(remote => ({ value: remote, label: remote })) : (catalog?.remote || []).map(remote => ({ value: remote.ref, label: remote.name })) });
+      fields.push({ type: "label", key: "explain", text: edit === "delete" ? `Delete “${branch.name}”? Only merged branches can be deleted. The remote branch stays in place.` : edit === "publish" ? `Push “${branch.name}” and track it on the selected remote.` : edit === "upstream" ? `Track the selected remote branch from “${branch.name}”.` : `Rename “${branch.name}”.`, size: "xs", color: "muted", wrap: true });
+      fields.push({ type: "row", key: "confirm", gap: 6, children: [
+        button("apply", edit === "delete" ? "Delete merged branch" : edit === "publish" ? "Publish branch" : edit === "upstream" ? "Set upstream" : "Rename branch", "applyBranchEdit", { variant: edit === "delete" ? "danger" : "primary", disabled: !!busy || edit !== "delete" && !editValue.trim() }),
+        button("cancel", "Cancel", "cancelBranchEdit", { variant: "ghost" }),
+      ] });
+      children.push({ type: "column", key: "edit", gap: 8, padding: 8, children: fields });
+    }
+  }
+  return { type: "column", key: branch.ref, gap: 2, padding: 4, style: { radius: 10, background: expanded ? "surface" : branch.current ? "selection" : "transparent" }, children };
 }
 
 const mod: AppModule = {
@@ -70,7 +96,7 @@ const mod: AppModule = {
       const next = value?.id || null;
       if (next === workspaceId) return;
       ++epoch; workspaceId = next; catalog = null; open = false; loading = false; dirty = false; busy = null; error = null;
-      query = ""; tab = "local"; creating = false; source = null; branchName = ""; actionsFor = null;
+      query = ""; tab = "local"; creating = false; source = null; branchName = ""; actionsFor = null; edit = null;
       ctx.ui.invalidate(); void refresh(ctx);
     });
     ctx.events.on("git.changed", (event: any) => { if (event.workspaceId === workspaceId) void refresh(ctx); });
@@ -87,20 +113,20 @@ const mod: AppModule = {
       { type: "row", key: "header", gap: 6, children: [
         { type: "column", key: "heading", gap: 3, grow: true, children: [
           { type: "label", key: "title", text: "Switch branch", weight: "semibold" },
-          { type: "label", key: "hint", text: `Current: ${title}`, color: "muted", size: "xs", wrap: true },
+          { type: "label", key: "hint", text: "Select a branch to check it out", color: "muted", size: "xs", wrap: true },
         ] },
         button("refresh", "", "refresh", { iconSvg: uiIcons.refresh, variant: "ghost", tooltip: "Refresh local and remote-tracking branches", disabled: loading || !!busy }),
       ] },
-      { type: "textInput", key: "branch-search", value: query, placeholder: "Find a branch…", prefixSvg: uiIcons.search, changeAction: "filter", disabled: !!busy },
+      { type: "textInput", key: "branch-search", height: 36, value: query, placeholder: "Find a branch…", prefixSvg: uiIcons.search, changeAction: "filter", disabled: !!busy },
       { type: "row", key: "tabs", gap: 6, children: [
-        button("local", `Local ${catalog?.local.length || 0}`, "tab", { value: "local", variant: tab === "local" ? "primary" : "ghost" }),
-        button("remote", `Remote ${catalog?.remote.length || 0}`, "tab", { value: "remote", variant: tab === "remote" ? "primary" : "ghost" }),
+        button("local", `Local ${catalog?.local.length || 0}`, "tab", { value: "local", variant: "ghost", style: { background: tab === "local" ? "selection" : "transparent", color: tab === "local" ? "primary" : "muted", paddingX: 12, paddingY: 7, radius: 8 } }),
+        button("remote", `Remote ${catalog?.remote.length || 0}`, "tab", { value: "remote", variant: "ghost", style: { background: tab === "remote" ? "selection" : "transparent", color: tab === "remote" ? "primary" : "muted", paddingX: 12, paddingY: 7, radius: 8 } }),
       ] },
       { type: "divider", key: "divider" },
     ];
     if (error) children.push({ type: "status", key: "error", text: error, level: "error" });
     if (busy || loading) children.push({ type: "progress", key: "loading", indeterminate: true, label: busy || "Refreshing branches…" });
-    children.push({ type: "scroll", key: "branches", height: Math.min(260, Math.max(48, filtered.length * 48)), children: filtered.map(branchRow) });
+    children.push({ type: "scroll", key: "branches", height: Math.min(360, Math.max(48, filtered.length * 48 + (actionsFor ? edit ? 240 : 100 : 0))), children: filtered.map(branchRow) });
     if (!filtered.length) children.push({ type: "label", key: "empty", text: query ? "No matching branches." : tab === "remote" ? "No remote-tracking branches. Fetch using Git to update this list." : "No local branches.", color: "muted", size: "sm", wrap: true });
     if (creating) children.push({ type: "column", key: "create-form", gap: 5, children: [
       { type: "label", key: "from", text: source ? `From ${source.replace(/^refs\/(heads|remotes)\//, "")}` : "From the current HEAD", size: "xs", color: "muted" },
@@ -122,7 +148,22 @@ const mod: AppModule = {
       case "filter": query = String(event.value || ""); actionsFor = null; break;
       case "tab": tab = event.value === "remote" ? "remote" : "local"; actionsFor = null; break;
       case "refresh": await refresh(ctx); return;
-      case "branchActions": actionsFor = actionsFor === event.value ? null : String(event.value); break;
+      case "branchActions": actionsFor = actionsFor === event.value ? null : String(event.value); edit = null; break;
+      case "editBranch": {
+        const branch = catalog?.local.find(branch => branch.ref === actionsFor);
+        if (!branch || !["rename", "publish", "upstream", "delete"].includes(String(event.value))) return;
+        edit = event.value as typeof edit;
+        editValue = edit === "rename" ? branch.name : edit === "publish" ? catalog?.remotes[0] || "" : edit === "upstream" ? branch.upstream || catalog?.remote[0]?.ref || "" : "";
+        break;
+      }
+      case "editValue": editValue = String(event.value || ""); break;
+      case "cancelBranchEdit": edit = null; break;
+      case "applyBranchEdit": {
+        if (!edit || !actionsFor) return;
+        const method = ({ rename: "renameBranch", publish: "publishBranch", upstream: "setUpstream", delete: "deleteBranch" } as const)[edit];
+        const value = edit === "rename" ? event.inputs?.["branch-edit-name"] ?? editValue : editValue;
+        await mutate(ctx, method, { ref: actionsFor, name: value, remote: value, upstream: value }); return;
+      }
       case "showCreate": creating = true; source = null; branchName = ""; break;
       case "createFrom": creating = true; source = String(event.value); branchName = ""; actionsFor = null; break;
       case "cancelCreate": creating = false; branchName = ""; break;
