@@ -11,11 +11,30 @@ import type { AppModule, ModuleContext, UiNode, ImageAttachment } from "@hato/sd
 import { debounce, errMsg } from "@hato/sdk/runtime";
 import { resolveWorkspaceLink } from "@hato/sdk/links";
 
-import type { AgentView } from "@hato/sdk/persistent-agents";
+import { agentPolicy, agentSettings, type AgentSession, type AgentView } from "@hato/sdk/persistent-agents";
 let background:{workspaceId:string;id:string}|null=null;
 let backgroundPage:AgentView|null=null;
 let backgroundTimer:ReturnType<typeof setInterval>|null=null;
 let backgroundSessions:any[]=[];
+let confirmRuntimeUpdate=false;
+/** Workspace catalog for background chats: providers, MCP servers, instruction files and skills. */
+let backgroundCatalog:{workspaceId:string;profiles:any[];mcps:any[];agentFiles:{name:string;path:string}[];skills:any[]}|null=null;
+/** MCP selection ids of a background session, as offered by the catalog. */
+const sessionMcpIds=(s:AgentSession)=>[...(s.workspaceMcp?["internal-remote-mcp"]:[]),...(s.mcps||[]).map((m:any)=>m.id)];
+const list=(v:any)=>Array.isArray(v)?v:[];
+const normalCatalog=(c:any,workspaceId:string)=>({workspaceId,profiles:list(c?.profiles),mcps:list(c?.mcps),agentFiles:list(c?.agentFiles),skills:list(c?.skills)});
+async function loadCatalog(ctx:ModuleContext) {
+  const workspaceId=ws?.id;if(!workspaceId)return;
+  try{const c=await persistent(ctx,"catalog");if(ws?.id===workspaceId){backgroundCatalog=normalCatalog(c,workspaceId);void load(ctx);}}
+  catch(e){if(background)error=errMsg(e);}
+}
+/** Edit the background agent's provider, instructions, skills or MCP servers. Connected agents restart. */
+async function updateBackground(ctx:ModuleContext,patch:{profileId?:string;agentFile?:string|null;skills?:string[];mcps?:string[]}) {
+  const s=backgroundPage?.session;if(!s)throw new Error("Background session is still loading");
+  if(["busy","waiting","starting"].includes(s.status))throw new Error("Wait for the agent to finish its turn, or stop it, before changing its configuration");
+  await persistent(ctx,"update",{name:s.name,profileId:patch.profileId??s.profile.id,agentFile:patch.agentFile!==undefined?patch.agentFile:s.agentFile,
+    skills:patch.skills??s.skills,mcps:patch.mcps??sessionMcpIds(s)});
+}
 let normalDraft:string|undefined;
 let normalAttachments:ImageAttachment[]=[];
 const backgroundDrafts=new Map<string,string>();
@@ -41,6 +60,7 @@ async function openBackground(ctx:ModuleContext,selection:any) {
   if(backgroundTimer)clearInterval(backgroundTimer);
   backgroundTimer=setInterval(()=>{void load(ctx);},1500);
   ctx.events.emit("ai.chatOpened",{});
+  if(backgroundCatalog?.workspaceId!==selection.workspaceId)void loadCatalog(ctx);
   await ctx.modules.call("workspace", "view.patch", { workspaceId: selection.workspaceId, patch: { ui: { aiBackgroundSession: selection.id } } });
   await load(ctx);
 }
@@ -135,8 +155,11 @@ async function load(ctx: ModuleContext) {
       if(background!==selection||ws?.id!==selection.workspaceId)return;
       backgroundPage=page;
       const session=page.session;
-      view={workspace:{name:ws.name},profiles:[session.profile],conversations:backgroundSessions.map(s=>({id:s.id,title:s.name,acpProfileId:s.profile.id,status:s.status})),activeId:session.id,active:{
-        conversation:{id:session.id,title:session.name,acpProfileId:session.profile.id,status:session.status,approvalPolicy:session.autopilot?"autopilot":"ask",mcpSelection:session.mcps.map(m=>m.id)},
+      const catalog=backgroundCatalog?.workspaceId===ws.id?backgroundCatalog:null;
+      const profiles=catalog?.profiles.some((p:any)=>p.id===session.profile.id)?catalog.profiles:[session.profile,...(catalog?.profiles||[])];
+      view={workspace:{name:ws.name,machineId:session.machineId,root:session.root},profiles,
+        mcpServers:(catalog?.mcps||[]).map((m:any)=>({id:m.id,name:m.name,description:m.description})),conversations:backgroundSessions.map(s=>({id:s.id,title:s.name,acpProfileId:s.profile.id,status:s.status})),activeId:session.id,active:{
+        conversation:{id:session.id,title:session.name,acpProfileId:session.profile.id,status:session.status,approvalPolicy:agentPolicy(session),mcpSelection:sessionMcpIds(session)},
         live:{...session,profileId:session.profile.id},messages:page.messages,windowed:true,hasOlder:page.before!==null,hasLoadedOlder:false,hasNewer:historyBefore.length>0,
         busy:["busy","waiting"].includes(session.status),steering:page.queued.length,
       }};
@@ -223,7 +246,7 @@ const mod: AppModule = {
     if (prev && typeof prev.draft === "string") draft = prev.draft;
     refresh = debounce(() => load(ctx), 40);
     ws = ctx.state.get("workspace.selected") || null;
-    await restoreComposer(ctx);
+    void restoreComposer(ctx);
     workspaceSkillState = ctx.state.get("files.skills") || null;
     ctx.state.watch("files.skills", (value: any) => { workspaceSkillState = value; ctx.ui.invalidate(); });
     ctx.state.watch("workspace.selected", (v: any) => { const changed = ws?.id !== v?.id; ws = v; if(changed){void restoreComposer(ctx);if(background)leaveBackground(ctx);const saved=v?.view?.ui?.aiBackgroundSession;if(saved)void openBackground(ctx,{workspaceId:v.id,id:saved});else void load(ctx);} });
@@ -243,11 +266,14 @@ const mod: AppModule = {
     ctx.events.on("acp.authChanged", () => refresh());
     if(prev?.background&&prev.background.workspaceId===ws?.id) {
       normalDraft=prev.normalDraft;normalAttachments=prev.normalAttachments||[];
-      await openBackground(ctx,prev.background);
+      // Activation must not wait on agents, daemons or SSH; the panel shows its loading state
+      // and fills in when the first load completes.
+      const opening=openBackground(ctx,prev.background);
       normalDraft=prev.normalDraft;normalAttachments=prev.normalAttachments||[];
       draft=prev.draft||"";
-    }else if(ws?.view?.ui?.aiBackgroundSession) await openBackground(ctx,{workspaceId:ws.id,id:ws.view.ui.aiBackgroundSession});
-    else await load(ctx);
+      void opening.catch((e)=>{error=errMsg(e);ctx.ui.invalidate();});
+    }else if(ws?.view?.ui?.aiBackgroundSession) void openBackground(ctx,{workspaceId:ws.id,id:ws.view.ui.aiBackgroundSession}).catch((e)=>{error=errMsg(e);ctx.ui.invalidate();});
+    else void load(ctx);
   },
   deactivate(){if(backgroundTimer)clearInterval(backgroundTimer);backgroundTimer=null;for(const p of requests.values()){clearTimeout(p.timer);p.reject(new Error("Chat module reloaded"));}requests.clear();},
   snapshot: () => background ? ({ draft, attachments, background, normalDraft, normalAttachments, composerFractions: [...composerFractions] }) : ({draft,attachments,composerFractions: [...composerFractions]}),
@@ -270,7 +296,7 @@ const mod: AppModule = {
     const iconButton = (key: string, icon: "sliders-horizontal" | "message-square" | "plus" | "x", action: string, tooltip: string): UiNode => ({ type: "button", key, text: "", iconSvg: uiIcons[icon], action, tooltip, style: chatStyle.iconControl, disabled: !ws });
     const header: UiNode = { type: "row", key: "hdr", style: chatStyle.toolbar, padding: 8, gap: 6, align: "center", children: [
       { type: "column", key: "provider-field", grow: true, minWidth: 100, gap: 0, children: [
-        { type: "select", key: "agent", height: 32, buttonStyle: { ...chatStyle.fieldControl, height: 32 }, tooltip: active?.busy || live?.status === "starting" ? "Wait for the agent to finish or stop its turn before switching providers" : "Provider", options: (view?.profiles || []).map((p: any) => ({ value: p.id, label: p.name.replace(/\s*\([^)]*\)$/, "") })), value: conv?.acpProfileId || null, action: "setProfile", disabled: !conv || !!background || !!active?.busy || live?.status === "starting" || live?.status === "busy", placeholder: "Choose provider" },
+        { type: "select", key: "agent", height: 32, buttonStyle: { ...chatStyle.fieldControl, height: 32 }, tooltip: active?.busy || live?.status === "starting" ? "Wait for the agent to finish or stop its turn before switching providers" : "Provider", options: (view?.profiles || []).map((p: any) => ({ value: p.id, label: p.name.replace(/\s*\([^)]*\)$/, "") })), value: conv?.acpProfileId || null, action: "setProfile", disabled: !conv || !!active?.busy || live?.status === "starting" || live?.status === "busy", placeholder: "Choose provider" },
       ] },
       { type: "column", key: "model-field", grow: true, minWidth: 100, gap: 0, children: [
         { type: "button", key: "cfg-model", style: { ...chatStyle.control, fullWidth: true }, text: modelName + "  ⌄", action: "toggleModels", disabled: model.disabled, tooltip: "Choose model", grow: true },
@@ -294,6 +320,10 @@ const mod: AppModule = {
     if (!ws) kids.push({ type: "label", key: "none", text: "Select a project or task to start chatting.", color: "muted", padding: 16, wrap: true });
     else if (!view) kids.push({ type: "progress", key: "ld", indeterminate: true });
     if (error) kids.push({ type: "status", key: "err", text: error, level: "error" });
+    if (error && background && /runtime is older/.test(error)) kids.push({ type: "row", key: "runtime-fix", gap: 6, padding: 8, children: [
+      { type: "button", key: "update-runtime", text: confirmRuntimeUpdate ? "Confirm: restart agents and update" : "Update runtime", action: confirmRuntimeUpdate ? "updateRuntime" : "askUpdateRuntime", small: true, variant: confirmRuntimeUpdate ? "danger" : "primary", disabled: busy === "updateRuntime" },
+      ...(confirmRuntimeUpdate ? [{ type: "button", key: "cancel-update", text: "Cancel", action: "cancelUpdateRuntime", small: true, variant: "ghost" } as UiNode] : []),
+    ] });
     if (live?.error && !connected) kids.push({ type: "status", key: "liveerr", text: live.error, level: "error" });
     if (adaptersOpen && ws) kids.push(adapterWindow());
     if (historyOpen && view) {
@@ -316,15 +346,7 @@ const mod: AppModule = {
       ] });
     }
     if (conv) {
-      if(settingsOpen&&background&&backgroundPage) {
-        const session=backgroundPage.session;
-        kids.push({type:"column",key:"settings",padding:12,gap:8,children:[
-          {type:"label",key:"workspace",text:session.workspaceName+" · "+session.machineId},
-          {type:"label",key:"instructions",text:"Instructions: "+(session.agentFile||"None"),wrap:true},
-          {type:"label",key:"skills",text:"Skills: "+(session.skills.join(", ")||"None"),wrap:true},
-          {type:"label",key:"mcp",text:"MCP: "+[...(session.workspaceMcp?["Workspace tools"]:[]),...session.mcps.map(m=>m.name)].join(", "),wrap:true},
-        ]});
-      } else if (settingsOpen) {
+      if (settingsOpen) {
         const fields: UiNode[] = [
           { type: "row", key: "heading", gap: 8, children: [
             { type: "label", key: "title", text: providerName + " settings", weight: "bold", grow: true },
@@ -342,11 +364,29 @@ const mod: AppModule = {
           if (option?.description) fields.push({ type: "label", key: field.key + "-hint", text: option.description, size: "sm", color: "muted", wrap: true });
         }
         fields.push({ type: "select", key: "policy", label: "Approval policy", options: POLICIES, value: conv.approvalPolicy, action: "setPolicy", buttonStyle: chatStyle.fieldControl });
+        if (background && backgroundPage) {
+          const session = backgroundPage.session, files = backgroundCatalog?.agentFiles || [];
+          const idle = !["busy", "waiting", "starting"].includes(session.status);
+          fields.push({ type: "select", key: "agent-file", label: "Instructions", buttonStyle: chatStyle.fieldControl, action: "setAgentFile", disabled: !idle,
+            options: [{ value: "", label: "None" }, ...files.map(f => ({ value: f.path, label: f.path })), ...(session.agentFile && !files.some(f => f.path === session.agentFile) ? [{ value: session.agentFile, label: session.agentFile }] : [])],
+            value: session.agentFile || "", tooltip: "Instruction file sent with the first prompt. Changing it restarts a connected agent." });
+          fields.push({ type: "label", key: "agent-skills", text: "Instruction skills: " + (session.skills.join(", ") || "None") + " · edit in the Agents panel", size: "xs", color: "muted", wrap: true });
+        }
         if (profile?.authOption) fields.push({ type: "toggle", key: "provider-auth", label: profile.authOption.label, checked: view.auth?.[profile.authOption.field] !== false, action: "toggleProviderAuth", tooltip: profile.authOption.description });
         fields.push({ type: "label", key: "loc", text: `${live?.machineId || view.workspace.machineId} · ${view.workspace.root}`, size: "xs", color: "muted", wrap: true });
         fields.push({ type: "row", key: "connection", gap: 8, children: [
-          { type: "button", key: "connect", text: connected ? "Disconnect" : "Connect", action: connected ? "disconnect" : "connect", style: chatStyle.control },
+          ...(background ? [
+            { type: "button", key: "connect", text: connected ? "Reconnect" : "Connect", action: "reconnect", style: chatStyle.control, disabled: !!active?.busy } as UiNode,
+            { type: "button", key: "stop", text: "Stop agent", action: "stopBackground", style: chatStyle.control, disabled: !live || live.status === "stopped" } as UiNode,
+          ] : [{ type: "button", key: "connect", text: connected ? "Disconnect" : "Connect", action: connected ? "disconnect" : "connect", style: chatStyle.control } as UiNode]),
           { type: "button", key: "adapters", text: "Manage agents…", action: "openAdapters", style: chatStyle.control },
+        ] });
+        if (background) fields.push({ type: "row", key: "runtime", gap: 8, align: "center", children: [
+          { type: "button", key: "update-runtime", text: confirmRuntimeUpdate ? "Confirm update" : "Update runtime", action: confirmRuntimeUpdate ? "updateRuntime" : "askUpdateRuntime",
+            style: chatStyle.control, variant: confirmRuntimeUpdate ? "danger" : undefined, disabled: busy === "updateRuntime",
+            tooltip: "Install this desktop's agent runtime on the machine now. Running background agents restart and reconnect; a turn in progress is interrupted." },
+          ...(confirmRuntimeUpdate ? [{ type: "button", key: "cancel-update", text: "Cancel", action: "cancelUpdateRuntime", style: chatStyle.control } as UiNode] : []),
+          { type: "label", key: "hint", text: confirmRuntimeUpdate ? "Restarts all background agents on this machine" : "", size: "xs", color: "muted", grow: true, wrap: true },
         ] });
         kids.push({ type: "column", key: "settings", style: chatStyle.settings, grow: true, scroll: true, gap: 10, padding: 12, children: fields });
       } else {
@@ -370,7 +410,7 @@ const mod: AppModule = {
           { type: "image", key: "preview", image, width: 80, height: 64 },
           { type: "button", key: "remove", text: "× " + image.name, action: "removeImage", value: index, small: true, tooltip: "Remove picture" },
         ] })) });
-        composer.push({ type: "textInput", key: "prompt", style: { ...chatStyle.textarea, minHeight: 72 }, changeAction:"draftChanged", pasteImageAction: background?undefined:"attachImages", maxFiles: 4, maxBytes: 5 * 1024 * 1024, placeholder: active.busy ? "Steer " + providerName + "…" : "Ask " + providerName + "…", multiline: true, fillHeight: true, grow: true, rows: 2, submitAction: "send", value: draft });
+        composer.push({ type: "textInput", key: "prompt", style: { ...chatStyle.textarea, minHeight: 72 }, changeAction:"draftChanged", pasteImageAction: "attachImages", maxFiles: 4, maxBytes: 5 * 1024 * 1024, placeholder: active.busy ? "Steer " + providerName + "…" : "Ask " + providerName + "…", multiline: true, fillHeight: true, grow: true, rows: 2, submitAction: "send", value: draft });
         composer.push({ type: "row", key: "act", gap: 6, children: [
           { type: "imagePicker", key: "attach", action: "attachImages", iconSvg: uiIcons.paperclip, style: chatStyle.attach, maxFiles: 4, maxBytes: 5 * 1024 * 1024,
             dialogTitle: "Attach pictures", tooltip: "Attach pictures (PNG, JPEG, WebP or GIF)", disabled: busy === "send" },
@@ -381,7 +421,6 @@ const mod: AppModule = {
           ...(active.busy ? [{ type: "button", key: "cancel", text: "Stop", action: "cancel", style: chatStyle.control } as UiNode] : []),
           { type: "button", key: "send", text: "", iconSvg: uiIcons.send, action: "send", style: chatStyle.iconPrimary, variant: "primary", disabled: busy === "send", tooltip: active.busy ? "Steer agent" : "Send message" },
         ] });
-        if(background){const actions=composer.find(n=>n.key==="act");if(actions&&"children" in actions)actions.children=(actions.children||[]).filter(n=>!["attach","mcp-toggle","context-usage"].includes(n.key));}
         const transcript = kids.pop()!;
         kids.push({ type: "split", key: "chat-composer-split", direction: "vertical", grow: true,
           fixed: attachments.length ? [null, 240] : undefined,
@@ -390,11 +429,11 @@ const mod: AppModule = {
           tooltip: "Drag the divider above the input to resize it",
         });
       }
-      if (mcpOpen && conv && !background) {
+      if (mcpOpen && conv) {
         const servers: any[] = view.mcpServers || [{ id: "internal", name: "Hato" }];
         const on = new Set<string>(conv.mcpSelection || []);
         const applied = new Set<string>(live?.mcp?.selection || (live?.mcp?.enabled ? ["internal"] : []));
-        const pending = connected && [...new Set([...on, ...applied])].some(id => on.has(id) !== applied.has(id));
+        const pending = !background && connected && [...new Set([...on, ...applied])].some(id => on.has(id) !== applied.has(id));
         kids.push({ type: "popover", key: "mcp-picker", closeAction: "toggleMcpPicker", bottom: 56, maxHeight: 460, style: { ...chatStyle.picker, background: "background" }, children: [
           { type: "row", key: "head", gap: 8, padding: 10, align: "center", children: [
             { type: "label", key: "t", text: "Tools for this chat", weight: "semibold", grow: true },
@@ -408,7 +447,8 @@ const mod: AppModule = {
                 { type: "label", key: "n", text: sv.name, size: "sm", weight: "medium" },
                 ...(sv.description ? [{ type: "label", key: "d", text: sv.description, size: "xs", color: "muted", wrap: true } as UiNode] : []),
               ] },
-              { type: "switch", key: "s", label: "", checked: on.has(sv.id), action: "toggleMcp:" + sv.id },
+              { type: "switch", key: "s", label: "", checked: on.has(sv.id), action: "toggleMcp:" + sv.id, disabled: !!background && !!active.busy,
+                tooltip: background ? "Applies immediately; a connected background agent restarts with the new tools" : undefined },
             ] })),
             ...(pending ? [{ type: "row", key: "apply", gap: 8, align: "center", style: { background: "#d8962014", radius: 8, paddingX: 8, paddingY: 6 }, children: [
               { type: "label", key: "t", text: "Reconnect to apply changes", size: "xs", grow: true },
@@ -460,6 +500,18 @@ const mod: AppModule = {
       ctx.ui.invalidate(); return;
     }
     if(ev.action==="draftChanged"){draft=String(ev.value||"");ctx.ui.invalidate();return;}
+    if(ev.action==="askUpdateRuntime"){confirmRuntimeUpdate=true;ctx.ui.invalidate();return;}
+    if(ev.action==="cancelUpdateRuntime"){confirmRuntimeUpdate=false;ctx.ui.invalidate();return;}
+    if(ev.action==="updateRuntime"&&ws) {
+      if(busy)return;
+      confirmRuntimeUpdate=false;busy="updateRuntime";error=null;ctx.ui.invalidate();
+      try {
+        const r=await persistent(ctx,"updateRuntime",{workspaceId:ws.id});
+        if(r?.failed?.length)error="Runtime updated, but these agents did not reconnect: "+r.failed.map((f:any)=>`${f.name} (${f.error})`).join(", ");
+      }catch(e){error=errMsg(e);}
+      finally{busy=null;await loadCatalog(ctx);await load(ctx);ctx.ui.invalidate();}
+      return;
+    }
     if(ev.action==="backToChats"){
       await ctx.modules.call("workspace","view.patch",{workspaceId:ws.id,patch:{ui:{aiBackgroundSession:null}}});
       leaveBackground(ctx);await load(ctx);return;
@@ -473,9 +525,31 @@ const mod: AppModule = {
         if(!available.plugins.some(p=>p.id==="persistent-agents"&&p.active))throw new Error("Enable Background Agents in Marketplace to start a chat that runs while Hato is closed.");
         const catalog=await persistent(ctx,"catalog");
         if(ws?.id!==workspaceId)return;
+        backgroundCatalog=normalCatalog(catalog,workspaceId);
         const profileId=catalog.profiles.some((p:any)=>p.id===current?.acpProfileId)?current.acpProfileId:catalog.profiles[0]?.id;
         if(!profileId)throw new Error("Install and enable an AI provider for this workspace first.");
-        const session=await persistent(ctx,"create",{profileId,name:"Chat",model:backgroundPage?.session.model||"",skills:[],mcps:["internal-remote-mcp"],agentFile:catalog.agentFiles.some((f:any)=>f.path==="AGENTS.md")?"AGENTS.md":null});
+        const offered=(id:string)=>id==="internal-remote-mcp"||list(catalog.mcps).some((m:any)=>m.id===id);
+        const shown=backgroundPage?.session,samePrevious=background&&shown?.profile.id===profileId?shown:null;
+        let config:any;
+        if(background&&backgroundPage) {
+          // Same configuration as the background chat being viewed.
+          const s=backgroundPage.session;
+          config={model:samePrevious?s.model:"",agentFile:list(catalog.agentFiles).some((f:any)=>f.path===s.agentFile)?s.agentFile:null,
+            skills:s.skills.filter(p=>list(catalog.skills).some((k:any)=>k.path===p)),mcps:sessionMcpIds(s).filter(offered),
+            approvalPolicy:agentPolicy(s),settings:samePrevious?agentSettings(s.settings):{}};
+        } else {
+          // From a desktop chat: its provider, model, mode/effort options, approval policy and MCP servers.
+          const live=view?.active?.live, sameProvider=live&&current?.acpProfileId===profileId;
+          const model=sameProvider?(selectors(live,true).find(n=>n.key==="cfg-model") as any)?.value||"":"";
+          const settings:Record<string,string|boolean>={};
+          if(sameProvider)for(const o of live.configOptions||[])if(o.category!=="model"&&o.currentValue!==undefined&&o.currentValue!==null)settings[o.id]=typeof o.currentValue==="boolean"?o.currentValue:String(o.currentValue);
+          if(sameProvider&&!(live.configOptions||[]).some((o:any)=>o.category==="mode")&&live.modes?.currentModeId)settings.__mode=String(live.modes.currentModeId);
+          const local=(current?.mcpSelection||["internal"]) as string[];
+          config={model,agentFile:list(catalog.agentFiles).some((f:any)=>f.path==="AGENTS.md")?"AGENTS.md":null,skills:[],
+            mcps:["internal-remote-mcp",...local.map(id=>id==="internal"?"internal-local-mcp":id)].filter((id,i,all)=>offered(id)&&all.indexOf(id)===i),
+            approvalPolicy:current?.approvalPolicy||"ask",settings};
+        }
+        const session=await persistent(ctx,"create",{profileId,name:"Chat",...config});
         if(ws?.id===workspaceId)await openBackground(ctx,{workspaceId,id:session.id});
       }catch(e){error=errMsg(e);}finally{busy=null;ctx.ui.invalidate();}
       return;
@@ -490,18 +564,35 @@ const mod: AppModule = {
       if(backgroundSessions.some(s=>s.id===ev.value))await openBackground(ctx,{workspaceId:ws.id,id:ev.value});
       return;
     }
-    if(background && !["toggleModels","searchModels","toggleSettings","openLink"].includes(ev.action)) {
+    const backgroundAction=["send","chooseModel","cancel","stopBackground","toggleAuto","setPolicy","setProfile","setAgentFile","reconnect","connect","disconnect",
+      "reviewBackgroundPermission","revealOlder","loadOlder","olderMessages","revealNewer","newerMessages","latestMessages","collapseHistory"].includes(ev.action)
+      ||ev.action.startsWith("setConfig:")||ev.action.startsWith("toggleMcp:");
+    if(background && backgroundAction) {
       const selection=background;
       let actionError:string|null=null;
       try {
         if(ev.action==="send") {
-          const text=(ev.inputs.prompt||draft||"").trim();if(!text||busy==="send")return;
-          busy="send";ctx.ui.invalidate();await persistent(ctx,"send",{text,steer:!!view?.active?.busy});
-          if(background===selection){draft="";historyBefore=[];historyLimit=CHAT_MESSAGE_LIMIT;}
+          const text=(ev.inputs.prompt||draft||"").trim();if((!text&&!attachments.length)||busy==="send")return;
+          busy="send";ctx.ui.invalidate();await persistent(ctx,"send",{text,steer:!!view?.active?.busy,...(attachments.length?{images:attachments}:{})});
+          if(background===selection){draft="";attachments=[];historyBefore=[];historyLimit=CHAT_MESSAGE_LIMIT;}
         }else if(ev.action==="chooseModel") {await persistent(ctx,"setModel",{model:ev.value});modelsOpen=false;}
+        else if(ev.action.startsWith("setConfig:"))await persistent(ctx,"setConfig",{configId:ev.action.slice(10),value:ev.value});
+        else if(ev.action==="toggleAuto"||ev.action==="setPolicy") {
+          const policy=ev.action==="toggleAuto"?(ev.value?"autopilot":"ask"):String(ev.value||"ask");
+          // Older runtimes only know autopilot on/off.
+          try{await persistent(ctx,"setPolicy",{policy});}
+          catch(e){if(policy==="auto-low")throw e;await persistent(ctx,"setAutopilot",{enabled:policy==="autopilot"});}
+        }
+        else if(ev.action==="setProfile"){if(ev.value!==backgroundPage?.session.profile.id)await updateBackground(ctx,{profileId:String(ev.value)});}
+        else if(ev.action==="setAgentFile")await updateBackground(ctx,{agentFile:ev.value?String(ev.value):null});
+        else if(ev.action.startsWith("toggleMcp:")) {
+          const id=ev.action.slice("toggleMcp:".length),current=new Set(backgroundPage?sessionMcpIds(backgroundPage.session):[]);
+          if(ev.value)current.add(id);else current.delete(id);
+          await updateBackground(ctx,{mcps:[...current]});
+        }
+        else if(ev.action==="disconnect")await persistent(ctx,"stop");
         else if(ev.action==="cancel")await persistent(ctx,"cancel");
         else if(ev.action==="stopBackground")await persistent(ctx,"stop");
-        else if(ev.action==="toggleAuto")await persistent(ctx,"setAutopilot",{enabled:!!ev.value});
         else if(ev.action==="reconnect"||ev.action==="connect")await persistent(ctx,"reconnect");
         else if(ev.action==="reviewBackgroundPermission")await persistent(ctx,"reviewPermission",{permissionId:ev.value});
         else if(["revealOlder","loadOlder","olderMessages"].includes(ev.action)) {

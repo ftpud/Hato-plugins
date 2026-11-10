@@ -9,6 +9,9 @@ let status: any = null;
 let error: string | null = null;
 let busy: string | null = null;
 let timer: any = null;
+/** Force update asks for a second click: it replaces running plugins and stops what they hold. */
+let confirmUpdate = false;
+let updateNote: string | null = null;
 
 async function refresh(ctx: ModuleContext) {
   if (!ws) { status = null; ctx.ui.invalidate(); return; }
@@ -50,8 +53,13 @@ const mod: AppModule = {
     if (!ws) return { type: "column", key: "root", padding: 8, children: [{ type: "label", key: "none", text: "Select a project or task.", color: "muted" }] };
     kids.push({ type: "row", key: "head", gap: 6, align: "center", children: [
       { type: "label", key: "machine", text: status ? `${status.machineId}` : ws.machineId, weight: "semibold", size: "sm", grow: true },
+      ...(status?.running ? [{ type: "button", key: "force-update", text: confirmUpdate ? "Confirm update" : "Force update", action: confirmUpdate ? "forceUpdate" : "askForceUpdate",
+        small: true, variant: confirmUpdate ? "danger" : "ghost", disabled: !!busy,
+        tooltip: confirmUpdate ? "Replaces every daemon plugin now. Running background agents and workflow runs stop and must reconnect." : "Send this desktop's current build of all daemon plugins, even while they are busy" } as UiNode] : []),
+      ...(confirmUpdate ? [{ type: "button", key: "cancel-update", text: "Cancel", action: "cancelForceUpdate", small: true, variant: "ghost" } as UiNode] : []),
       { type: "button", key: "refresh", text: "", iconSvg: uiIcons.refresh, action: "refresh", small: true, variant: "ghost", tooltip: "Refresh" },
     ] });
+    if (updateNote) kids.push({ type: "status", key: "update-note", text: updateNote, level: "success" });
     if (busy) kids.push({ type: "progress", key: "busy", indeterminate: true, label: busy });
     if (error || status?.error) kids.push({ type: "status", key: "err", text: error || status.error, level: "error" });
     if (!status) return { type: "column", key: "root", padding: 8, gap: 6, children: kids };
@@ -87,6 +95,15 @@ const mod: AppModule = {
     if (!workspaceId) return;
     switch (ev.action) {
       case "refresh": return refresh(ctx);
+      case "askForceUpdate": confirmUpdate = true; updateNote = null; ctx.ui.invalidate(); return;
+      case "cancelForceUpdate": confirmUpdate = false; ctx.ui.invalidate(); return;
+      case "forceUpdate": confirmUpdate = false; return run(ctx, "Updating daemon plugins…", async () => {
+        const r: any = await ctx.modules.call("remote-runtime", "forceUpdate", { workspaceId }, { timeoutMs: 600000 });
+        const reloaded = (r?.plugins || []).filter((p: any) => p.reloaded).map((p: any) => p.id);
+        const failed = (r?.plugins || []).filter((p: any) => p.error);
+        if (failed.length) throw new Error("Update failed for " + failed.map((p: any) => `${p.id} (${p.error})`).join(", "));
+        updateNote = reloaded.length ? `Updated ${reloaded.join(", ")}. Reconnect background agents to continue.` : "Daemon plugins were already up to date.";
+      });
       case "ensure": return run(ctx, "Starting daemon…", () => ctx.modules.call("remote-runtime", "ensure", { workspaceId }, { timeoutMs: 600000 }));
       case "kill": return run(ctx, "Stopping…", () => ctx.modules.call("remote-runtime", "kill", { workspaceId, ...(ev.value as any) }));
       case "push": return run(ctx, `Sending ${ev.value}…`, () => ctx.modules.call("remote-runtime", "push", { workspaceId, id: ev.value }, { timeoutMs: 120000 }));

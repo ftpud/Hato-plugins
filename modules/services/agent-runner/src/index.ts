@@ -4,7 +4,10 @@ import type { AppModule, ModuleContext, Handle, ChatMessage, StreamSubscription 
 import { JsonRpcPeer, errMsg, rpcError } from "@hato/sdk/runtime";
 import { advertisedChoices } from "@hato/sdk/workflow-provider-options";
 import { agentExecutable } from "@hato/sdk/agent-executable";
-import { modelChoices, relativeAgentPath, type AgentSpec, type AgentSession, type AgentPermission } from "@hato/sdk/persistent-agents";
+import { modelChoices, relativeAgentPath, agentPolicy, agentSettings, LOW_RISK_TOOL_KINDS, type AgentSpec, type AgentSession, type AgentPermission } from "@hato/sdk/persistent-agents";
+import { imageAttachments } from "@hato/sdk/images";
+import { reportedUsage } from "@hato/sdk/context-usage";
+import type { ImageAttachment } from "@hato/sdk/types";
 
 interface Live {
   session: AgentSession; peer: JsonRpcPeer; process: Handle; subscriptions: StreamSubscription[];
@@ -33,7 +36,7 @@ function persist(ctx:ModuleContext,s:AgentSession) {
   const json=JSON.stringify(s);
   return enqueue(()=>ctx.host.db.exec(db,"INSERT INTO sessions(id, data) VALUES(?, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data",[s.id,json]));
 }
-function message(ctx:ModuleContext,s:AgentSession,role:ChatMessage["role"],text:string,title?:string,status?:string) {
+function message(ctx:ModuleContext,s:AgentSession,role:ChatMessage["role"],text:string,title?:string,status?:string,images?:ImageAttachment[]) {
   // Persist each protocol chunk before turn completion; read projections merge adjacent chunks.
   s.revision++;
   const turn=live.get(s.id)?.turn||0;
@@ -42,7 +45,7 @@ function message(ctx:ModuleContext,s:AgentSession,role:ChatMessage["role"],text:
       const last=(await ctx.host.db.query<any>(db,"SELECT seq,role,turn FROM messages WHERE session_id=? ORDER BY seq DESC LIMIT 1",[s.id]))[0];
       if(last?.role===role&&last.turn===turn)return ctx.host.db.exec(db,"UPDATE messages SET text=text||? WHERE seq=?",[text,last.seq]);
     }
-    return ctx.host.db.exec(db,"INSERT INTO messages(session_id, role, text, title, status, turn) VALUES(?,?,?,?,?,?)",[s.id,role,text,title||null,status||null,turn]);
+    return ctx.host.db.exec(db,"INSERT INTO messages(session_id, role, text, title, status, turn, images_json) VALUES(?,?,?,?,?,?,?)",[s.id,role,text,title||null,status||null,turn,images?.length?JSON.stringify(images):null]);
   });
 }
 function publicSession(s:AgentSession) {
@@ -66,6 +69,17 @@ async function config(ctx:ModuleContext,c:Live,id:string,value:string) {
   }
   c.session.model=value; await persist(ctx,c.session);
 }
+/** Apply one advertised provider setting: configOptions when advertised, legacy modes/models otherwise. */
+async function applySetting(c:Live,id:string,value:string|boolean) {
+  const s=c.session;
+  if((s.configOptions||[]).some((o:any)=>o.id===id)) {
+    const r=await request(c,"session/set_config_option",{sessionId:s.sessionId,configId:id,value});
+    if(Array.isArray(r?.configOptions))s.configOptions=r.configOptions;
+  } else if(id==="__mode"&&s.modes) {
+    await request(c,"session/set_mode",{sessionId:s.sessionId,modeId:String(value)});
+    s.modes={...s.modes,currentModeId:String(value)};
+  } else throw new Error(`Provider does not advertise setting '${id}'`);
+}
 function update(ctx:ModuleContext,c:Live,u:any) {
   const kind=u.sessionUpdate;
   if(kind==="agent_message_chunk" || kind==="agent_thought_chunk") {
@@ -81,6 +95,8 @@ function update(ctx:ModuleContext,c:Live,u:any) {
   } else if(kind==="plan") {
     void message(ctx,c.session,"plan",(u.entries||[]).map((e:any)=>`- ${e.content} (${e.status})`).join("\n")).catch(e=>ctx.log.error(errMsg(e)));
   } else if(kind==="config_option_update") { c.session.configOptions=u.configOptions||[];void persist(ctx,c.session); }
+  else if(kind==="current_mode_update"&&c.session.modes) { c.session.modes={...c.session.modes,currentModeId:u.currentModeId};void persist(ctx,c.session); }
+  else if(kind==="usage_update") { c.session.usage=reportedUsage(u);void persist(ctx,c.session); }
 }
 async function readContext(ctx:ModuleContext,s:AgentSession):Promise<string> {
   if(!s.agentFile && !s.skills.length)return "";
@@ -140,8 +156,9 @@ async function start(ctx:ModuleContext,s:AgentSession) {
       if(params.sessionId!==s.sessionId)throw rpcError(-32602,"Wrong session");
       const tool=params.toolCall||{},options:any[]=params.options||[];
       const allowOnce=options.find(o=>o.kind==="allow_once")||options.find(o=>String(o.kind).startsWith("allow"));
-      if(s.autopilot&&allowOnce) {
-        ctx.log.info(`autopilot approved "${tool.title||tool.kind||"tool"}" for ${s.name}`);
+      const policy=agentPolicy(s);
+      if(allowOnce&&(policy==="autopilot"||(policy==="auto-low"&&LOW_RISK_TOOL_KINDS.has(tool.kind)))) {
+        ctx.log.info(`${policy} approved "${tool.title||tool.kind||"tool"}" for ${s.name}`);
         return {outcome:{outcome:"selected",optionId:allowOnce.optionId}};
       }
       const id=crypto.randomUUID();
@@ -161,6 +178,7 @@ async function start(ctx:ModuleContext,s:AgentSession) {
     const init=await request(c,"initialize",{protocolVersion:1,clientCapabilities:{fs:{readTextFile:false,writeTextFile:false},terminal:false},clientInfo:{name:"hato-agents",version:"0.1.0"}});
     if(init.protocolVersion!==1)throw new Error("Unsupported ACP version");
     c.steering=init._meta?.steering?.supported===true;
+    s.promptImages=init.agentCapabilities?.promptCapabilities?.image===true;
     // Remote MCP servers need the provider's matching transport (e.g. Codex has HTTP but not SSE).
     const caps=init.agentCapabilities?.mcpCapabilities||{};
     for(const m of s.mcps as any[])if((m.type==="http"||m.type==="sse")&&!caps[m.type])throw new Error(`${s.profile.name} cannot connect to ${m.type.toUpperCase()} MCP server “${m.name}”. Use a provider that supports it${m.type==="sse"?" or switch the server to Streamable HTTP":""}.`);
@@ -173,13 +191,22 @@ async function start(ctx:ModuleContext,s:AgentSession) {
     let result:any;
     if(s.sessionId) {
       if(!init.agentCapabilities?.loadSession)throw new Error("Provider cannot reload this session; create a new agent to avoid losing its context");
-      result=await request(c,"session/load",{sessionId:s.sessionId,cwd:s.root,mcpServers});
-    } else {
+      try { result=await request(c,"session/load",{sessionId:s.sessionId,cwd:s.root,mcpServers}); }
+      catch(e) {
+        // The provider no longer has this session (never prompted, expired or removed): start a
+        // new one, as desktop chats do, instead of leaving the agent unable to reconnect.
+        ctx.log.warn(`session/load failed for ${s.name}; starting a new provider session`,errMsg(e));
+        const hadHistory=!!s.contextSent;
+        s.sessionId=null;s.contextSent=false;c.firstPrompt=true;
+        if(hadHistory)await message(ctx,s,"system",`The provider could not resume its previous session (${errMsg(e)}). Started a new one: earlier messages stay here, but the agent does not remember them.`);
+      }
+    }
+    if(!s.sessionId) {
       result=await request(c,"session/new",{cwd:s.root,mcpServers});
       if(typeof result.sessionId!=="string"||!result.sessionId)throw new Error("Provider did not return a session id");
       s.sessionId=result.sessionId;
     }
-    s.configOptions=result.configOptions||[];s.models=result.models||null;s.status="ready";
+    s.configOptions=result.configOptions||[];s.models=result.models||null;s.modes=result.modes||null;s.status="ready";
     if(s.model) {
       const choice=modelChoices(s).find(m=>m.id===s.model);
       if(!choice)throw new Error(`Provider does not advertise model ${s.model}`);
@@ -191,19 +218,28 @@ async function start(ctx:ModuleContext,s:AgentSession) {
       const configured=await request(c,"session/set_config_option",{sessionId:s.sessionId,configId:choices.reasoningId,value:s.reasoning});
       if(configured.configOptions)s.configOptions=configured.configOptions;
     }
+    // Saved provider options (mode, effort, ...) follow the agent across reconnects. An option the
+    // provider stopped advertising is dropped rather than blocking the connection.
+    for(const [id,value] of Object.entries(agentSettings(s.settings))) {
+      try{await applySetting(c,id,value);}
+      catch(e){ctx.log.warn(`dropping setting ${id} for ${s.name}: ${errMsg(e)}`);const next={...s.settings};delete next[id];s.settings=next;}
+    }
     await persist(ctx,s); return c;
   } catch(e) {
     if(c) { await stop(ctx,s.id); }
     s.status="error";s.error=errMsg(e);await persist(ctx,s);throw e;
   }
 }
-async function prompt(ctx:ModuleContext,c:Live,text:string) {
+function promptBlocks(text:string,images:ImageAttachment[]) {
+  return [...(text?[{type:"text",text}]:[]),...images.map(i=>({type:"image",mimeType:i.mimeType,data:i.data}))];
+}
+async function prompt(ctx:ModuleContext,c:Live,text:string,images:ImageAttachment[]=[]) {
   const s=c.session;
   if(s.status!=="ready")throw new Error("Agent is not idle");
   c.turn=Date.now();c.cancelSent=false;s.status="busy";s.error=null;
-  await message(ctx,s,"user",text);await persist(ctx,s);
+  await message(ctx,s,"user",text,undefined,undefined,images);await persist(ctx,s);
   const context=c.firstPrompt?c.context:""; c.firstPrompt=false;s.contextSent=true;await persist(ctx,s);
-  void c.peer.request("session/prompt",{sessionId:s.sessionId,prompt:[{type:"text",text:context?`${context}\n\nUser request:\n${text}`:text}]}).then(async r=>{
+  void c.peer.request("session/prompt",{sessionId:s.sessionId,prompt:promptBlocks(context?`${context}\n\nUser request:\n${text}`:text,images)}).then(async r=>{
     await enqueue(()=>ctx.host.db.exec(db,"UPDATE permissions SET resolved=1 WHERE session_id=?",[s.id]));
     for(const pending of c.permissions.values())pending.resolve({outcome:{outcome:"cancelled"}});
     c.permissions.clear();
@@ -226,6 +262,8 @@ const mod:AppModule={
   async activate(ctx) {
     db=await ctx.host.db.openNamespace("agent-runner");
     await ctx.host.db.exec(db,"CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, data TEXT NOT NULL, queue_json TEXT NOT NULL DEFAULT '[]'); CREATE TABLE IF NOT EXISTS messages(seq INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL,role TEXT NOT NULL,text TEXT NOT NULL,title TEXT,status TEXT,turn INTEGER); CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id,seq); CREATE TABLE IF NOT EXISTS permissions(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,data TEXT NOT NULL,resolved INTEGER NOT NULL DEFAULT 0)");
+    const columns=await ctx.host.db.query<any>(db,"PRAGMA table_info(messages)");
+    if(!columns.some(c=>c.name==="images_json"))await ctx.host.db.exec(db,"ALTER TABLE messages ADD COLUMN images_json TEXT");
     for(const row of await ctx.host.db.query<any>(db,"SELECT data FROM sessions")) {
       const s:AgentSession=JSON.parse(row.data);
       if(["starting","ready","busy","waiting"].includes(s.status)) {s.status="interrupted";s.error="Runtime restarted; reconnect to resume. An interrupted turn is never replayed automatically.";await persist(ctx,s);}
@@ -235,7 +273,7 @@ const mod:AppModule={
   },
   canSwap:()=>({ok:live.size===0,reason:"Stop persistent agents before replacing their runtime"}),
   methods:{
-    health:()=>({ok:true,reasoning:true,mcpActivity:true,toolTitles:true,connected:live.size}),
+    health:()=>({ok:true,reasoning:true,mcpActivity:true,toolTitles:true,chatSettings:true,images:true,policy:true,connected:live.size}),
     async fork(ctx,a,meta) {
       if(!["internal-remote-mcp","daemon-client"].includes(meta.caller))throw new Error("Only workspace controllers can create child agents");
       const parent=session(a.parentId);
@@ -263,15 +301,21 @@ const mod:AppModule={
       for(const r of rows) {
         const last=messages[messages.length-1];
         if(last && (r.role==="assistant"||r.role==="thought") && last.role===r.role && (last as any).turn===r.turn)last.text+=r.text;
-        else messages.push({key:`agent-msg-${r.seq}`,role:r.role,text:r.text,title:r.title,status:r.status,...{turn:r.turn}});
+        else {
+          let images:ImageAttachment[]|undefined;
+          try{images=r.images_json?imageAttachments(JSON.parse(r.images_json)):undefined;}catch{images=undefined;}
+          messages.push({key:`agent-msg-${r.seq}`,role:r.role,text:r.text,title:r.title,status:r.status,...(images?.length?{images}:{}),...{turn:r.turn}});
+        }
       }
       const permissions=await ctx.host.db.query<any>(db,"SELECT data FROM permissions WHERE session_id=? AND resolved=0 ORDER BY rowid",[s.id]);
       const queue=await ctx.host.db.query<any>(db,"SELECT queue_json FROM sessions WHERE id=?",[s.id]);
       return {session:publicSession(s),messages,before:older?rows[0].seq:null,permissions:permissions.map(p=>JSON.parse(p.data)),queued:JSON.parse(queue[0]?.queue_json||"[]")};
     },
     send:(ctx,a)=>serialize(String(a.id),async()=>{
-      const s=session(a.id),text=String(a.text||"").trim();if(!text||text.length>128*1024)throw new Error("Prompt is empty or too large");
+      const s=session(a.id),text=String(a.text||"").trim(),images=imageAttachments(a.images);
+      if((!text&&!images.length)||text.length>128*1024)throw new Error("Prompt is empty or too large");
       const c=await start(ctx,s);
+      if(images.length&&!s.promptImages)throw new Error(`${s.profile.name} does not support image prompts. Choose a provider with image support.`);
       if(s.status==="busy"||s.status==="waiting") {
         if(a.steer!==true)throw new Error("Agent is busy; use Steer");
         // Without steering support (or if it fails) a follow-up interrupts the turn, as before.
@@ -279,16 +323,18 @@ const mod:AppModule={
         if(c.steering&&!c.queued.length) {
           // Inject into the running turn; only a turn that already ended needs a new prompt.
           let outcome="unsupported";
-          try{const r=await request(c,"_session/steering",{sessionId:s.sessionId,prompt:[{type:"text",text}],_meta:{steering:{idleBehavior:"promptRequired"}}},30000);outcome=r?.outcome==="promptRequired"?"promptRequired":"steered";}
+          try{const r=await request(c,"_session/steering",{sessionId:s.sessionId,prompt:promptBlocks(text,images),_meta:{steering:{idleBehavior:"promptRequired"}}},30000);outcome=r?.outcome==="promptRequired"?"promptRequired":"steered";}
           catch(e){ctx.log.warn("steering failed; falling back to interrupt",errMsg(e));interrupt=true;}
-          if(outcome==="steered"){await message(ctx,s,"user",text);await persist(ctx,s);return {steered:true};}
+          if(outcome==="steered"){await message(ctx,s,"user",text,undefined,undefined,images);await persist(ctx,s);return {steered:true};}
           if(outcome==="promptRequired") {
-            if((s.status as string)==="ready")return prompt(ctx,c,text);  // the turn may end while steering
+            if((s.status as string)==="ready")return prompt(ctx,c,text,images);  // the turn may end while steering
+            if(images.length)throw new Error("Wait for the agent to finish its turn before sending pictures");
             c.queued.push(text);
             await ctx.host.db.exec(db,"UPDATE sessions SET queue_json=? WHERE id=?",[JSON.stringify(c.queued),s.id]);
             return {queued:true};
           }
         }
+        if(images.length)throw new Error("Wait for the agent to finish its turn before sending pictures");
         c.queued.push(text);
         await ctx.host.db.exec(db,"UPDATE sessions SET queue_json=? WHERE id=?",[JSON.stringify(c.queued),s.id]);
         if(interrupt&&!c.cancelSent) {
@@ -299,7 +345,7 @@ const mod:AppModule={
           await c.peer.notify("session/cancel",{sessionId:s.sessionId});}
         return {queued:true};
       }
-      return prompt(ctx,c,text);
+      return prompt(ctx,c,text,images);
     }),
     reconnect:(ctx,a)=>serialize(String(a.id),async()=>{
       const s=session(a.id);
@@ -314,6 +360,27 @@ const mod:AppModule={
       await ctx.host.db.exec(db,"UPDATE permissions SET resolved=1 WHERE session_id=?",[c.session.id]);
       await c.peer.notify("session/cancel",{sessionId:c.session.sessionId});}return null;},
     setModel:(ctx,a)=>serialize(String(a.id),async()=>{const c=live.get(String(a.id));if(!c)throw new Error("Reconnect agent first");const choice=modelChoices(c.session).find(m=>m.id===a.model);if(!choice)throw new Error("Unknown model");await config(ctx,c,choice.configId,choice.id);return c.session;}),
+    /** Change one provider option (mode, reasoning, ...) on the connected agent and keep it for reconnects. */
+    setConfig:(ctx,a)=>serialize(String(a.id),async()=>{
+      const c=live.get(String(a.id));if(!c)throw new Error("Reconnect agent first");
+      if(c.session.status!=="ready")throw new Error("Agent must be idle to change its settings");
+      const id=String(a.configId||""),value=typeof a.value==="boolean"?a.value:String(a.value??"");
+      const model=modelChoices(c.session).find(m=>m.configId===id&&m.id===value);
+      if(id==="__model"||model){if(!model)throw new Error("Unknown model");await config(ctx,c,model.configId,model.id);c.session.usage=null;await persist(ctx,c.session);return publicSession(c.session);}
+      await applySetting(c,id,value);
+      c.session.settings={...agentSettings(c.session.settings),[id]:value};
+      await persist(ctx,c.session);return publicSession(c.session);
+    }),
+    async setPolicy(ctx,a,meta) {
+      if(meta.caller!=="daemon-client")throw new Error("Only the desktop gateway changes approval policy");
+      const s=session(a.id),policy=a.policy==="autopilot"?"autopilot":a.policy==="auto-low"?"auto-low":"ask";
+      if(policy==="autopilot")return mod.methods!.setAutopilot(ctx,{id:s.id,enabled:true},meta);
+      const before=agentPolicy(s);
+      s.approvalPolicy=policy;
+      if(s.autopilot)return mod.methods!.setAutopilot(ctx,{id:s.id,enabled:false},meta);
+      if(before!==policy){await persist(ctx,s);await message(ctx,s,"system",policy==="auto-low"?"Auto-approving low-risk tools (read, search, think, fetch); other requests wait for review.":"Approval policy: every permission request waits for review.");}
+      return publicSession(s);
+    },
     async setAutopilot(ctx,a,meta) {
       if(meta.caller!=="daemon-client")throw new Error("Only the desktop gateway changes autopilot");
       const s=session(a.id),enabled=a.enabled===true;
@@ -349,7 +416,7 @@ const mod:AppModule={
       s.name=name;
       if(configChanged) {
         Object.assign(s,{profile:p.profile,model:String(p.model||""),agentFile:p.agentFile||null,skills:p.skills,mcps:p.mcps,workspaceMcp:!!p.workspaceMcp,contextSent:false});
-        if(newProvider){s.sessionId=null;s.configOptions=[];s.models=null;s.reasoning="";}
+        if(newProvider){s.sessionId=null;s.configOptions=[];s.models=null;s.modes=null;s.usage=null;s.reasoning="";s.settings={};}
       }
       await persist(ctx,s);
       if(configChanged&&wasLive)await start(ctx,s);

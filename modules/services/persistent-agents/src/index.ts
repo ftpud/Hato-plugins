@@ -2,7 +2,8 @@ import { providerProfiles } from "@hato/sdk/agent-providers";
 import type { AppModule, ModuleContext, DaemonTarget } from "@hato/sdk/types";
 import { sshConnect, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { workspaceSkills } from "../../files/src/skills";
-import { agentActivity, relativeAgentPath, type AgentMcp, type AgentSpec } from "@hato/sdk/persistent-agents";
+import { agentActivity, agentSettings, relativeAgentPath, type AgentMcp, type AgentSpec } from "@hato/sdk/persistent-agents";
+import { imageAttachments } from "@hato/sdk/images";
 import { acpServer, transportOf, validateMcp } from "@hato/sdk/mcp-servers";
 
 const activityCache=new Map<string,{revision:number;status:string;text:string}>();
@@ -37,7 +38,12 @@ async function target(ctx:ModuleContext,workspaceId:string):Promise<DaemonTarget
 async function invoke(ctx:ModuleContext,workspaceId:string,method:string,args:any={}) {
   const t=await target(ctx,workspaceId);
   try {return await ctx.host.daemon.request(t,"modules.call",{target:"agent-runner",method,args,timeoutMs:180000});}
-  catch(e) {const d=await ctx.modules.call("workspace","resolve",{workspaceId});prepared.delete(d.machineId);throw e;}
+  catch(e) {
+    // An older runtime keeps running until its agents stop; Hato never replaces a busy runtime.
+    if((e as any)?.code==="ENOMETHOD"||/has no method/.test(String((e as any)?.message||e)))
+      throw new Error("This machine's background agent runtime is older than Hato and lacks this setting. Use “Update runtime” in the chat settings (or Force update in the Remote runtime panel), then try again.");
+    const d=await ctx.modules.call("workspace","resolve",{workspaceId});prepared.delete(d.machineId);throw e;
+  }
 }
 async function mcps(ctx:ModuleContext):Promise<AgentMcp[]> {
   return await ctx.modules.call("persistence","settings.get",{key:"persistent-agents.mcps"})||[];
@@ -205,7 +211,7 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     },1500);
     // The AI module owns this request namespace; native event enforcement prevents spoofing it.
     // Keep this UI adapter allowlist narrow instead of exposing arbitrary module calls.
-    const allowed=new Set(["create","catalog","list","view","send","cancel","stop","reconnect","setModel","setAutopilot","reviewPermission","clear"]);
+    const allowed=new Set(["create","catalog","list","view","send","cancel","stop","reconnect","setModel","setConfig","setAutopilot","setPolicy","update","updateRuntime","reviewPermission","clear"]);
     ctx.events.on("mcp-panel.request",async(request:any)=>{
       if(typeof request?.requestId!=="string"||!["listMcps","saveMcp","removeMcp","probeMcp","signInMcp","signOutMcp","cancelSignInMcp"].includes(request.method))return;
       try{const value=await mod.methods![request.method](ctx,request.args||{},{caller:"mcp-panel"});ctx.events.emit("persistent-agents.mcpResponse",{requestId:request.requestId,value});}
@@ -249,13 +255,18 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     await editMcps(ctx,list=>list.filter(m=>m.id!==a.id));
     await ctx.modules.call("mcp-auth","signOut",{serverId:a.id}).catch(()=>{});return null;
   },
-  async create(ctx,a) {
+  async create(ctx,a,meta) {
     const c=await catalog(ctx,String(a.workspaceId));
     const id=crypto.randomUUID();
     const config=await agentConfig(ctx,c,a,id);
     const subscription=await ctx.modules.call("persistence","settings.get",{key:"acp.claude.useSubscription"});
+    // Chats started from the AI panel carry the current chat's approval policy and provider options.
+    const policy=a.approvalPolicy==="autopilot"?"autopilot":a.approvalPolicy==="auto-low"?"auto-low":"ask";
+    const settings=agentSettings(a.settings);
     const spec:AgentSpec={id,name:String(a.name||"Agent").trim().slice(0,120),workspaceId:c.workspace.id,workspaceName:c.workspace.name,root:c.workspace.rootAbsolutePath,machineId:c.workspace.machineId,
-      ...config,claudeSubscription:subscription!==false,daemon:daemonInfo.get(c.workspace.machineId)};
+      ...config,claudeSubscription:subscription!==false,daemon:daemonInfo.get(c.workspace.machineId),
+      ...(meta?.caller==="ai"&&policy!=="ask"?{autopilot:policy==="autopilot",approvalPolicy:policy==="auto-low"?"auto-low" as const:undefined}:{}),
+      ...(Object.keys(settings).length?{settings}:{})};
     return invoke(ctx,c.workspace.id,"create",{spec});
   },
   /** Edit name, provider, instructions, skills and MCP servers. Only a rename leaves a connected agent running. */
@@ -316,7 +327,34 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     return list.map(m=>({id:m.id,...acpServer(m,auth[m.id])}));
   },
   async view(ctx,a) {const v=await invoke(ctx,String(a.workspaceId),"view",{id:a.id,before:a.before,limit:a.limit});if(v.session.workspaceId!==a.workspaceId)throw new Error("Agent belongs to another workspace");return v;},
-  async send(ctx,a) {await owned(ctx,a);return invoke(ctx,a.workspaceId,"send",{id:a.id,text:a.text,steer:!!a.steer});},
+  async send(ctx,a) {await owned(ctx,a);const images=imageAttachments(a.images);return invoke(ctx,a.workspaceId,"send",{id:a.id,text:a.text,steer:!!a.steer,...(images.length?{images}:{})});},
+  /** Replace this machine's agent runtime with the desktop's current build, even while agents run.
+   *  Agents that were connected are reconnected afterwards (their provider sessions resume). */
+  async updateRuntime(ctx,a) {
+    const workspaceId=String(a.workspaceId);
+    const d:WorkspaceDescriptor=await ctx.modules.call("workspace","resolve",{workspaceId});
+    const t=await target(ctx,workspaceId);
+    let rows:any[]=[];
+    try{rows=await ctx.host.daemon.request(t,"modules.call",{target:"agent-runner",method:"list",args:{},timeoutMs:15000});}catch{}
+    const wasLive=(rows||[]).filter((s:any)=>s.machineId===d.machineId&&["starting","ready","busy","waiting"].includes(s.status));
+    const pushed:any[]=[];
+    for(const id of ["internal-remote-mcp","agent-runner"]) {
+      const r=await ctx.host.daemon.request(t,"plugins.push",{id});
+      if(!r?.active)throw new Error(`${id} did not activate after the update: ${r?.error||"unknown error"}`);
+      pushed.push({id,reloaded:!!r.reloaded});
+    }
+    const reconnected:string[]=[],failed:{id:string;name:string;error:string}[]=[];
+    for(const s of wasLive) {
+      try{await mod.methods!.reconnect(ctx,{workspaceId:s.workspaceId,id:s.id},{caller:"persistent-agents"});reconnected.push(s.id);}
+      catch(e){failed.push({id:s.id,name:s.name,error:e instanceof Error?e.message:String(e)});}
+    }
+    activityCache.clear();
+    ctx.events.emit("persistent-agents.changed",{workspaceId});
+    ctx.events.emit("remote-runtime.changed",{machineId:d.machineId});
+    return {machineId:d.machineId,pushed,reconnected,failed};
+  },
+  async setConfig(ctx,a) {await owned(ctx,a);return invoke(ctx,a.workspaceId,"setConfig",{id:a.id,configId:String(a.configId||""),value:typeof a.value==="boolean"?a.value:String(a.value??"")});},
+  async setPolicy(ctx,a) {await owned(ctx,a);return invoke(ctx,a.workspaceId,"setPolicy",{id:a.id,policy:String(a.policy||"ask")});},
   async cancel(ctx,a) {await owned(ctx,a);return invoke(ctx,a.workspaceId,"cancel",{id:a.id});},
   async stop(ctx,a) {await owned(ctx,a);const result=await invoke(ctx,a.workspaceId,"stop",{id:a.id});
     await ctx.modules.call("internal-local-mcp","revoke",{conversationId:a.id}).catch(()=>{});

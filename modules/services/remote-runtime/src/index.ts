@@ -145,6 +145,31 @@ const mod: AppModule = {
       ctx.events.emit("remote-runtime.changed", {});
       return r;
     },
+    /** Push the desktop's current build of every daemon-side plugin, replacing running versions.
+     *  Unlike automatic pushes this does not wait for idle: processes held by a replaced plugin
+     *  (e.g. background agents) stop and must reconnect. The daemon binary itself is native and
+     *  still restarts only when idle. */
+    async forceUpdate(ctx, a) {
+      const { d, target } = await resolve(ctx, String(a.workspaceId));
+      await ctx.host.daemon.ensure(target);
+      const local = (await ctx.host.plugins.list()).plugins.filter((p) => p.enabled && p.kind === "service");
+      const remote: any[] = (await ctx.host.daemon.request<any>(target, "plugins.list"))?.plugins || [];
+      const ids = [...new Set([
+        ...(d.location === "ssh" ? ["persistence"] : []),
+        ...remote.filter((p) => p.enabled !== false && local.some((l) => l.id === p.id)).map((p) => String(p.id)),
+        ...(await workspacePlugins(ctx)).map((p) => p.id),
+      ])];
+      const results: any[] = [];
+      for (const id of ids) {
+        try { const r = await ctx.host.daemon.request<any>(target, "plugins.push", { id }); results.push({ id, reloaded: !!r?.reloaded, active: r?.active || null, error: r?.error || null }); }
+        catch (e) { results.push({ id, reloaded: false, active: null, error: errMsg(e) }); }
+      }
+      const failed = results.filter((r) => r.error);
+      if (failed.length) lastError.set(d.machineId, failed.map((r) => `${r.id}: ${r.error}`).join("; ")); else lastError.delete(d.machineId);
+      ctx.events.emit("remote-runtime.changed", { machineId: d.machineId });
+      ctx.events.emit("remote-runtime.updated", { machineId: d.machineId, plugins: results.filter((r) => r.reloaded).map((r) => r.id) });
+      return { machineId: d.machineId, plugins: results };
+    },
     async disable(ctx, a) {
       const { target } = await resolve(ctx, String(a.workspaceId));
       const r = await ctx.host.daemon.request(target, "plugins.disable", { id: String(a.id) });
