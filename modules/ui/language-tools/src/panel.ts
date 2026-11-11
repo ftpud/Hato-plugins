@@ -6,7 +6,11 @@ export class LanguagePanel {
   symbols: any[] = [];
   open = false;
   picking = false;
+  scope: "project" | "file" = "project";
+  private searchTimer: ReturnType<typeof setTimeout> | null = null;
+  private searchVersion = 0;
   private filter = "";
+  private fullLog: string | null = null;
   busy = false;
   error: string | null = null;
   private browsing: { field: string; path: string; entries: any[] } | null = null;
@@ -14,14 +18,14 @@ export class LanguagePanel {
   private target = "";
   private workspaceId = "";
   private serverId = "";
-  reset() { this.epoch++; this.status = this.project = null; this.symbols = []; this.open = this.picking = false; this.busy = false; this.error = null; this.target = ""; this.browsing = null; this.filter = ""; }
+  reset() { if (this.searchTimer) clearTimeout(this.searchTimer); this.searchVersion++; this.epoch++; this.status = this.project = null; this.symbols = []; this.open = this.picking = false; this.busy = false; this.error = null; this.target = ""; this.browsing = null; this.filter = ""; this.fullLog = null; }
   matches(workspaceId: string, serverId: string) { return this.workspaceId === workspaceId && this.serverId === serverId; }
   update(ctx: ModuleContext, status: any) {
     if (!this.matches(status.workspaceId, status.serverId)) return;
     this.status = status; ctx.ui.invalidate();
   }
   async attach(ctx: ModuleContext, workspaceId: string, serverId: string, path: string) {
-    const target = `${workspaceId}|${serverId}|${path}`;
+    const target = `${workspaceId}|${serverId}`;
     if (target === this.target) return;
     this.reset(); this.target = target; this.workspaceId = workspaceId; this.serverId = serverId;
     const epoch = this.epoch;
@@ -43,16 +47,20 @@ export class LanguagePanel {
     if (!this.open && !this.picking) return null;
     const children: UiNode[] = [
       { type: "row", key: "header", gap: 8, children: [
-        { type: "label", key: "title", text: this.picking ? "File symbols" : this.project?.schema?.title || "Language server", grow: true },
+        { type: "label", key: "title", text: this.picking ? this.scope === "project" ? "Project symbols" : "File symbols" : this.project?.schema?.title || "Language server", grow: true },
         { type: "button", key: "close", text: "Close", action: "languageClose", small: true, variant: "ghost" },
       ] },
     ];
     if (this.error) children.push({ type: "status", key: "error", text: this.error, level: "error" });
     if (this.picking) {
+      children.push({type:"row",key:"symbol-scope",gap:6,children:[
+        {type:"button",key:"project",text:"Project",action:"languageSymbolScope",value:"project",variant:this.scope==="project"?"primary":"ghost"},
+        {type:"button",key:"file",text:"Current file",action:"languageSymbolScope",value:"file",variant:this.scope==="file"?"primary":"ghost"},
+      ]});
       children.push({ type: "textInput", key: "symbol-filter", value: this.filter, changeAction: "languageFilter", placeholder: "Find a class, method or field…" });
-      children.push({ type: "button", key: "refresh", text: this.busy ? "Loading…" : "Refresh symbols", action: "languageSymbols", disabled: this.busy });
-      if (!this.symbols.length && !this.busy) children.push({ type: "label", key: "empty", text: "No symbols returned yet. Check server status; the project may still be importing.", wrap: true });
-      children.push(...this.symbols.map((symbol, index) => ({ symbol, index })).filter(({symbol}) => `${symbol.name} ${symbol.container} ${symbol.detail}`.toLowerCase().includes(this.filter.toLowerCase())).slice(0,300).map(({symbol, index}): UiNode => ({ type: "button", key: `symbol-${index}`, text: `${symbol.container ? symbol.container + " · " : ""}${symbol.name}${symbol.detail ? "  " + symbol.detail : ""}`, tooltip: `Line ${symbol.range.start.line + 1}`, action: "languageSymbol", value: index, variant: "ghost" })));
+      children.push({ type: "button", key: "refresh", text: this.busy ? "Loading…" : this.scope === "project" ? "Search project" : "Refresh file symbols", action: "languageSymbols", disabled: this.busy });
+      if (!this.symbols.length && !this.busy) children.push({ type: "label", key: "empty", text: this.scope === "project" && !this.filter.trim() ? "Type a name to search the project index, including unopened files." : "No symbols returned. Check server status and project import errors.", wrap: true });
+      children.push(...this.symbols.map((symbol, index) => ({ symbol, index })).filter(({symbol}) => `${symbol.name} ${symbol.container} ${symbol.detail}`.toLowerCase().includes(this.filter.toLowerCase())).slice(0,300).map(({symbol, index}): UiNode => ({ type: "button", key: `symbol-${index}`, text: `${symbol.container ? symbol.container + " · " : ""}${symbol.name}${symbol.detail ? "  " + symbol.detail : ""}${symbol.path ? "  — " + symbol.path : ""}`, tooltip: `Line ${symbol.range.start.line + 1}`, action: "languageSymbol", value: index, variant: "ghost" })));
     } else {
       children.push({ type: "label", key: "status", text: `${this.serverId} on ${this.status?.machineId || this.workspaceId}: ${this.status?.message || "Idle"}`, wrap: true });
       const cap = this.status?.capabilities;
@@ -65,7 +73,7 @@ export class LanguagePanel {
           else children.push({ type: "column", key: field.key + "-field", gap: 3, children: [
             { type: "label", key: "label", text: field.label },
             { type: "textInput", key: `project-${field.key}`, value: Array.isArray(config.values[field.key]) ? config.values[field.key].join("\n") : config.values[field.key] || "", multiline: field.type === "paths", rows: 2, changeAction: "languageText", placeholder: "Automatic / default" },
-            ...(field.directory ? [{ type: "button", key: "browse", text: "Browse folders…", action: "languageBrowse", value: field.key, small: true, variant: "ghost" } as UiNode] : []),
+            ...(field.directory ? [{ type: "button", key: `browse-${field.key}`, text: "Browse folders…", action: `languageBrowse:${field.key}`, value: field.key, small: true, variant: "ghost" } as UiNode] : []),
             ...(field.description ? [{ type: "label", key: "help", text: field.description, wrap: true, size: "xs", color: "muted" } as UiNode] : []),
           ] });
         }
@@ -86,20 +94,42 @@ export class LanguagePanel {
         { type: "button", key: "save", text: "Apply and restart", action: "languageApply", disabled: this.busy || !this.project },
         { type: "button", key: "restart", text: "Restart server", action: "languageRestart", disabled: this.busy || this.project?.config.enabled === false },
       ] });
-      for (const [index, line] of (this.status?.log || []).entries()) children.push({ type: "label", key: `log-${index}`, text: line, wrap: true, size: "xs", color: "muted" });
+      children.push({type:"button",key:"reindex",text:"Rebuild server index",action:"languageReindex",disabled:this.busy||this.project?.config.enabled===false,tooltip:"Start with a fresh server index outside the checkout. Source and build files are preserved."});
+      children.push({type:"button",key:"logs",text:"Read server log",action:"languageLogs",small:true});
+      if(this.fullLog)children.push({type:"label",key:"full-log",text:this.fullLog,wrap:true,size:"xs",selectable:true});
+      for (const [index, line] of (this.status?.log || []).slice(-5).entries()) children.push({ type: "label", key: `log-${index}`, text: line, wrap: true, size: "xs", color: "muted" });
     }
-    return { type: "popover", key: "language-project", width: 520, bottom: 32, right: 8, heightFraction: 0.85, maxHeight: 650, closeAction: "languageClose", style: { background: "panel", borderWidth: 1, borderColor: "border", radius: 8, padding: 12 }, children: [{ type: "scroll", key: "body", grow: true, children: [{ type: "column", key: "content", gap: 8, children }] }] };
+    if (this.browsing) {
+      const folders = children.find(n => n.key === "folders");
+      children.splice(1, children.length-1, ...(this.error ? [{type:"status",key:"folder-error",text:this.error,level:"error"} as UiNode] : []), ...(folders ? [folders] : []));
+    }
+    function left(node: UiNode): UiNode {
+      const n: any = node;
+      return {...n, style:{...n.style, ...(n.type==="button"?{justify:"start",fullWidth:true}:{}), ...(n.type==="toggle"?{justify:"start",fullWidth:true}:{})}, ...(n.type==="select"?{buttonStyle:{...n.buttonStyle,justify:"start",fullWidth:true}}:{}), ...(n.children ? {children:n.children.map(left)} : {})};
+    }
+    return { type: "modal", key: "language-project", title: this.browsing ? "Choose workspace folder" : "Language services", width: 720, closeAction: "languageClose", style: { background: "panel", borderWidth: 1, borderColor: "border", radius: 8, padding: 12 }, children: [{ type: "scroll", key: "body", height: 580, children: [{ type: "column", key: "content", gap: 8, children: children.map(left) }] }] };
   }
   async event(ctx: ModuleContext, ev: UiEvent, request: () => any, navigate: (symbol: any) => void): Promise<boolean> {
     if (!ev.action.startsWith("language")) return false;
+    if (ev.action.startsWith("languageBrowse:")) ev = {...ev,action:"languageBrowse",value:ev.action.slice("languageBrowse:".length)};
     const epoch = this.epoch, args = { workspaceId: this.workspaceId, serverId: this.serverId };
     if (ev.action === "languagePanel") { this.open = !this.open; this.picking = false; }
     else if (ev.action === "languageClose") this.open = this.picking = false;
-    else if (ev.action === "languageFilter") this.filter = String(ev.value ?? "");
+    else if (ev.action === "languageSymbolScope") { this.scope = ev.value === "file" ? "file" : "project"; this.symbols=[]; this.filter=""; }
+    else if (ev.action === "languageFilter") {
+      this.filter = String(ev.value ?? "");
+      if(this.scope === "project") {
+        if(this.searchTimer)clearTimeout(this.searchTimer);
+        this.searchTimer=setTimeout(()=>{this.searchTimer=null;if(epoch===this.epoch)void this.event(ctx,{...ev,action:"languageSymbols"},request,navigate);},300);
+      }
+    }
     else if (ev.action === "languageEnabled" && this.project) this.project.config.enabled = !!ev.value;
     else if (ev.action === "languageField" && this.project) this.project.config.values[ev.key] = !!ev.value;
     else if (ev.action === "languageText" && this.project) this.project.config.values[ev.key.replace(/^project-/, "")] = String(ev.value ?? "");
     else if (ev.action === "languageAdvanced" && this.project) this.project.settingsText = String(ev.value ?? "");
+    else if(ev.action === "languageLogs") {
+      try{const result=await ctx.modules.call("language-service","logs",args);if(epoch===this.epoch)this.fullLog=result.log;}catch(e){if(epoch===this.epoch)this.error=errMsg(e);}
+    }
     else if (ev.action === "languageCancelBrowse") this.browsing = null;
     else if (ev.action === "languageChooseDir" && this.browsing && this.project) {
       const { field, path } = this.browsing;
@@ -121,8 +151,9 @@ export class LanguagePanel {
       finally { if (epoch === this.epoch) this.busy = false; }
     }
     else if (ev.action === "languageSymbol") { const symbol = this.symbols[Number(ev.value)]; if (symbol) navigate(symbol); this.picking = false; }
-    else if (["languageApply", "languageRestart", "languageSymbols"].includes(ev.action)) {
-      if (this.busy) return true;
+    else if (["languageApply", "languageRestart", "languageReindex", "languageSymbols"].includes(ev.action)) {
+      if (this.busy && ev.action !== "languageSymbols") return true;
+      const searchVersion=++this.searchVersion;
       this.busy = true; this.error = null;
       if (ev.action === "languageSymbols") { this.picking = true; this.open = false; }
       ctx.ui.invalidate();
@@ -134,17 +165,18 @@ export class LanguagePanel {
           await ctx.modules.call("language-service", "project.set", { ...args, config }, { timeoutMs: 175000 });
           if (epoch !== this.epoch) return true;
           this.project.config = config;
-          if (config.enabled) await ctx.modules.call("language-service", "synchronize", request(), { timeoutMs: 175000 });
-        } else if (ev.action === "languageRestart") {
-          await ctx.modules.call("language-service", "restart", args, { timeoutMs: 175000 });
+          if (config.enabled) await ctx.modules.call("language-service", "restart", args, { timeoutMs: 175000 });
+        } else if (["languageRestart","languageReindex"].includes(ev.action)) {
+          await ctx.modules.call("language-service", ev.action === "languageReindex" ? "reindex" : "restart", args, { timeoutMs: 175000 });
           if (epoch !== this.epoch) return true;
-          await ctx.modules.call("language-service", "synchronize", request(), { timeoutMs: 175000 });
+          const document=request();
+          if(typeof document?.text === "string")await ctx.modules.call("language-service", "synchronize", document, { timeoutMs: 175000 });
         } else {
-          const symbols = await ctx.modules.call("language-service", "symbols", request(), { timeoutMs: 175000 });
-          if (epoch === this.epoch) this.symbols = symbols;
+          const symbols = await ctx.modules.call("language-service", this.scope === "project" ? "workspaceSymbols" : "symbols", this.scope === "project" ? {...args,query:this.filter} : request(), { timeoutMs: 175000 });
+          if (epoch === this.epoch && searchVersion === this.searchVersion) this.symbols = symbols;
         }
       } catch (e) { if (epoch === this.epoch) this.error = errMsg(e); }
-      finally { if (epoch === this.epoch) this.busy = false; }
+      finally { if (epoch === this.epoch && searchVersion === this.searchVersion) this.busy = false; }
     }
     ctx.ui.invalidate(); return true;
   }

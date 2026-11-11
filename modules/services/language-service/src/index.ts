@@ -1,7 +1,9 @@
 // Desktop coordinator; process scopes place each server on its workspace machine (local/SSH).
 import type { AppModule, ModuleContext, StreamSubscription, SettingsSection } from "@hato/sdk/types";
 import { errMsg, targetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
-import { languageDefinitions, languageForPath, documentUri, definitionLinks, relativeFile, validPosition, type LanguageDefinition, type LanguageServerSpec } from "@hato/sdk/languages";
+import { languageDefinitions, languageForPath, documentUri, definitionLinks, workspacePath, relativeFile, validPosition, type LanguageDefinition, type LanguageServerSpec } from "@hato/sdk/languages";
+import { serverData } from "./server-data";
+import { exportMcpTools } from "@hato/sdk/mcp";
 import { projectConfiguration, projectServer, documentSymbols } from "./project";
 import { LanguageDependencies } from "./dependencies";
 import { LspPeer, decodeBase64 } from "@hato/sdk/lsp";
@@ -33,6 +35,7 @@ let selected: WorkspaceDescriptor | null = null;
 let refreshVersion = 0;
 let stopped = false;
 let dependencies: LanguageDependencies | null = null;
+let mcp: ReturnType<typeof exportMcpTools> | null = null;
 function servers() { return [...new Map(languages.filter(l => l.server).map(l => [l.server!.id, l.server!])).values()]; }
 function sections(): SettingsSection[] {
   return servers().map(server => ({ key: server.id, title: server.id, group: "Languages", fields: [
@@ -74,13 +77,15 @@ async function start(ctx: ModuleContext, d: WorkspaceDescriptor, server: Languag
   const configured = await configuredServer(ctx, d, server);
   if (!configured.config.enabled) { report(ctx, d, server, { phase: "disabled", message: "Disabled for this workspace" }); throw new Error(`${server.id} is disabled for this workspace`); }
   server = configured.server;
-  report(ctx, d, server, { phase: "starting", message: "Starting language server…", capabilities: {}, diagnostics: 0, log: [] });
+  report(ctx, d, server, { phase: "starting", message: "Starting language server…", capabilities: {}, diagnostics: 0, log: [], importError: null });
   const executableSetting = await scopedGet(ctx, `language-server.${server.id}.executable`, d);
   const executable = typeof executableSetting?.value === "string" && executableSetting.value.trim() ? executableSetting.value.trim() : server.executable;
   const grant = await workspaceGrant(ctx, d, "process");
   let handle: string;
   try {
-    const args = server.args.map(arg => arg.replace(/\$WORKSPACE/g, d.rootAbsolutePath));
+    const data = server.args.some(arg => arg.includes("$SERVER_DATA")) ? await serverData(ctx, d, server.id, grant.grant) : "";
+    if(data)report(ctx,d,server,{dataDirectory:data});
+    const args = server.args.map(arg => arg.replace(/\$WORKSPACE/g, d.rootAbsolutePath).replace(/\$SERVER_DATA/g, data));
     handle = (await ctx.host.process.spawn(grant.grant, { target: await targetFor(ctx, d), executable, args, cwd: d.rootAbsolutePath, loginShell: d.location === "ssh" })).handle;
   } catch (error) { throw new Error(`${server.id} on ${d.machineId}: ${errMsg(error)}. ${server.installHint}`); }
   const peer = new LspPeer(frame => ctx.host.process.write(handle, frame));
@@ -104,13 +109,15 @@ async function start(ctx: ModuleContext, d: WorkspaceDescriptor, server: Languag
       report(ctx, d, server, { diagnostics: [...diagnostics.values()].reduce((a, b) => a + b, 0) });
     } else if (method === "$/progress") {
       const value = params?.value;
-      if (value?.kind === "begin" || value?.kind === "report") report(ctx, d, server, { phase: "indexing", message: value.message || value.title || "Indexing project…" });
-      else if (value?.kind === "end") report(ctx, d, server, { phase: "ready", message: value.message || "Ready" });
+      if ((value?.kind === "begin" || value?.kind === "report") && !statuses.get(key)?.importError) report(ctx, d, server, { phase: "indexing", message: value.message || value.title || "Indexing project…" });
+      else if (value?.kind === "end" && !statuses.get(key)?.importError) report(ctx, d, server, { phase: "ready", message: value.message || "Ready" });
     } else if (["language/status", "window/showMessage", "window/logMessage"].includes(method)) {
       const message = String(params?.message || "").slice(-2000);
       const log = [...(statuses.get(key)?.log || []), message].slice(-30);
       const phase = method === "language/status" ? (params?.type === "Started" ? "ready" : params?.type === "Error" ? "error" : "indexing") : undefined;
-      report(ctx, d, server, { log, ...(phase ? { phase, message } : {}) });
+      const failed = params?.type === 1 || method === "language/status" && params?.type === "Error";
+      const importError = failed ? message : statuses.get(key)?.importError;
+      report(ctx, d, server, { log, ...(importError ? { phase: "error", importError, message: importError.split("\n")[0] } : phase ? { phase, message } : {}) });
     }
   };
   try {
@@ -122,7 +129,7 @@ async function start(ctx: ModuleContext, d: WorkspaceDescriptor, server: Languag
     const initialized = await peer.request("initialize", {
       processId: null, rootUri, workspaceFolders: [{ uri: rootUri, name: d.name }],
       clientInfo: { name: "Hato", version: "0.1.0" },
-      capabilities: { window: { workDoneProgress: true }, general: { positionEncodings: ["utf-16"] }, workspace: { configuration: true, workspaceFolders: true },
+      capabilities: { window: { workDoneProgress: true }, general: { positionEncodings: ["utf-16"] }, workspace: { configuration: true, workspaceFolders: true, symbol: { dynamicRegistration: false } },
         textDocument: { definition: { linkSupport: true }, hover: { contentFormat: ["markdown", "plaintext"] },
           completion: { completionItem: { snippetSupport: false, documentationFormat: ["markdown", "plaintext"] } },
           documentSymbol: { hierarchicalDocumentSymbolSupport: true }, publishDiagnostics: {}, synchronization: { dynamicRegistration: false, didSave: true } } },
@@ -132,7 +139,7 @@ async function start(ctx: ModuleContext, d: WorkspaceDescriptor, server: Languag
     if (s.capabilities.positionEncoding && s.capabilities.positionEncoding !== "utf-16") throw new Error("Server selected an unsupported position encoding");
     await peer.notify("initialized", {});
     await peer.notify("workspace/didChangeConfiguration", { settings: server.settings || {} });
-    report(ctx, d, server, { phase: "ready", message: "Connected; project import may still be running", capabilities: s.capabilities });
+    report(ctx, d, server, { ...(!statuses.get(key)?.importError ? { phase: "ready", message: "Connected; project import may still be running" } : {}), capabilities: s.capabilities });
     return s;
   } catch (error) { await dispose(ctx, s); throw new Error(`${server.id}: ${errMsg(error)}. ${s.stderr.slice(-1500)} ${server.installHint}`); }
 }
@@ -214,6 +221,21 @@ const mod: AppModule = {
       paths.set(section, value.trim()); dependencies?.invalidate(section, selected?.id); await stopSessions(ctx);
       ctx.events.emit("language-service.changed", { workspaceId: selected?.id });
     }, { invalidate: false, action: async (section, key) => { await dependencies!.action(section, key); } });
+    mcp = exportMcpTools(ctx, "Language services", [
+      ...[["project_get","project.get",true],["project_update","project.set",false],["server_restart","restart",false],["index_rebuild","reindex",false],["workspace_symbols","workspaceSymbols",true],["server_logs","logs",true]].map(([name,method,readOnly]) => ({
+        name: String(name), description: `Language services: ${String(name).replace(/_/g," ")} in this agent's authenticated workspace. project_update accepts config (enabled, values and additional settings); project_get returns its schema.`,
+        inputSchema: {type:"object", properties:{serverId:{type:"string"},query:{type:"string",maxLength:200},config:{type:"object"}},required:["serverId"],additionalProperties:false},
+        annotations:{readOnlyHint:!!readOnly,destructiveHint:false}, timeoutMs:175000,
+        handler: async (args:any,scope:any) => {
+          const d:WorkspaceDescriptor=await ctx.modules.call("workspace","resolve",{workspaceId:scope.workspaceId});
+          if(d.machineId!==scope.machineId)throw new Error("MCP workspace machine does not match its authenticated scope");
+          if(method === "project.set" && (!args.config || typeof args.config !== "object"))throw new Error("config is required; read project_get first");
+          const result=await mod.methods![String(method)](ctx,{...args,workspaceId:scope.workspaceId},{caller:"language-service"});
+          if(method === "project.set")ctx.events.emit("language-service.configurationChanged",{workspaceId:scope.workspaceId});
+          return result;
+        },
+      })),
+    ]);
     await refresh(ctx);
     ctx.events.on("kernel.modules.changed", () => { void refresh(ctx).catch(e => publishSettings(errMsg(e))); });
     ctx.state.watch("workspace.selected", (value: any) => {
@@ -222,7 +244,7 @@ const mod: AppModule = {
       void stopSessions(ctx).then(() => refresh(ctx)).catch(e => publishSettings(errMsg(e)));
     });
   },
-  canSwap: () => ({ ok: !dependencies?.busy, reason: "Language dependency installation/check is running" }),
+  canSwap: () => ({ ok: !dependencies?.busy && !(mcp?.pending()), reason: "Language dependency installation/check is running" }),
   async deactivate(ctx) { stopped = true; refreshVersion++; await stopSessions(ctx); },
   methods: {
     health() {
@@ -232,6 +254,36 @@ const mod: AppModule = {
     async "dependencies.check"(_ctx, a) { return dependencies!.action(String(a.serverId), "checkDependencies", a.workspaceId); },
     async "dependencies.install"(_ctx, a) { return dependencies!.action(String(a.serverId), "installDependencies", a.workspaceId); },
     async describe(_ctx, a) { return languageForPath(languages, String(a.path)); },
+    servers() { return servers().map(server => ({ id: server.id, title: server.projectSettings?.title || server.id })); },
+    async workspaceSymbols(ctx, a) {
+      if(typeof a.query!=="string" || a.query.length>200)throw new Error("Enter a symbol query up to 200 characters");
+      const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", {workspaceId:a.workspaceId});
+      const server = servers().find(s => s.id===a.serverId);
+      if(!server)throw new Error("Unknown server");
+      if(!a.query.trim())return [];
+      const session=await sessionFor(ctx,d,server);
+      const result=await session.peer.request("workspace/symbol",{query:a.query},60000);
+      return (Array.isArray(result)?result:[]).filter((s:any)=>typeof s.name==="string" && s.location?.range && workspacePath(d.rootAbsolutePath,s.location.uri)).slice(0,1000)
+        .map((s:any)=>({name:s.name,kind:s.kind,container:s.containerName||"",uri:s.location.uri,range:s.location.range,path:workspacePath(d.rootAbsolutePath,s.location.uri)}));
+    },
+    async logs(ctx,a) {
+      const d:WorkspaceDescriptor=await ctx.modules.call("workspace","resolve",{workspaceId:a.workspaceId});
+      const server=servers().find(s=>s.id===a.serverId);
+      if(!server)throw new Error("Unknown server");
+      const status=statuses.get(sessionKey(d,server));
+      if(!status?.dataDirectory)return {status,log:(status?.log||[]).join("\n")};
+      const grant=await workspaceGrant(ctx,d,"process");
+      const result=await ctx.host.process.run(grant.grant,{target:await targetFor(ctx,d),executable:"python3",args:["-c","import pathlib,sys; p=pathlib.Path(sys.argv[1])/'.metadata/.log'; print(p.read_text(errors='replace')[-32000:] if p.is_file() else 'No index log yet')",status.dataDirectory],cwd:d.rootAbsolutePath,loginShell:d.location==="ssh"},{timeoutMs:30000});
+      if(result.code!==0)throw new Error(result.stderr||"Cannot read server log");
+      return {status,log:result.stdout};
+    },
+    async reindex(ctx,a) {
+      const d: WorkspaceDescriptor=await ctx.modules.call("workspace","resolve",{workspaceId:a.workspaceId});
+      const server=servers().find(s=>s.id===a.serverId);
+      if(!server?.args.some(arg=>arg.includes("$SERVER_DATA")))throw new Error("This server does not use a managed index; restart it instead");
+      await scopedSet(ctx,`workspace:${d.id}`,`language-server.${server.id}.index`,crypto.randomUUID());
+      return mod.methods!.restart(ctx,a,{caller:"language-service"});
+    },
     async "project.get"(ctx, a) {
       const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
       const server = servers().find(s => s.id === a.serverId);
@@ -275,7 +327,8 @@ const mod: AppModule = {
     },
     async symbols(ctx, a) {
       const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
-      return documentSymbols(await documentRequest(ctx, a, "textDocument/documentSymbol", "documentSymbolProvider"), documentUri(d.rootAbsolutePath, relativeFile(String(a.path))));
+      const path=relativeFile(String(a.path)), uri=documentUri(d.rootAbsolutePath,path);
+      return documentSymbols(await documentRequest(ctx, a, "textDocument/documentSymbol", "documentSymbolProvider"), uri).map(s=>({...s,path,uri}));
     },
     async hover(ctx, a) {
       if (!validPosition(a.position)) throw new Error("Invalid hover position");

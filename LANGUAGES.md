@@ -47,7 +47,7 @@ In a development checkout, the marketplace keeps locally known packages visible 
 
 Install the package in Settings → Plugins. Highlighting works without a server. For navigation, install the server **on the machine that holds the workspace**:
 
-- Java: install [Eclipse JDTLS](https://github.com/eclipse-jdtls/eclipse.jdt.ls) and a JDK supported by that JDTLS version (currently JDK 25 or newer). Put its `jdtls` launcher on PATH or supply its absolute path. If needed, use a launcher wrapper that selects the correct `JAVA_HOME`. Each workspace uses its own `.hato/jdtls` data directory; exclude that generated directory from version control. Open the Maven/Gradle project root.
+- Java: install [Eclipse JDTLS](https://github.com/eclipse-jdtls/eclipse.jdt.ls) and a JDK supported by that JDTLS version (currently JDK 25 or newer). Put its `jdtls` launcher on PATH or supply its absolute path. If needed, use a launcher wrapper that selects the correct `JAVA_HOME`. Each project uses a hashed data directory outside the checkout under `~/.local/share/hato/language-tools/workspaces/jdtls/` on the workspace machine. Open the Maven/Gradle project root.
 - JS/TS: install Node.js, then `npm install -g typescript-language-server typescript@6`. See the [server documentation](https://github.com/typescript-language-server/typescript-language-server). The semantic server is used for definitions so navigation resolves imports even during initial project loading.
 
 Settings → Languages exposes a server executable field for each enabled server. Press Enter to save. With a workspace selected this persists a workspace-specific override, including for an SSH project. Without a workspace it sets the user default. Values are executable paths/command names, not shell commands. Changing the setting restarts the affected language sessions.
@@ -56,13 +56,12 @@ Ctrl-click on Linux/Windows or Cmd-click on macOS opens the definition at its UT
 
 ## Server status and Java project settings
 
-These controls ship in Hato essentials 0.1.7, Language services 0.1.5 and Java 0.1.3. Update the packages together.
+These controls ship in Hato essentials 0.1.8, Language services 0.1.6 and Java 0.1.4. Update the packages together.
 
-Open a Java/JS/TS source file. The editor's bottom bar shows the server id and its current phase
+The global window bottom bar has Languages and Symbols buttons, contributed by optional marketplace UI modules. They remain available when the editor is hidden. The Languages button shows the selected server and its phase
 (idle, starting, indexing, ready, disabled or error). Click it to view startup errors, server messages,
 advertised features and diagnostic count, or restart the server. A connected status is not proof that
-project import has finished. **Symbols…** lists classes, methods and fields in the active file and
-reveals the selected symbol; refresh it after import if the list is initially empty.
+project import has finished. **Symbols…** defaults to project search through `workspace/symbol`, including unopened files. Type a query to search the server index. Current file mode lists classes, methods and fields from `textDocument/documentSymbol`. JDTLS project search primarily exposes types; use Current file for its methods and fields. Selecting a result opens its workspace source location.
 
 The Java panel includes **Treat this workspace as a Java project** (enabled by default). It can
 be disabled per workspace. **Source folders** and **Output folder** accept workspace-relative paths
@@ -83,7 +82,23 @@ That is the project's runtime, not the tooling JVM that runs JDTLS. Paths are on
 machine. The settings are stored through persistence, not written into source files or build files.
 JDTLS receives the merged configuration in initialization options and subsequent configuration RPCs.
 
-The status button, project settings and symbol picker hot reload through modules. Native hover and
+The status button, project settings and symbol picker hot reload through modules. Lists and folder buttons are left aligned. Choosing a folder opens a dedicated browser view inside the global dialog, rather than appending it below the settings.
+
+**Rebuild server index** starts with a fresh managed index directory without removing source files or old indexes. Use this after an invalid Eclipse project-description/import error; **Read server log** exposes the last 32 KB of `.metadata/.log`, including validation details that may be missing from LSP messages. Import errors remain errors until a fresh startup instead of being overwritten by a progress-complete notification. The screenshot's exception alone does not identify whether the cause is stale Eclipse metadata, duplicate project names or invalid project locations.
+
+### Agent MCP configuration
+
+Language services publishes its own `language-service__*` MCP namespace through Hato's existing internal MCP transport (including its SSH bridge). Enable the desired commands in **Settings → AI & tools → Language services MCP**, and attach the internal/module-tools MCP to the agent. New commands remain denied by default under the existing MCP policy.
+
+- `project_get`: configuration schema, values and live status.
+- `project_update`: persist `config` (read the existing config first), including enabled, values and additional settings.
+- `server_restart` and `index_rebuild`: restart or use a fresh managed index.
+- `workspace_symbols`: project-wide indexed symbol query.
+- `server_logs`: bounded server-log tail and status.
+
+Every command requires `serverId`; workspace and machine come from the authenticated agent scope, never an argument. A project update invalidates the open settings view and resynchronizes the editor so agents can configure it live. It cannot configure another workspace through an injected argument. These tools do not install runtimes or change native approvals.
+
+ Native hover and
 completion callbacks require the updated desktop build once; updating marketplace bundles alone
 cannot add those callbacks to an older running host. No new SSH daemon primitive is required.
 

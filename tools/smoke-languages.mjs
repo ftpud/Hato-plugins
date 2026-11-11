@@ -5,13 +5,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import {spawn} from 'node:child_process';
+import {spawn,execFileSync} from 'node:child_process';
 import {build} from 'esbuild';
 import assert from 'node:assert/strict';
 const [language, executable] = process.argv.slice(2);
 if (!['java','typescript'].includes(language) || !executable) throw Error('Specify java|typescript and a server executable');
 const moduleRoot = new URL('../', import.meta.url);
-const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hato-language-smoke-'));
+const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'hato-language-smoke-')));
 const code = (await build({entryPoints:[new URL('../modules/services/language-service/src/index.ts',import.meta.url).pathname],bundle:true,platform:'node',format:'esm',write:false})).outputFiles[0].text;
 const mod = (await import('data:text/javascript;base64,'+Buffer.from(code).toString('base64'))).default;
 const manifest = JSON.parse(await fs.readFile(new URL(`modules/services/language-${language === 'java' ? 'java' : 'typescript'}/manifest.json`,moduleRoot),'utf8'));
@@ -22,6 +22,7 @@ const ctx = {moduleId:'language-service',log:console,ui:{invalidate(){}},events:
   modules:{call:async(target,method,a)=>{if(target==='workspace')return descriptor;if(method==='scoped.resolve')return settings.has(a.key)?{value:settings.get(a.key)}:null;if(method==='scoped.set'){settings.set(a.key,a.value);return {applied:true};}return null;}},
   host:{plugins:{list:async()=>({plugins:[{...manifest,enabled:true,active:'smoke'}]})},capabilities:{request:async()=>({grant:'smoke'})},
     resources:{release:async()=>{}},process:{
+      run:async(_grant,spec)=>({code:0,stdout:execFileSync(spec.executable,spec.args,{cwd:spec.cwd,env:{...process.env,HATO_LANGUAGE_SERVER_DATA_HOME:path.join(root,'..','hato-language-data-smoke')}}).toString(),stderr:''}),
       spawn:async(_grant,spec)=>{
         const child=spawn(spec.executable,spec.args,{cwd:spec.cwd,env:process.env});
         child.on('error',error=>console.error(error));
@@ -51,6 +52,7 @@ try {
     filename='src/main/java/Main.java';text='class Main {\n  static int target = 42;\n  int value = target;\n}\n';target='/Main.java';
   }
   await fs.writeFile(path.join(root,filename),text);
+  if(language==='java')await fs.writeFile(path.join(root,'src/main/java/Other.java'),'class Other {}\n');
   await mod.activate(ctx);
   if(language==='java') await mod.methods['project.set'](ctx,{workspaceId:'smoke',serverId:'jdtls',config:{enabled:true,values:{sourcePaths:['src/main/java'],outputPath:'bin'}}});
   const status=await mod.methods.synchronize(ctx,{workspaceId:'smoke',path:filename,text});
@@ -60,6 +62,13 @@ try {
   const position=language==='typescript'?{line:0,character:11}:{line:2,character:15};
   const result=await mod.methods.definitions(ctx,{workspaceId:'smoke',path:filename,text,position});
   assert.ok(result.some(location=>location.targetUri.endsWith(target)),JSON.stringify(result));
+  console.log('project',root);
+  let projectSymbols=[];
+  for(let attempt=0;attempt<40&&!projectSymbols.length;attempt++){
+   projectSymbols=await mod.methods.workspaceSymbols(ctx,{workspaceId:'smoke',serverId:language==='java'?'jdtls':'typescript-language-server',query:language==='java'?'Other':'target'});
+   if(!projectSymbols.length)await new Promise(r=>setTimeout(r,500));
+  }
+  assert.ok(projectSymbols.length,'No workspace symbols returned');
   const hover=await mod.methods.hover(ctx,{workspaceId:'smoke',path:filename,text,position});
   assert.ok(hover?.contents,'Server returned no hover information');
   const completionText = language==='typescript' ? text+'const completionProbe = tar' : text;
@@ -75,5 +84,5 @@ try {
 } finally {
   await mod.deactivate(ctx);
   for(const child of processes.values()) child.kill('SIGTERM');
-  await fs.rm(root,{recursive:true,force:true,maxRetries:4});
+  if(!process.env.HATO_KEEP_SMOKE_PROJECT)await fs.rm(root,{recursive:true,force:true,maxRetries:4});
 }

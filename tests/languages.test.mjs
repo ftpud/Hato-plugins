@@ -90,11 +90,11 @@ function context(location = 'local') {
     }},
     host:{plugins:{list:async()=>({plugins:all})},capabilities:{request:async spec=>{calls.push({grant:spec});return {grant:'g'};}},
       ssh:{connect:async spec=>{calls.push({ssh:spec});return {connection:'ssh-connection',machineId:'ssh:test'};}},
-      process:{spawn:async (_grant,spec)=>{const p={handle:`process-${++seq}`,spec,listeners:{},stopped:false}; processes.push(p);return p;},
+      process:{run:async(_grant,spec)=>{calls.push({run:spec});return {code:0,stdout:'"/home/dev/.local/share/hato/language-tools/workspaces/jdtls/test"',stderr:''};},spawn:async (_grant,spec)=>{const p={handle:`process-${++seq}`,spec,listeners:{},stopped:false}; processes.push(p);return p;},
         write:async (handle,frame)=>{
           const p=processes.find(p=>p.handle===handle), message=JSON.parse(frame.split('\r\n\r\n')[1]);sent.push(message);
           if(message.id){
-            const result=message.method==='initialize'?{capabilities:{textDocumentSync:{openClose:true,change:2,save:{includeText:true}},definitionProvider:true,documentSymbolProvider:true,hoverProvider:true,completionProvider:{triggerCharacters:['.']}}}:message.method==='textDocument/documentSymbol'?[{name:'Main',kind:5,range:{start:{line:0,character:0},end:{line:3,character:1}},selectionRange:{start:{line:0,character:6},end:{line:0,character:10}},children:[{name:'run',kind:6,selectionRange:{start:{line:1,character:7},end:{line:1,character:10}}}]}]:message.method==='textDocument/hover'?{contents:{kind:'markdown',value:'int target'}}:message.method==='textDocument/completion'?[{label:'target',insertText:'target'}]:[{uri:registry.documentUri(workspace.rootAbsolutePath,'src/target.ts'),range:{start:{line:1,character:2},end:{line:1,character:5}}}];
+            const result=message.method==='initialize'?{capabilities:{textDocumentSync:{openClose:true,change:2,save:{includeText:true}},definitionProvider:true,documentSymbolProvider:true,hoverProvider:true,completionProvider:{triggerCharacters:['.']}}}:message.method==='workspace/symbol'?[{name:'OtherClass',kind:5,location:{uri:registry.documentUri(workspace.rootAbsolutePath,'src/OtherClass.java'),range:{start:{line:0,character:6},end:{line:0,character:16}}}}]:message.method==='textDocument/documentSymbol'?[{name:'Main',kind:5,range:{start:{line:0,character:0},end:{line:3,character:1}},selectionRange:{start:{line:0,character:6},end:{line:0,character:10}},children:[{name:'run',kind:6,selectionRange:{start:{line:1,character:7},end:{line:1,character:10}}}]}]:message.method==='textDocument/hover'?{contents:{kind:'markdown',value:'int target'}}:message.method==='textDocument/completion'?[{label:'target',insertText:'target'}]:[{uri:registry.documentUri(workspace.rootAbsolutePath,'src/target.ts'),range:{start:{line:1,character:2},end:{line:1,character:5}}}];
             p.listeners.stdout(Buffer.from(lspFrame({jsonrpc:'2.0',id:message.id,result})).toString('base64'));
           }
         },terminate:async handle=>{processes.find(p=>p.handle===handle).stopped=true;}},
@@ -145,7 +145,8 @@ test('Java uses a workspace-specific JDTLS data directory and SAP never launches
     assert.deepEqual(await mod.methods.definitions(c.ctx,{workspaceId:'ws',path:'db/model.cds',text:'entity X {}',position:{line:0,character:2}}),[]);
     assert.equal(c.processes.length,0);
     await mod.methods.definitions(c.ctx,{workspaceId:'ws',path:'Main.java',text:'class Main {}',position:{line:0,character:6}});
-    assert.deepEqual(c.processes[0].spec.args,['-data','/srv/project with spaces/.hato/jdtls']);
+    assert.deepEqual(c.processes[0].spec.args,['-data','/home/dev/.local/share/hato/language-tools/workspaces/jdtls/test']);
+    assert.equal(c.calls.find(call=>call.run).run.target.kind,'local');
     assert.equal(c.processes[0].spec.executable,'jdtls');
   } finally {await mod.deactivate(c.ctx);}
 });
@@ -170,6 +171,8 @@ for (const location of ['local','ssh']) test(`Java project settings, startup, sy
     assert.deepEqual(init.params.initializationOptions.settings.java.project.sourcePaths,['src','test']);
     assert.equal(init.params.initializationOptions.settings.java.import.gradle.enabled,false);
     assert.equal(init.params.initializationOptions.settings.java.configuration.runtimes[0].path,'/remote/jdk21');
+    const projectSymbols=await mod.methods.workspaceSymbols(c.ctx,{...args,query:'Other'});
+    assert.equal(projectSymbols[0].path,'src/OtherClass.java');
     const symbols=await mod.methods.symbols(c.ctx,args);
     assert.deepEqual(symbols.map(s=>[s.name,s.container]),[['Main',''],['run','Main']]);
     assert.equal(symbols[1].range.start.line,1);
@@ -199,4 +202,27 @@ test('project settings reject escaping folders and keep unspecified build defaul
   assert.equal(defaults.settings.java.project,undefined);
   assert.equal(defaults.settings.java.configuration.updateBuildConfiguration,'automatic');
   assert.throws(()=>projectServer(server,projectConfiguration(server,{settings:JSON.parse('{"__proto__":{"unsafe":true}}')})),/Invalid settings/);
+});
+
+test('language MCP configuration is scoped to the authenticated workspace and reports import failures', async()=>{
+ const {default:mod}=await load('modules/services/language-service/src/index.ts');
+ const c=context('ssh');await mod.activate(c.ctx);
+ try {
+  await c.handlers['internal-mcp.call']({module:'language-service',generation:1,id:'get',tool:'project_get',args:{serverId:'jdtls',workspaceId:'injected'},scope:{workspaceId:'ws',machineId:'ssh:test',conversationId:'agent'}});
+  const result=c.events.find(e=>e.name==='language-service.mcp.result'&&e.value.id==='get');
+  assert.equal(result.value.result.config.enabled,true);
+  assert.ok(c.calls.some(call=>call.id==='workspace'&&call.method==='resolve'&&call.a.workspaceId==='ws'));
+  assert.ok(!c.calls.some(call=>call.a?.workspaceId==='injected'));
+  await c.handlers['internal-mcp.call']({module:'language-service',generation:1,id:'bad',tool:'project_update',args:{serverId:'jdtls',config:{enabled:false}},scope:{workspaceId:'ws',machineId:'other',conversationId:'agent'}});
+  assert.match(c.events.find(e=>e.value.id==='bad').value.error,/machine/);
+  const args={workspaceId:'ws',serverId:'jdtls',path:'Main.java',text:'class Main {}'};
+  await mod.methods.synchronize(c.ctx,args);
+  const notify=(method,params)=>c.processes[0].listeners.stdout(Buffer.from(lspFrame({jsonrpc:'2.0',method,params})).toString('base64'));
+  notify('window/logMessage',{type:1,message:'Invalid project description: overlap'});
+  notify('$/progress',{token:1,value:{kind:'end'}});
+  assert.equal((await mod.methods['project.get'](c.ctx,args)).status.phase,'error');
+  await c.handlers['internal-mcp.call']({module:'language-service',generation:1,id:'set',tool:'project_update',args:{serverId:'jdtls',config:{enabled:false}},scope:{workspaceId:'ws',machineId:'ssh:test',conversationId:'agent'}});
+  assert.equal(c.settings.get('language-server.jdtls.project').enabled,false);
+  assert.ok(c.events.some(e=>e.name==='language-service.configurationChanged'));
+ } finally {await mod.deactivate(c.ctx);}
 });

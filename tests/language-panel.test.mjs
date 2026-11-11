@@ -1,12 +1,12 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
-const code=(await build({entryPoints:[new URL('../modules/ui/viewer/src/language-panel.ts',import.meta.url).pathname],bundle:true,format:'esm',write:false})).outputFiles[0].text;
+const code=(await build({entryPoints:[new URL('../modules/ui/language-tools/src/panel.ts',import.meta.url).pathname],bundle:true,format:'esm',write:false})).outputFiles[0].text;
 const {LanguagePanel}=await import('data:text/javascript;base64,'+Buffer.from(code).toString('base64'));
-const project=()=>({config:{enabled:true,values:{sourcePaths:[]},settings:{}},schema:{title:'Java project',fields:[{key:'sourcePaths',type:'paths',directory:true}]},status:{phase:'idle'}});
+const project=()=>({config:{enabled:true,values:{sourcePaths:[]},settings:{}},schema:{title:'Java project',fields:[{key:'sourcePaths',type:'paths',directory:true},{key:'outputPath',type:'text',directory:true}]},status:{phase:'idle'}});
 const event=(action,value,key='',inputs={})=>({action,value,key,inputs});
 test('folder browser uses the captured SSH workspace, applies folders and reveals returned symbols',async()=>{
- const calls=[],panel=new LanguagePanel();
+ const calls=[],panel=new LanguagePanel();panel.scope="file";
  const ctx={ui:{invalidate(){}},modules:{call:async(id,method,args)=>{
   calls.push({id,method,args});
   if(method==='project.get')return project();
@@ -19,6 +19,15 @@ test('folder browser uses the captured SSH workspace, applies folders and reveal
  await panel.event(ctx,event('languageBrowseDir','src'),()=>({}),()=>{});
  await panel.event(ctx,event('languageChooseDir'),()=>({}),()=>{});
  assert.deepEqual(panel.project.config.values.sourcePaths,['src']);
+ await panel.event(ctx,event('languageBrowse:outputPath'),()=>({}),()=>{});
+ await panel.event(ctx,event('languageBrowseDir','src'),()=>({}),()=>{});
+ panel.open=true;
+ const overlay=panel.overlay();
+ const nodes=[];const walk=n=>{nodes.push(n);(n.children||[]).forEach(walk);};walk(overlay);
+ assert.ok(!nodes.some(n=>n.key==='project-enabled'),'browser must replace the form');
+ assert.ok(nodes.filter(n=>n.action==='languageBrowseDir').every(n=>n.style.justify==='start'));
+ await panel.event(ctx,event('languageChooseDir'),()=>({}),()=>{});
+ assert.equal(panel.project.config.values.outputPath,'src');
  await panel.event(ctx,event('languageApply',null,'',{'project-sourcePaths':'src\ntest','project-settings':'{"java":{"x":true}}'}),()=>({workspaceId:'ssh-workspace',path:'Main.java',text:'class Main {}'}),()=>{});
  const saved=calls.find(c=>c.method==='project.set');
  assert.equal(saved.args.workspaceId,'ssh-workspace');assert.equal(saved.args.config.values.sourcePaths,'src\ntest');
