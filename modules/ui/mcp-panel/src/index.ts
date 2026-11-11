@@ -35,6 +35,9 @@ let servers: Server[] = [], selected: string | null = null, filter = "", draft: 
 let flows: Record<string, Flow> = {};
 let error: string | null = null, notice: string | null = null, busy = false, removeId: string | null = null, alive = true;
 let showBuiltin = false;
+// Exposed-tools viewer: one server at a time, fetched on demand.
+interface ToolInfo { name: string; title?: string; description: string; readOnly?: boolean; destructive?: boolean }
+let toolsView: { id: string; busy: boolean; tools?: ToolInfo[]; error?: string; query: string } | null = null;
 const pending = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
 
 function request(ctx: ModuleContext, method: string, args: any = {}, timeoutMs = 15000) {
@@ -66,6 +69,7 @@ const input = (key: string, value: string, placeholder: string, extra: Partial<{
   ({ type: "textInput", key, value, placeholder, changeAction: `field:${key.slice(2)}`, secret: extra.secret, multiline: extra.multiline, rows: extra.rows,
      ...(extra.mono ? { style: { font: "mono" } } : {}) } as UiNode);
 
+const current = () => servers.find(s => s.id === selected);
 function hostOf(s: Server) { return parseHttpUrl(s.url || "")?.host || s.url || ""; }
 function minutes(ms: number) { const m = Math.round(ms / 60000); return m < 60 ? `${m} min` : m < 48 * 60 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} days`; }
 function iconFor(s: Server) { return s.builtin ? uiIcons.sparkles : transportOf(s) === "stdio" ? uiIcons.terminal : s.auth?.type === "oauth" ? uiIcons["cloud-lock"] : uiIcons.globe; }
@@ -197,6 +201,9 @@ function detailCard(s: Server): UiNode {
       { type: "row", key: "b", children: [btn("signin", flow?.status === "error" ? "Try again" : "Sign in with browser", "signIn", { icon: uiIcons.external, variant: "primary" })] },
     ] });
   }
+  rows.push({ type: "row", key: "tools-row", gap: 4, align: "center", children: [
+    btn("tools", toolsView?.id === s.id && toolsView.busy ? "Loading tools…" : "Exposed tools", "showTools", { icon: uiIcons.plug, variant: "ghost", tooltip: "List the tools this server offers to agents", disabled: !!toolsView?.busy }),
+  ] });
   if (!s.builtin) rows.push({ type: "row", key: "actions", gap: 4, align: "center", wrap: true, children: [
     { type: "switch", key: "enabled", label: "Available to agents", checked: s.enabled !== false, action: "toggleEnabled", disabled: busy } as UiNode,
     { type: "spacer", key: "sp" },
@@ -205,6 +212,31 @@ function detailCard(s: Server): UiNode {
     btn("remove", "", "remove", { icon: uiIcons.trash, variant: "ghost", tooltip: "Remove" }),
   ] });
   return { type: "column", key: "detail", style: card, children: rows };
+}
+
+function toolsModal(name: string): UiNode {
+  const v = toolsView!;
+  const q = v.query.trim().toLowerCase();
+  const list = (v.tools || []).filter(t => !q || `${t.name} ${t.title || ""} ${t.description}`.toLowerCase().includes(q));
+  const kids: UiNode[] = [];
+  if (v.busy) kids.push({ type: "progress", key: "p", indeterminate: true, label: "Connecting and listing tools…" });
+  if (v.error) kids.push({ type: "status", key: "e", level: "error", text: v.error });
+  if (v.tools) {
+    kids.push({ type: "row", key: "bar", gap: 6, align: "center", children: [
+      { type: "label", key: "n", text: `${v.tools.length} tool${v.tools.length === 1 ? "" : "s"}`, size: "xs", color: "muted", grow: true },
+      ...(v.tools.length > 6 ? [{ type: "textInput", key: "tools-filter", ...filterInput, prefixSvg: uiIcons.search, placeholder: "Filter tools", value: v.query, changeAction: "toolsFilter", grow: true } as UiNode] : []),
+    ] });
+    kids.push({ type: "column", key: "list", gap: 6, scroll: true, grow: true, children: list.length ? list.map(t => ({ type: "column", key: t.name, gap: 2, style: { background: "panel", radius: 6, paddingX: 8, paddingY: 6 }, children: [
+      { type: "row", key: "h", gap: 6, align: "center", children: [
+        { type: "label", key: "name", text: t.name, mono: true, size: "sm", weight: "medium", selectable: true, grow: true },
+        ...(t.readOnly ? [chip("ro", "read-only", toneColor.ok, toneBg.ok)] : []),
+        ...(t.destructive ? [chip("dx", "destructive", toneColor.warn, toneBg.warn)] : []),
+      ] },
+      ...(t.title && t.title !== t.name ? [{ type: "label", key: "title", text: t.title, size: "xs", weight: "medium" } as UiNode] : []),
+      ...(t.description ? [{ type: "label", key: "d", text: t.description, size: "xs", color: "muted", wrap: true, selectable: true } as UiNode] : []),
+    ] } as UiNode)) : [{ type: "label", key: "none", text: q ? "No matching tools." : "This server exposes no tools.", size: "sm", color: "muted" }] });
+  }
+  return { type: "modal", key: "tools-modal", title: `Tools · ${name}`, closeAction: "closeTools", width: 560, children: kids };
 }
 
 function editor(d: Draft): UiNode {
@@ -319,6 +351,7 @@ const mod: AppModule = { id: "mcp-panel", moduleApiVersion: 1,
     children.push({ type: "spacer", key: "grow" });
     if (current) children.push(detailCard(current));
     if (draft) children.push(editor(draft));
+    if (toolsView) children.push(toolsModal(servers.find(s => s.id === toolsView!.id)?.name || toolsView.id));
     if (removeId) children.push({ type: "modal", key: "confirm-remove", title: "Remove MCP server?", closeAction: "cancelRemove", width: 420, children: [
       { type: "label", key: "message", text: `${servers.find(s => s.id === removeId)?.name || "This server"} will no longer be offered to new agents, and any saved sign-in is deleted. Running agents keep their current connection.`, wrap: true },
       { type: "row", key: "buttons", gap: 6, children: [{ type: "spacer", key: "sp" }, btn("cancel", "Cancel", "cancelRemove", { variant: "ghost" }), btn("confirm", "Remove", "confirmRemove", { variant: "danger" })] },
@@ -338,6 +371,15 @@ const mod: AppModule = { id: "mcp-panel", moduleApiVersion: 1,
       if (a === "toggleImport") { draft.importing = !draft.importing; ctx.ui.invalidate(); return; }
     }
     if (a === "dismiss") { notice = null; ctx.ui.invalidate(); return; }
+    if (a === "closeTools") { toolsView = null; ctx.ui.invalidate(); return; }
+    if (a === "toolsFilter" && toolsView) { toolsView.query = String(event.value || ""); ctx.ui.invalidate(); return; }
+    if (a === "showTools" && current() && !toolsView?.busy) {
+      const id = current()!.id;
+      toolsView = { id, busy: true, query: "" }; ctx.ui.invalidate();
+      try { const r = await request(ctx, "listMcpTools", { id }, 95000); if (toolsView?.id === id) toolsView = { ...toolsView, busy: false, tools: Array.isArray(r?.tools) ? r.tools : [] }; }
+      catch (e) { if (toolsView?.id === id) toolsView = { ...toolsView, busy: false, error: errMsg(e) }; }
+      ctx.ui.invalidate(); return;
+    }
     if (a === "toggleBuiltin") { showBuiltin = !showBuiltin; ctx.ui.invalidate(); return; }
     if (busy) return;
     try {

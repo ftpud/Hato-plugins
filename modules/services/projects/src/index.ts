@@ -112,6 +112,20 @@ const mod: AppModule = {
       return out;
     },
 
+    /** Remove a project from Hato. Its files stay on disk; tasks must be deleted first. */
+    async remove(ctx, a) {
+      const id = String(a.projectId || "");
+      const project = await ctx.modules.call("persistence", "projects.get", { id });
+      if (!project) throw new Error("Unknown project");
+      const tasks = await ctx.modules.call("persistence", "tasks.list", { projectId: id });
+      if (tasks.length) throw new Error(`${project.name} still has ${tasks.length} task(s); delete them first.`);
+      await ctx.modules.call("workspace", "forget", { workspaceIds: [`project:${id}:root`] });
+      await ctx.modules.call("persistence", "projects.delete", { id });
+      gitCache.delete(id); offline.delete(id);
+      ctx.events.emit("projects.changed", { projectId: id, removed: true });
+      return { removed: true };
+    },
+
     async get(ctx, a) {
       const { project, desc } = await describeProject(ctx, a.projectId);
       return { ...project, desc, git: gitCache.get(project.id) || null };

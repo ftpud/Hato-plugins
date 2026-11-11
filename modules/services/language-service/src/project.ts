@@ -14,7 +14,9 @@ export function projectConfiguration(server: LanguageServerSpec, input: any): Pr
   }
   const settings = input?.settings ?? {};
   if (!settings || typeof settings !== "object" || Array.isArray(settings) || JSON.stringify(settings).length > 64000) throw new Error("Additional settings must be a JSON object under 64 KB");
-  return { enabled: input?.enabled !== false, values, settings };
+  // Language support is opt-in per workspace: a project is treated as e.g. a Java project only
+  // after the user (or an agent) enables that server for it.
+  return { enabled: input?.enabled === true, values, settings };
 }
 function merge(base: any, extra: any): any {
   const result = { ...base };

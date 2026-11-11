@@ -14,10 +14,37 @@ import { uiIcons } from "@hato/sdk/ui-icons";
 import { languageDefinitions, languageForPath, workspacePath, relativeFile, validPosition, type LanguageDefinition } from "@hato/sdk/languages";
 
 import { shellBlocks } from "./markdown";
+import { diffLines } from "@hato/sdk/text-diff";
+
+// ---- Git change markers -------------------------------------------------------------------
+// HEAD text per open file; hunks are recomputed locally as the buffer changes.
+interface Hunk { line: number; added: number; removed: string[]; current: string[] }
+const heads = new Map<string, { text: string | null; tracked: boolean }>();
+let hunks: Hunk[] = [];
+let hunkView: { index: number; hunk: Hunk } | null = null;
+let gitMarkers = true;
+const headKey = (workspaceId: string, path: string) => `${workspaceId}|${path}`;
+function computeHunks(head: string | null, text: string | null | undefined): Hunk[] {
+  if (head === null || typeof text !== "string") return [];
+  const a = head.split("\n"), b = text.split("\n");
+  if (a.length > 20000 || b.length > 20000) return [];
+  const out: Hunk[] = [];
+  let line = 0, cur: Hunk | null = null;
+  for (const op of diffLines(a, b)) {
+    if (op.kind === " ") { cur = null; line++; continue; }
+    if (!cur) { cur = { line, added: 0, removed: [], current: [] }; out.push(cur); }
+    if (op.kind === "+") { cur.added++; cur.current.push(op.line); line++; }
+    else cur.removed.push(op.line);
+  }
+  return out;
+}
 
 let showMetadata = true;
 let renderMarkdown = true;
 let diffMode: "split" | "unified" = "split";
+// Word wrap is configured separately for the source editor and for read-only views (diffs).
+let editorWrap = false;
+let viewerWrap = true;
 let publishSettings: () => void = () => {};
 let ws: any = null;
 let current: any = null;
@@ -108,13 +135,40 @@ async function synchronizeLanguage(ctx: ModuleContext) {
 }
 async function editorRequest(ctx: ModuleContext, a: any, method: string) {
   const buffer = buffers.get(a.document);
-  if (!languageService || !buffer || buffer.workspaceId !== a.workspaceId || buffer.path !== a.path || typeof a.text !== "string") return method === "hover" ? null : [];
+  const empty = method === "hover" || method === "signatureHelp" ? null : [];
+  if (!languageService || !buffer || buffer.workspaceId !== a.workspaceId || buffer.path !== a.path || typeof a.text !== "string") return empty;
   try {
     const result = await ctx.modules.call("language-service", method, { ...a,
       documents: [...buffers.values()].filter(b => b.workspaceId === buffer.workspaceId && b.text !== null).map(b => ({ path: b.path, text: b.text })),
     }, { timeoutMs: 175000 });
     languageError = null; ctx.ui.invalidate(); return result;
-  } catch (e) { languageError = errMsg(e); ctx.ui.invalidate(); return method === "hover" ? null : []; }
+  } catch (e) { languageError = errMsg(e); ctx.ui.invalidate(); return empty; }
+}
+
+// ---- IDEA-style completion items ------------------------------------------------------------
+// The native menu shows `label` on the left and `detail` (muted) on the right. Present the
+// symbol with its parameters on the left and its type / package on the right, like IntelliJ.
+// Shaped items map back to the server's originals for completionItem/resolve (auto-import).
+const shapedOriginals = new Map<string, any>();
+const shapeKey = (item: any) => `${item.label}\u0000${JSON.stringify(item.data ?? null)}`;
+function shapeCompletions(result: any) {
+  const items: any[] = Array.isArray(result) ? result : Array.isArray(result?.items) ? result.items : [];
+  shapedOriginals.clear();
+  const shaped = items.map(original => {
+    const name = String(original.filterText || original.label || "").replace(/\(.*$/, "").replace(/ [-:] .*$/, "").trim() || String(original.label);
+    const params = original.labelDetails?.detail ?? (/^[^(]*(\(.*?\))/.exec(String(original.label))?.[1] || "");
+    // Right side: return/field type for members, package for types.
+    const typed = / : (.+)$/.exec(String(original.label))?.[1];
+    const pkg = / - (.+)$/.exec(String(original.label))?.[1];
+    const right = original.labelDetails?.description || typed || pkg || (original.detail && String(original.detail).length <= 48 ? original.detail : "");
+    const item = { ...original, label: `${name}${params}`, detail: right || undefined, filterText: original.filterText || name,
+      // Without an explicit edit the menu inserts the label; keep inserting just the name.
+      ...(!original.textEdit && !original.insertText ? { insertText: name } : {}) };
+    shapedOriginals.set(shapeKey(item), original);
+    return item;
+  });
+  shaped.sort((a, b) => String(a.sortText ?? a.label).localeCompare(String(b.sortText ?? b.label)));
+  return Array.isArray(result) ? shaped : { ...result, items: shaped };
 }
 let navigation: { workspaceId: string; path: string; key: string; line: number; character: number } | null = null;
 async function refreshLanguages(ctx: ModuleContext) {
@@ -156,7 +210,22 @@ async function load(ctx: ModuleContext, force = false) {
       }
     }
   } catch (e) { if (mine === generation) { error = errMsg(e); current = null; } }
-  finally { if (mine === generation) { loadingPath = null; void synchronizeLanguage(ctx); } ctx.ui.invalidate(); }
+  finally { if (mine === generation) { loadingPath = null; void synchronizeLanguage(ctx); void refreshHead(ctx); } ctx.ui.invalidate(); }
+}
+function updateHunks() {
+  const head = current && !current.diff && !current.binary && !current.truncated && ws ? heads.get(headKey(ws.id, current.relativePath)) : undefined;
+  const text = current?.document ? buffers.get(current.document)?.text ?? current.text : undefined;
+  hunks = gitMarkers && head?.tracked ? computeHunks(head.text, text) : [];
+  if (hunkView && !hunks[hunkView.index]) hunkView = null;
+}
+async function refreshHead(ctx: ModuleContext) {
+  if (!gitMarkers || !ws || !current || current.diff || current.binary) { updateHunks(); ctx.ui.invalidate(); return; }
+  const workspaceId = ws.id, path = current.relativePath;
+  try {
+    const r = await ctx.modules.call("git", "headText", { workspaceId, path }, { timeoutMs: 30000 });
+    heads.set(headKey(workspaceId, path), { text: r?.text ?? null, tracked: !!r?.tracked });
+  } catch { heads.delete(headKey(workspaceId, path)); }
+  updateHunks(); ctx.ui.invalidate();
 }
 
 function tabLabel(tab: string) {
@@ -204,6 +273,12 @@ const mod: AppModule = {
     renderMarkdown = typeof savedMarkdown === "boolean" ? savedMarkdown : true;
     const savedDiffMode = await ctx.modules.call("persistence", "settings.get", { key: "viewer.diffMode" });
     diffMode = savedDiffMode === "unified" ? "unified" : "split";
+    const savedEditorWrap = await ctx.modules.call("persistence", "settings.get", { key: "viewer.editorWrap" });
+    editorWrap = typeof savedEditorWrap === "boolean" ? savedEditorWrap : false;
+    const savedViewerWrap = await ctx.modules.call("persistence", "settings.get", { key: "viewer.viewerWrap" });
+    viewerWrap = typeof savedViewerWrap === "boolean" ? savedViewerWrap : true;
+    const savedMarkers = await ctx.modules.call("persistence", "settings.get", { key: "viewer.gitMarkers" });
+    gitMarkers = typeof savedMarkers === "boolean" ? savedMarkers : true;
     const savedEditable = await ctx.modules.call("persistence", "settings.get", { key: "viewer.editable" });
     editable = typeof savedEditable === "boolean" ? savedEditable : true;
     const savedAutosave = await ctx.modules.call("persistence", "settings.get", { key: "viewer.autosave" });
@@ -219,6 +294,12 @@ const mod: AppModule = {
       { key: "autosaveDelay", label: "Autosave delay", type: "select", value: String(autosaveDelay),
         options: AUTOSAVE_DELAYS.map(ms => ({ value: String(ms), label: ms < 1000 ? `${ms} ms` : `${ms / 1000} s` })),
         description: "Quiet time after the last keystroke before saving." },
+      { key: "editorWrap", label: "Wrap lines in the editor", type: "toggle", value: editorWrap,
+        description: "Soft-wrap long lines when editing source files (including Markdown source)." },
+      { key: "viewerWrap", label: "Wrap lines in diffs", type: "toggle", value: viewerWrap,
+        description: "Soft-wrap long lines in Git diff review. Markdown previews always reflow." },
+      { key: "gitMarkers", label: "Show Git change bars", type: "toggle", value: gitMarkers,
+        description: "Mark added, changed and deleted lines next to the line numbers. Click a bar to review or roll back the change." },
       { key: "showMetadata", label: "Show file metadata", type: "toggle", value: showMetadata,
         description: "Display the language and file size in the bottom status bar." },
       { key: "renderMarkdown", label: "Preview Markdown files", type: "toggle", value: renderMarkdown,
@@ -238,11 +319,14 @@ const mod: AppModule = {
         await ctx.modules.call("persistence", "settings.set", { key: "viewer.autosaveDelay", value: ms });
         autosaveDelay = ms; return;
       }
-      if (!["showMetadata", "renderMarkdown", "editable", "autosave"].includes(key) || typeof value !== "boolean") throw new Error("Invalid viewer setting");
+      if (!["showMetadata", "renderMarkdown", "editable", "autosave", "editorWrap", "viewerWrap", "gitMarkers"].includes(key) || typeof value !== "boolean") throw new Error("Invalid viewer setting");
       await ctx.modules.call("persistence", "settings.set", { key: `viewer.${key}`, value });
       if (key === "showMetadata") showMetadata = value;
       else if (key === "renderMarkdown") renderMarkdown = value;
       else if (key === "editable") editable = value;
+      else if (key === "editorWrap") editorWrap = value;
+      else if (key === "viewerWrap") viewerWrap = value;
+      else if (key === "gitMarkers") { gitMarkers = value; void refreshHead(ctx); }
       else { autosave = value; if (value) scheduleSaves(ctx); }
       ctx.ui.invalidate();
     });
@@ -252,6 +336,7 @@ const mod: AppModule = {
     ctx.events.on("git-panel.statusChanged", (e: any) => {
       if (current?.diff && e?.workspaceId === ws?.id && ws?.view?.previewPath === current.tab) void load(ctx, true);
     });
+    ctx.events.on("git.changed", (e: any) => { if (e?.workspaceId === ws?.id) { heads.clear(); void refreshHead(ctx); } });
     ctx.events.on("language-service.configurationChanged", () => { void synchronizeLanguage(ctx); });
     ctx.events.on("language-service.changed", () => { void synchronizeLanguage(ctx); });
 
@@ -286,7 +371,14 @@ const mod: AppModule = {
     },
     async "editor.definitions"(ctx, a) { return editorRequest(ctx, a, "definitions"); },
     async "editor.hover"(ctx, a) { return editorRequest(ctx, a, "hover"); },
-    async "editor.completions"(ctx, a) { return editorRequest(ctx, a, "completions"); },
+    async "editor.completions"(ctx, a) { return shapeCompletions(await editorRequest(ctx, a, "completions")); },
+    async "editor.signature"(ctx, a) { return editorRequest(ctx, a, "signatureHelp"); },
+    async "editor.resolveCompletion"(ctx, a) {
+      const original = shapedOriginals.get(shapeKey(a.item || {}));
+      const buffer = buffers.get(a.document);
+      if (!original || !languageService || !buffer || buffer.workspaceId !== a.workspaceId || buffer.path !== a.path) return a.item;
+      return ctx.modules.call("language-service", "resolveCompletion", { workspaceId: a.workspaceId, path: a.path, item: original }, { timeoutMs: 45000 }).catch(() => a.item);
+    },
   },
   render(): UiNode {
     const diff = !!current?.diff;
@@ -296,6 +388,7 @@ const mod: AppModule = {
       { type: "row", key: "tabs", gap: 3, wrap: true, children: tabs.map((path): UiNode => ({ type: "row", key: path, gap: 0, style: fileTabStyle(ws?.view?.previewPath === path), children: [
         { type: "button", key: "select", iconSvg: fileIcons.file, text: tabLabel(path), tooltip: diffTabPath(path) ? `Changes in ${diffTabPath(path)}` : path, action: `select:${path}`, middleClickAction: `close:${path}`, contextAction: `tabMenu:${path}`, contextMenu: [
           { text: "Close", action: `close:${path}` },
+          { text: "Close others", action: "closeOthers", value: path, disabled: tabs.length < 2 },
           { text: "Close all to the right", action: "closeRight", value: path, disabled: tabs.indexOf(path) === tabs.length - 1 },
           { text: "Close all", action: "closeAll", value: path },
         ], small: true, variant: "ghost", style: tabButtonStyle(ws?.view?.previewPath === path) },
@@ -307,7 +400,7 @@ const mod: AppModule = {
     if (error) kids.push({ type: "status", key: "err", text: error, level: "error" });
     if (loadingPath) kids.push({ type: "progress", key: "ld", indeterminate: true, label: `Opening ${loadingPath}…` });
     if (current && current.binary) kids.push({ type: "status", key: "bin", text: current.message, level: "info" });
-    if (diff) kids.push({ type: "diff", key: "diff", document: current.document, mode: diffMode, softWrap: true, header: false, emptyText: "No changes against HEAD.", grow: true });
+    if (diff) kids.push({ type: "diff", key: "diff", document: current.document, mode: diffMode, softWrap: viewerWrap, header: false, emptyText: "No changes against HEAD.", grow: true });
     else if (markdown && renderMarkdown) {
       const markdownText = bufferFor(current.relativePath)?.text ?? current.text;
       const blocks = typeof markdownText === "string" ? shellBlocks(markdownText) : [];
@@ -342,11 +435,15 @@ const mod: AppModule = {
       const language = current ? languageForPath(languages, current.relativePath) : null;
       kids.push({ type: "codeViewer", key: "code", document: current && !current.binary ? current.document : null, placeholder: ws ? "Open a file from the explorer." : "Select a workspace.", grow: true,
         editable: canEdit, changeAction: canEdit ? "edit" : undefined, changeDebounceMs: 250,
-        language: language?.grammar, syntaxRules: language?.syntaxRules,
+        language: language?.grammar, syntaxRules: language?.syntaxRules, softWrap: editorWrap,
         definitionMethod: languageService && language?.server && projectLanguageEnabled && !current?.truncated ? "editor.definitions" : undefined,
         hoverMethod: languageService && language?.server && projectLanguageEnabled && !current?.truncated ? "editor.hover" : undefined,
         completionMethod: languageService && language?.server && projectLanguageEnabled && !current?.truncated ? "editor.completions" : undefined,
         completionTriggers: ["."],
+        signatureMethod: languageService && language?.server && projectLanguageEnabled && !current?.truncated && canEdit ? "editor.signature" : undefined,
+        completionResolveMethod: languageService && language?.server && projectLanguageEnabled && !current?.truncated && canEdit ? "editor.resolveCompletion" : undefined,
+        lineMarkers: hunks.map((h, index) => ({ line: h.line, endLine: h.line + h.added, color: !h.added ? "danger" : h.removed.length ? "primary" : "success", value: index })),
+        lineMarkerAction: "showHunk",
         definitionArgs: { workspaceId: ws?.id, path: current?.relativePath }, openLocationAction: "openDefinition",
         reveal: navigation && navigation.workspaceId === ws?.id && navigation?.path === current?.relativePath ? navigation : undefined });
     }
@@ -369,9 +466,27 @@ const mod: AppModule = {
         { type: "label", key: "lang", text: diff ? (current.truncated ? "diff (truncated)" : "") : current && showMetadata ? `${current.language} · ${current.size} B${current.truncated ? " (truncated)" : ""}` : "", size: "xs", color: "muted" },
       ] }
     );
+    if (hunkView) {
+      const h = hunkView.hunk;
+      const kind = !h.added ? "Deleted" : h.removed.length ? "Changed" : "Added";
+      const lines = h.added ? `${h.line + 1}${h.added > 1 ? `–${h.line + h.added}` : ""}` : `${h.line}–${h.line + 1}`;
+      let fence = "```"; const body = [...h.removed.map(l => "-" + l), ...h.current.map(l => "+" + l)].join("\n");
+      for (const run of body.matchAll(/`+/g)) if (run[0].length >= fence.length) fence = "`".repeat(run[0].length + 1);
+      kids.push({ type: "modal", key: "hunk", title: `${kind} lines ${lines}`, closeAction: "closeHunk", width: 640, children: [
+        { type: "markdown", key: "diff", text: `${fence}diff\n${body}\n${fence}`, inline: true },
+        { type: "row", key: "buttons", gap: 6, children: [
+          { type: "label", key: "hint", text: h.removed.length ? `${h.removed.length} line${h.removed.length === 1 ? "" : "s"} in HEAD` : "Not in HEAD", size: "xs", color: "muted", grow: true },
+          { type: "button", key: "prev", text: "Previous", action: "stepHunk", value: -1, small: true, variant: "ghost", disabled: hunkView.index === 0 },
+          { type: "button", key: "next", text: "Next", action: "stepHunk", value: 1, small: true, variant: "ghost", disabled: hunkView.index >= hunks.length - 1 },
+          { type: "button", key: "rollback", text: "Roll back", action: "rollbackHunk", small: true, variant: "danger", disabled: !editable, tooltip: "Restore these lines from HEAD" },
+          { type: "button", key: "close", text: "Close", action: "closeHunk", small: true },
+        ] },
+      ] });
+    }
     // Compact fallback for a host that has not yet loaded the native context-menu capability.
-    if (tabMenu && tabs.includes(tabMenu)) kids.push({ type: "popover", key: "tab-menu", width: 236, top: 34, left: 4, maxHeight: 92,
+    if (tabMenu && tabs.includes(tabMenu)) kids.push({ type: "popover", key: "tab-menu", width: 236, top: 34, left: 4, maxHeight: 124,
       style: { background: "panel", padding: 6, radius: 6, borderWidth: 1, borderColor: "border" }, closeAction: "dismissTabMenu", children: [
+        { type: "button", key: "others", text: "Close others", action: "closeOthers", value: tabMenu, variant: "ghost" },
         { type: "button", key: "right", text: "Close all to the right", action: "closeRight", value: tabMenu, variant: "ghost" },
         { type: "button", key: "all", text: "Close all", action: "closeAll", value: tabMenu, variant: "ghost" },
       ] });
@@ -397,6 +512,7 @@ const mod: AppModule = {
         b.text = v.text;
         if (b.state === "clean" || b.state === "error") b.state = "dirty";
         if (autosave && b.state === "dirty") scheduleSaves(ctx);
+        if (current?.document === v.document) updateHunks();
         if (languageTimer) clearTimeout(languageTimer);
         languageTimer = setTimeout(() => { languageTimer = null; void synchronizeLanguage(ctx); }, 500);
       } else if (ev.action === "runShellBlock" && current && !current.diff) {
@@ -406,6 +522,27 @@ const mod: AppModule = {
         const block = blocks[index];
         if (!block || !block.code.trim()) return;
         await runShellBlock(ctx, { workspaceId: ws.id, path: current.relativePath, block: index, code: block.code, language: block.language });
+      } else if (ev.action === "showHunk") {
+        const index = Number((ev.value as any)?.marker);
+        if (hunks[index]) hunkView = { index, hunk: hunks[index] };
+      } else if (ev.action === "closeHunk") { hunkView = null;
+      } else if (ev.action === "stepHunk" && hunkView) {
+        const index = hunkView.index + Number(ev.value);
+        if (hunks[index]) { hunkView = { index, hunk: hunks[index] }; navigation = { workspaceId: ws.id, path: current.relativePath, key: crypto.randomUUID(), line: hunks[index].line, character: 0 }; }
+      } else if (ev.action === "rollbackHunk" && hunkView && current?.document) {
+        const b = buffers.get(current.document);
+        const text = b?.text ?? current.text;
+        const h = hunks[hunkView.index];
+        if (!b || typeof text !== "string" || !h || JSON.stringify(h) !== JSON.stringify(hunkView.hunk)) { hunkView = null; return; }
+        const lines = text.split("\n");
+        lines.splice(h.line, h.added, ...h.removed);
+        // The native buffer has no external edit API: save the restored text, then reopen.
+        b.text = lines.join("\n"); b.state = "dirty"; hunkView = null;
+        await save(ctx, b);
+        const state = b.state as Buffer["state"];
+        if (state === "error" || state === "conflict") throw new Error(b.error || "Could not save the rolled back file");
+        navigation = { workspaceId: ws.id, path: current.relativePath, key: crypto.randomUUID(), line: h.line, character: 0 };
+        if (state === "clean") await load(ctx, true);
       } else if (ev.action === "save") {
         const b = current?.document ? buffers.get(current.document) : undefined;
         if (b && b.text !== null) { b.state = "dirty"; await save(ctx, b); }
@@ -432,10 +569,13 @@ const mod: AppModule = {
         await ctx.modules.call("workspace", "view.patch", { workspaceId: ws.id, patch: { previewPath: path } });
       } else if (ev.action === "dismissTabMenu") { tabMenu = null;
       } else if (ev.action.startsWith("tabMenu:")) { tabMenu = ev.action.slice(8);
-      } else if (ev.action === "closeRight" || ev.action === "closeAll") {
-        const index = tabs.indexOf(typeof ev.value === "string" ? ev.value : tabMenu || "");
+      } else if (ev.action === "closeRight" || ev.action === "closeAll" || ev.action === "closeOthers") {
+        const keep = typeof ev.value === "string" ? ev.value : tabMenu || "";
+        const index = tabs.indexOf(keep);
         if (index < 0) return;
-        const closing = ev.action === "closeAll" ? [...tabs] : tabs.slice(index + 1);
+        // "Close others" keeps the chosen tab and makes it the visible one.
+        if (ev.action === "closeOthers" && ws.view?.previewPath !== keep) await ctx.modules.call("workspace", "view.patch", { workspaceId: ws.id, patch: { previewPath: keep } });
+        const closing = ev.action === "closeAll" ? [...tabs] : ev.action === "closeOthers" ? tabs.filter(t => t !== keep) : tabs.slice(index + 1);
         tabMenu = null;
         for (const path of closing) await mod.onEvent!(ctx, { action: `close:${path}`, key: "menu", inputs: {} });
       } else if (ev.action.startsWith("select:")) {

@@ -265,6 +265,20 @@ const mod: AppModule = {
       return { workspaceId: d.id, repo: true, branch: branchR.code === 0 ? branchR.stdout.trim() : "(detached)", truncated: st.truncated, files };
     },
 
+    /** A file's committed (HEAD) text for editor change markers. `tracked: false` for files not in
+     *  HEAD (new/untracked) or outside a repository; `text: null` when binary or too large. */
+    async headText(ctx, a) {
+      const d = await desc(ctx, a.workspaceId);
+      const path = cleanRel(a.path);
+      const prefixR = await git(ctx, d, ["rev-parse", "--show-prefix"]);
+      if (prefixR.code !== 0) return { workspaceId: d.id, path, tracked: false, text: null };
+      const repoPath = prefixR.stdout.trim() + path;
+      const exists = await git(ctx, d, ["cat-file", "-e", `HEAD:${repoPath}`]);
+      if (exists.code !== 0) return { workspaceId: d.id, path, tracked: false, text: null };
+      const text = await headText(ctx, d, repoPath);
+      return { workspaceId: d.id, path, tracked: true, text: text !== null && text.includes("\u0000") ? null : text };
+    },
+
     /** Patch for one file against HEAD (working tree incl. staged changes) as a document handle. */
     async diff(ctx, a) {
       const d = await desc(ctx, a.workspaceId);

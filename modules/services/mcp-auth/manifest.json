@@ -15,7 +15,7 @@
   "stateVersion": 1,
   "description": "OAuth sign-in and token refresh for remote MCP servers (browser + loopback redirect, PKCE).",
   "author": "Hato contributors",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "pluginPackage": "core-acp",
   "pluginType": "AI"
 }

@@ -99,7 +99,27 @@ const mod: AppModule = {
   },
   deactivate() { for (const stop of subscriptions.values()) stop(); subscriptions.clear(); },
   snapshot: () => ({ open, selectedCategory, query, pluginBrowser: pluginBrowserSnapshot() }),
-  methods: { async open(ctx, args) {
+  methods: {
+  /** User syntax color schemes: `*.json` in <sharedDir>/syntax-schemes, as raw text for
+   *  workspace-layout to validate (it has no file access of its own). Read-only. */
+  async syntaxSchemeFiles(ctx) {
+    const dir = `${String(ctx.host.env.info().sharedDir || "").replace(/\/+$/, "")}/syntax-schemes`;
+    const files: { name: string; text?: string; error?: string }[] = [];
+    let grant: string | null = null;
+    try {
+      grant = (await ctx.host.capabilities.request({ kind: "fs", root: dir })).grant;
+      const { entries } = await ctx.host.fs.list(grant, ".");
+      for (const entry of entries.filter(e => e.kind === "file" && e.name.toLowerCase().endsWith(".json")).slice(0, 50)) {
+        try {
+          const file = await ctx.host.fs.read(grant, entry.name, 256 * 1024);
+          files.push(typeof file.text === "string" && !file.truncated ? { name: entry.name, text: file.text } : { name: entry.name, error: "file is too large or not text" });
+        } catch (e) { files.push({ name: entry.name, error: e instanceof Error ? e.message : String(e) }); }
+      }
+    } catch { /* No folder yet. */ }
+    finally { if (grant) await ctx.host.capabilities.release(grant).catch(() => {}); }
+    return { dir, files };
+  },
+  async open(ctx, args) {
     open = true;
     if (typeof args?.module === "string" && typeof args?.section === "string") selectedCategory = JSON.stringify([args.module, args.section]);
     else if (args?.category === "plugins") selectedCategory = args.category;

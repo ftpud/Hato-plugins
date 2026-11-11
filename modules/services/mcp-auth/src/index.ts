@@ -269,6 +269,47 @@ const mod: AppModule = {
       return { status: d.status, requiresAuth: d.requiresAuth, oauth: !!d.metadata, issuer: d.issuer, scopes: d.scopes, legacy: d.legacy,
         dynamicRegistration: !!d.metadata?.registration_endpoint };
     },
+    /** Connect to a remote (Streamable HTTP) server and return its `tools/list`. Uses the saved
+     *  sign-in for OAuth servers. Read-only: nothing is called. */
+    async listTools(ctx, a) {
+      if (!parseHttpUrl(a?.url)) throw new Error("Enter an http(s) URL");
+      if (a.transport === "sse") throw new Error("Listing tools is not supported for the legacy SSE transport");
+      const url = String(a.url);
+      const headers: Record<string, string> = { ...Object.fromEntries((Array.isArray(a.headers) ? a.headers : []).map((h: any) => [h.name, h.value])),
+        "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
+      if (a.auth?.type === "oauth") headers.Authorization = `Bearer ${(await fresh(ctx, String(a.serverId), url)).accessToken}`;
+      else if (a.auth?.type === "bearer" && a.auth.token) headers.Authorization = `Bearer ${a.auth.token}`;
+      const rpc = async (id: number | null, method: string, params: any = {}) => {
+        const r = await http(ctx, { url, method: "POST", timeoutMs: 30000, maxBytes: 2 * 1024 * 1024, headers,
+          body: JSON.stringify(id === null ? { jsonrpc: "2.0", method, params } : { jsonrpc: "2.0", id, method, params }) });
+        if (r.status === 401 || r.status === 403) throw new Error("The server rejected the credentials; sign in again or check the token");
+        if (r.status >= 400) throw new Error(`${method} failed with HTTP ${r.status}`);
+        const session = r.headers["mcp-session-id"]; if (session) headers["Mcp-Session-Id"] = session;
+        if (id === null) return null;
+        // Responses are plain JSON or an SSE stream whose `data:` events carry JSON-RPC messages.
+        const messages = /text\/event-stream/i.test(r.headers["content-type"] || "")
+          ? r.body.split(/\r?\n/).filter(l => l.startsWith("data:")).map(l => { try { return JSON.parse(l.slice(5).trim()); } catch { return null; } })
+          : [json(r)];
+        const reply = messages.find(m => m && m.id === id);
+        if (!reply) throw new Error(`${method}: no response from the server`);
+        if (reply.error) throw new Error(`${method}: ${reply.error.message || "error"}`);
+        return reply.result;
+      };
+      const init = await rpc(1, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "hato", version: "0.1.0" } });
+      if (init?.protocolVersion) headers["MCP-Protocol-Version"] = String(init.protocolVersion);
+      await rpc(null, "notifications/initialized");
+      const tools: any[] = [];
+      let cursor: string | undefined;
+      for (let page = 0; page < 20; page++) {
+        const r = await rpc(2 + page, "tools/list", cursor ? { cursor } : {});
+        tools.push(...(Array.isArray(r?.tools) ? r.tools : []));
+        cursor = typeof r?.nextCursor === "string" && r.nextCursor ? r.nextCursor : undefined;
+        if (!cursor) break;
+      }
+      if (headers["Mcp-Session-Id"]) void ctx.host.net.fetch({ url, method: "DELETE", headers, timeoutMs: 5000 }).catch(() => {});
+      return { server: init?.serverInfo || null, tools: tools.map((t: any) => ({ name: String(t.name), title: t.title || t.annotations?.title || undefined,
+        description: String(t.description || ""), readOnly: !!t.annotations?.readOnlyHint, destructive: !!t.annotations?.destructiveHint })) };
+    },
     status(_ctx, a) {
       const list: any[] = Array.isArray(a?.servers) ? a.servers : [];
       return Object.fromEntries(list.map(s => [String(s.id), statusOf(String(s.id), s.url)]));

@@ -66,6 +66,71 @@ async function reconcile(ctx: ModuleContext, projectId: string) {
 
 let contribution: ReturnType<typeof exportMcpTools> | null = null;
 
+async function taskContext(ctx: ModuleContext, taskId: string) {
+  const task = await ctx.modules.call("persistence", "tasks.get", { id: String(taskId || "") });
+  if (!task) throw new Error("Unknown task");
+  const proj = await ctx.modules.call("projects", "get", { projectId: task.projectId });
+  return { task, proj, desc: proj.desc as WorkspaceDescriptor, root: proj.desc.rootAbsolutePath as string };
+}
+async function porcelain(ctx: ModuleContext, desc: WorkspaceDescriptor, dir: string) {
+  return must(await git(ctx, desc, ["-C", dir, "status", "--porcelain"]), "git status").split("\n").filter(Boolean);
+}
+
+/** Merge a task branch into the branch checked out in the project root (normally main). Never
+ *  switches the root's branch, never merges over uncommitted work, and aborts on conflicts. */
+async function mergeTask(ctx: ModuleContext, a: { taskId: string; target?: string; squash?: boolean }) {
+  const { task, proj, desc, root } = await taskContext(ctx, a.taskId);
+  const current = must(await git(ctx, desc, ["-C", root, "symbolic-ref", "--short", "-q", "HEAD"]), "git symbolic-ref").trim();
+  const target = String(a.target || current).trim();
+  if (target !== current) throw new Error(`The project checkout is on ${current}, not ${target}. Check out ${target} in ${proj.name} first.`);
+  if (target === task.branch) throw new Error("The task branch is the project's current branch");
+  if (task.status === "ready") {
+    const pending = await porcelain(ctx, desc, task.worktreePath).catch(() => []);
+    if (pending.length) throw new Error(`Task ${task.name} has ${pending.length} uncommitted change(s); commit them before merging.`);
+  }
+  const dirty = await porcelain(ctx, desc, root);
+  if (dirty.length) throw new Error(`${proj.name} has ${dirty.length} uncommitted change(s) on ${target}; commit or stash them before merging.`);
+  const ahead = Number(must(await git(ctx, desc, ["-C", root, "rev-list", "--count", `${target}..${task.branch}`]), "git rev-list").trim());
+  if (!ahead) return { merged: false, target, branch: task.branch, message: `${task.branch} has no commits that are not already in ${target}.` };
+  const args = a.squash ? ["merge", "--squash", task.branch] : ["merge", "--no-ff", "--no-edit", "-m", `Merge task ${task.name} (${task.branch})`, task.branch];
+  const r = await git(ctx, desc, ["-C", root, ...args], 180000);
+  if (r.code !== 0) {
+    const conflicts = (await git(ctx, desc, ["-C", root, "diff", "--name-only", "--diff-filter=U"])).stdout.split("\n").filter(Boolean);
+    await git(ctx, desc, ["-C", root, "merge", "--abort"]);
+    if (a.squash) await git(ctx, desc, ["-C", root, "reset", "--merge"]);
+    throw new Error(conflicts.length
+      ? `Merging ${task.branch} into ${target} conflicts in ${conflicts.slice(0, 10).join(", ")}${conflicts.length > 10 ? "…" : ""}. Nothing was changed; merge ${target} into the task and resolve there first.`
+      : `git merge failed (exit ${r.code}): ${(r.stderr || r.stdout).trim().slice(0, 800)}`);
+  }
+  if (a.squash) must(await git(ctx, desc, ["-C", root, "commit", "--no-edit", "-m", `Task ${task.name} (${task.branch})`]), "git commit");
+  ctx.events.emit("git.changed", { workspaceId: `project:${proj.id}:root` });
+  ctx.events.emit("git-tasks.changed", { projectId: proj.id, taskId: task.id, merged: true });
+  return { merged: true, target, branch: task.branch, commits: ahead, squash: !!a.squash };
+}
+
+/** Remove a task: its linked worktree (refusing uncommitted work unless forced), optionally its
+ *  branch (`deleteBranch`: "merged" uses `git branch -d`, "force" uses -D), then Hato's record. */
+async function removeTask(ctx: ModuleContext, a: { taskId: string; force?: boolean; deleteBranch?: false | "merged" | "force" }) {
+  const { task, proj, desc, root } = await taskContext(ctx, a.taskId);
+  const list = parsePorcelain(must(await git(ctx, desc, ["-C", root, "worktree", "list", "--porcelain"]), "git worktree list"));
+  const wt = list.find(w => w.worktree === task.worktreePath);
+  if (wt && !wt.prunable) {
+    const pending = await porcelain(ctx, desc, task.worktreePath);
+    if (pending.length && !a.force) throw new Error(`Task ${task.name} has ${pending.length} uncommitted change(s). Commit them, or delete with force to discard them.`);
+    must(await git(ctx, desc, ["-C", root, "worktree", "remove", ...(a.force ? ["--force"] : []), task.worktreePath], 120000), "git worktree remove");
+  } else await git(ctx, desc, ["-C", root, "worktree", "prune"]);
+  let branchDeleted = false, branchWarning: string | null = null;
+  if (a.deleteBranch) {
+    const r = await git(ctx, desc, ["-C", root, "branch", a.deleteBranch === "force" ? "-D" : "-d", task.branch]);
+    if (r.code === 0) branchDeleted = true;
+    else branchWarning = `Kept branch ${task.branch}: ${(r.stderr || r.stdout).trim().split("\n")[0]}`;
+  }
+  await ctx.modules.call("workspace", "forget", { workspaceIds: [`task:${task.id}`] });
+  await ctx.modules.call("persistence", "tasks.delete", { id: task.id });
+  ctx.events.emit("git-tasks.changed", { projectId: proj.id, taskId: task.id, removed: true });
+  return { removed: true, branch: task.branch, branchDeleted, warning: branchWarning };
+}
+
 const mod: AppModule = {
   id: "git-tasks",
   moduleApiVersion: 1,
@@ -73,6 +138,8 @@ const mod: AppModule = {
     contribution = exportMcpTools(ctx, "Git tasks", taskTools(ctx, {
       create: (args) => mod.methods!.create(ctx, args, { caller: "git-tasks" }),
       reconcile: (projectId) => reconcile(ctx, projectId),
+      merge: (args) => mergeTask(ctx, args),
+      remove: (args) => removeTask(ctx, args),
     }));
     // Reconcile on start (never prunes or deletes anything).
     setTimeout(async () => {
@@ -86,6 +153,8 @@ const mod: AppModule = {
   methods: {
     list: (ctx, a) => ctx.modules.call("persistence", "tasks.list", { projectId: a.projectId }),
     reconcile: (ctx, a) => reconcile(ctx, a.projectId),
+    merge: (ctx, a) => mergeTask(ctx, { taskId: a.taskId, target: a.target, squash: !!a.squash }),
+    remove: (ctx, a) => removeTask(ctx, { taskId: a.taskId, force: !!a.force, deleteBranch: a.deleteBranch === "force" || a.deleteBranch === "merged" ? a.deleteBranch : false }),
 
     /** Report whether the parent checkout has uncommitted/untracked changes (not copied into tasks). */
     async dirtyCheck(ctx, a) {

@@ -4,6 +4,7 @@ import { filterInput } from "@hato/sdk/filter-style";
 import type { AppModule, ModuleContext, TreeRow, UiNode } from "@hato/sdk/types";
 import { errMsg, wslLocation } from "@hato/sdk/runtime";
 import { uiIcons } from "@hato/sdk/ui-icons";
+import { exportSettings } from "@hato/sdk/settings";
 import { addProjectModal, localRequest, sourcesFor, sshRequest, wslRequest, type AddSource, type FieldErrors, type SshAuth } from "./add-project";
 import { projectsBranding } from "./branding";
 
@@ -22,7 +23,20 @@ let wslDistros: string[] = [];
 let wslDistro = "";
 let filter = "";
 let backgroundOpacity = 0.12;
+// Row hover fill opacity: a translucent hover keeps the branding background visible.
+const HOVER_OPACITIES = [0.25, 0.45, 0.65, 1];
+let hoverOpacity = 0.45;
 let taskFormFor: string | null = null;
+// Pending destructive/branch action awaiting confirmation in a modal.
+type Confirm = { kind: "merge" | "deleteTask" | "removeProject"; id: string; name: string; deleteBranch: boolean; force: boolean; removeAfter: boolean };
+let confirm: Confirm | null = null;
+const taskMenu = (t: any) => [
+  { text: "Merge into project branch…", action: "askMerge", value: t.id, disabled: t.status !== "ready" },
+  { text: "Delete task…", action: "askDeleteTask", value: t.id },
+];
+const projectMenu = (p: any) => [
+  { text: p.tasks.length ? "Remove from Hato (delete its tasks first)" : "Remove from Hato…", action: "askRemoveProject", value: p.id, disabled: p.tasks.length > 0 },
+];
 // workspaceId -> number of working AI chats (ai-sessions) and background agents (persistent-agents).
 let chatBusy: Record<string, number> = {};
 let agentBusy: Record<string, number> = {};
@@ -43,8 +57,42 @@ function updateBusy(ctx: ModuleContext) {
 }
 const asCounts = (v: any): Record<string, number> => (v && typeof v === "object" ? v : {});
 
+// workspaceId -> uncommitted line counts against HEAD (git status numstat).
+let diffStats: Record<string, { added: number; removed: number }> = {};
+let statsTimer: ReturnType<typeof setTimeout> | null = null;
+const statsInflight = new Set<string>();
+async function refreshStats(ctx: ModuleContext, workspaceId: string) {
+  if (statsInflight.has(workspaceId)) return;
+  statsInflight.add(workspaceId);
+  try {
+    const r = await ctx.modules.call("git", "status", { workspaceId }, { timeoutMs: 45000 });
+    let added = 0, removed = 0;
+    for (const f of r?.files || []) { added += Number(f.additions) || 0; removed += Number(f.deletions) || 0; }
+    diffStats = { ...diffStats, [workspaceId]: { added, removed } };
+  } catch { const { [workspaceId]: _, ...rest } = diffStats; diffStats = rest; }
+  finally { statsInflight.delete(workspaceId); ctx.ui.invalidate(); }
+}
+/** Refresh stats for every reachable Git workspace (debounced); offline projects are skipped. */
+function scheduleStats(ctx: ModuleContext, only?: string) {
+  if (only) { void refreshStats(ctx, only); return; }
+  if (statsTimer) clearTimeout(statsTimer);
+  statsTimer = setTimeout(() => {
+    statsTimer = null;
+    for (const p of tree) {
+      if (!p.isGit || p.offline || p.needsPassword) continue;
+      void refreshStats(ctx, `project:${p.id}:root`);
+      for (const t of p.tasks) if (t.status === "ready") void refreshStats(ctx, `task:${t.id}`);
+    }
+  }, 300);
+}
+function statBadges(workspaceId: string) {
+  const s = diffStats[workspaceId];
+  if (!s || (!s.added && !s.removed)) return undefined;
+  return [{ text: `+${s.added}`, color: "success" }, { text: `−${s.removed}`, color: "danger" }];
+}
+
 async function reload(ctx: ModuleContext) {
-  try { tree = await ctx.modules.call("projects", "tree"); treeError = null; }
+  try { tree = await ctx.modules.call("projects", "tree"); treeError = null; scheduleStats(ctx); }
   catch (e) { treeError = errMsg(e); }
   ctx.ui.invalidate();
 }
@@ -65,6 +113,7 @@ function rows(): TreeRow[] {
       key, label: p.name, depth: 0, expandable: tasks.length > 0, expanded: !!query || p.expanded, selected: selected === key,
       badge: p.needsPassword ? "Connect" : p.offline ? "Offline" : tasks.length ? `${tasks.length} ${tasks.length === 1 ? "task" : "tasks"}` : undefined,
       detail: p.needsPassword ? `Password needed · ${location}` : p.offline ? `Offline · ${p.offline}` : busyCount ? `${busyText(busyCount)} · ${location}` : location,
+      badges: statBadges(key), contextMenu: projectMenu(p),
       icon: p.offline ? "warning" : p.kind === "ssh" ? "remote" : "folder",
       iconSvg: busyCount ? spinnerSvg() : p.offline ? uiIcons.warning : p.kind === "ssh" ? uiIcons.terminal : uiIcons.folder, iconColor: busyCount ? "primary" : "muted", weight: "semibold",
     });
@@ -72,7 +121,7 @@ function rows(): TreeRow[] {
       const tk = `task:${t.id}`;
       const taskBusy = aiBusy[tk] || 0;
       out.push({ key: tk, label: t.name, connector: index === tasks.length - 1 ? "last" : "branch", depth: 1, expandable: false, expanded: false, selected: selected === tk,
-        badge: t.status !== "ready" ? t.status : undefined, detail: taskBusy ? `${busyText(taskBusy)} · ${t.branch}` : t.branch, icon: t.status === "ready" ? "task" : "warning",
+        badge: t.status !== "ready" ? t.status : undefined, badges: statBadges(tk), contextMenu: taskMenu(t), detail: taskBusy ? `${busyText(taskBusy)} · ${t.branch}` : t.branch, icon: t.status === "ready" ? "task" : "warning",
         iconSvg: taskBusy ? spinnerSvg() : t.status === "ready" ? uiIcons["git-branch"] : uiIcons.warning, iconColor: taskBusy ? "primary" : "muted" });
     }
   }
@@ -102,6 +151,33 @@ async function loadDistros(ctx: ModuleContext) {
 /** A prompt can wait for the user several times, on top of the connection itself. */
 const CONNECT_TIMEOUT_MS = 960000;
 
+function confirmModal(c: Confirm): UiNode {
+  const errorNode: UiNode[] = error ? [{ type: "status", key: "confirm-error", text: error, level: "error" }] : [];
+  const buttons = (primary: UiNode[]): UiNode => ({ type: "row", key: "confirm-buttons", gap: 4, children: [...primary,
+    { type: "button", key: "confirm-cancel", text: "Cancel", action: "cancelConfirm", small: true }] });
+  if (c.kind === "merge") return { type: "modal", key: "confirm", title: "Merge task", closeAction: "cancelConfirm", children: [
+    { type: "label", key: "text", text: `Merge “${c.name}” into the branch checked out in its project. Uncommitted changes block the merge, and conflicts abort it without changing anything.`, size: "sm", wrap: true },
+    ...errorNode,
+    { type: "toggle", key: "remove-after", label: "Delete the task and its merged branch afterwards", checked: c.removeAfter, action: "toggleRemoveAfter" },
+    buttons([
+      { type: "button", key: "merge", text: "Merge", action: "confirmMerge", variant: "primary", small: true, disabled: !!busy },
+      { type: "button", key: "squash", text: "Squash merge", action: "confirmSquash", small: true, disabled: !!busy },
+    ]),
+  ] };
+  if (c.kind === "deleteTask") return { type: "modal", key: "confirm", title: "Delete task", closeAction: "cancelConfirm", children: [
+    { type: "label", key: "text", text: `Delete “${c.name}”: removes its worktree folder and the task from Hato.`, size: "sm", wrap: true },
+    ...errorNode,
+    { type: "toggle", key: "delete-branch", label: "Also delete its branch", checked: c.deleteBranch, action: "toggleDeleteBranch" },
+    { type: "toggle", key: "force", label: "Discard uncommitted changes and unmerged commits", checked: c.force, action: "toggleForce" },
+    buttons([{ type: "button", key: "delete", text: "Delete task", action: "confirmDeleteTask", variant: "danger", small: true, disabled: !!busy }]),
+  ] };
+  return { type: "modal", key: "confirm", title: "Remove project", closeAction: "cancelConfirm", children: [
+    { type: "label", key: "text", text: `Remove “${c.name}” from Hato? Files on disk are not touched; you can add the folder again later.`, size: "sm", wrap: true },
+    ...errorNode,
+    buttons([{ type: "button", key: "remove", text: "Remove project", action: "confirmRemoveProject", variant: "danger", small: true, disabled: !!busy }]),
+  ] };
+}
+
 const mod: AppModule = {
   id: "projects-panel",
   moduleApiVersion: 1,
@@ -122,6 +198,18 @@ const mod: AppModule = {
       ctx.ui.invalidate();
     };
     updateBackground(ctx.state.get("workspace-layout.projectsBackgroundOpacity"));
+    const savedHover = Number(await ctx.modules.call("persistence", "settings.get", { key: "projects-panel.hoverOpacity" }).catch(() => null));
+    if (HOVER_OPACITIES.includes(savedHover)) hoverOpacity = savedHover;
+    exportSettings(ctx, () => [{ key: "projects-panel", title: "Projects", fields: [
+      { key: "hoverOpacity", label: "Row hover opacity", type: "select", value: String(hoverOpacity),
+        options: HOVER_OPACITIES.map(v => ({ value: String(v), label: v === 1 ? "Opaque" : `${Math.round(v * 100)}%` })),
+        description: "How solid the highlight is when the pointer is over a project or task." },
+    ] }], async (_section, key, value) => {
+      const v = Number(value);
+      if (key !== "hoverOpacity" || !HOVER_OPACITIES.includes(v)) throw new Error("Invalid projects setting");
+      await ctx.modules.call("persistence", "settings.set", { key: "projects-panel.hoverOpacity", value: v });
+      hoverOpacity = v; ctx.ui.invalidate();
+    });
     ctx.state.watch("workspace-layout.projectsBackgroundOpacity", updateBackground);
     chatBusy = asCounts(ctx.state.get("ai-sessions.busy"));
     agentBusy = asCounts(ctx.state.get("persistent-agents.busy"));
@@ -130,10 +218,14 @@ const mod: AppModule = {
     updateBusy(ctx);
     ctx.events.on("projects.changed", () => reload(ctx));
     ctx.events.on("git-tasks.changed", () => reload(ctx));
+    // Keep +/− counts current: git operations and the visible Git panel's status refresh.
+    for (const topic of ["git.changed", "git-panel.statusChanged", "files.changed"])
+      ctx.events.on(topic, (e: any) => { if (typeof e?.workspaceId === "string") scheduleStats(ctx, e.workspaceId); });
+    if (prev?.diffStats) diffStats = prev.diffStats;
     await reload(ctx);
   },
-  deactivate() { if (animation) clearInterval(animation); animation = null; },
-  snapshot: () => ({ taskFormFor, addForm, addSource, sshAuth, addValues, filter }),
+  deactivate() { if (animation) clearInterval(animation); animation = null; if (statsTimer) clearTimeout(statsTimer); statsTimer = null; },
+  snapshot: () => ({ taskFormFor, addForm, addSource, sshAuth, addValues, filter, diffStats }),
   render(): UiNode {
     const proj = selectedProject();
     const visibleRows = rows();
@@ -148,11 +240,11 @@ const mod: AppModule = {
         ...(proj?.isGit && proj.hasCommits !== false ? [{ type: "button", key: "new-task", text: "New task", iconSvg: uiIcons["git-branch"], action: "newTask", small: true, variant: "ghost", tooltip: `Create a worktree in ${proj.name}`, disabled: !!busy } as UiNode] : []),
       ] },
     ];
-    if ((error || treeError) && !addForm) children.push({ type: "status", key: "err", text: (error || treeError)!, level: "error" });
+    if ((error || treeError) && !addForm && !confirm) children.push({ type: "status", key: "err", text: (error || treeError)!, level: "error" });
     if (notice) children.push({ type: "status", key: "notice", text: notice, level: "warn" });
     if (busy) children.push({ type: "progress", key: "busy", indeterminate: true, label: busy });
     if (!visibleRows.length) children.push({ type: "label", key: "empty", text: filter.trim() ? "No matching projects or tasks." : "Add a project to get started.", size: "sm", color: "muted", padding: 8 });
-    children.push({ type: "tree", key: "tree", rowHeight: 42, rowGap: 0, iconSize: 18, rows: visibleRows, selectAction: "selectWorkspace", expandAction: "toggleExpanded", grow: true });
+    children.push({ type: "tree", key: "tree", hoverOpacity: hoverOpacity, rowHeight: 42, rowGap: 0, iconSize: 18, rows: visibleRows, selectAction: "selectWorkspace", expandAction: "toggleExpanded", grow: true });
     if (proj && proj.isGit && proj.hasCommits !== false) {
       if (taskFormFor === proj.id) {
         children.push({ type: "modal", key: "task-form", title: "New Git task", closeAction: "cancelTask", children: [
@@ -168,6 +260,7 @@ const mod: AppModule = {
         ] });
       }
     }
+    if (confirm) children.push(confirmModal(confirm));
     if (addForm) children.push(addProjectModal({ windows, source: addSource, sshAuth, values: addValues, errors: fieldErrors, error, busy, distros: wslDistros, distro: wslDistro }));
     return { type: "column", key: "projects-root", gap: 4, padding: 6, grow: true,
       ...(backgroundOpacity > 0 ? { backgroundImage: projectsBranding, backgroundImageStyle: { opacity: backgroundOpacity, width: 960, left: -350, top: -60 } } : {}), children };
@@ -237,6 +330,46 @@ const mod: AppModule = {
         const parsed = sshRequest({ ...addValues, ...ev.inputs }, sshAuth);
         fieldErrors = parsed.errors;
         if (parsed.request && await run("Connecting over SSH…", () => ctx.modules.call("projects", "addSsh", parsed.request, { timeoutMs: CONNECT_TIMEOUT_MS }))) closeAdd();
+        break;
+      }
+      case "askMerge": case "askDeleteTask": {
+        const project = tree.find((p) => p.tasks.some((t: any) => t.id === ev.value));
+        const task = project?.tasks.find((t: any) => t.id === ev.value);
+        if (task) { error = null; confirm = { kind: ev.action === "askMerge" ? "merge" : "deleteTask", id: task.id, name: task.name, deleteBranch: false, force: false, removeAfter: false }; }
+        break;
+      }
+      case "askRemoveProject": {
+        const project = tree.find((p) => p.id === ev.value);
+        if (project) { error = null; confirm = { kind: "removeProject", id: project.id, name: project.name, deleteBranch: false, force: false, removeAfter: false }; }
+        break;
+      }
+      case "cancelConfirm": confirm = null; error = null; break;
+      case "toggleDeleteBranch": if (confirm) confirm = { ...confirm, deleteBranch: !confirm.deleteBranch }; break;
+      case "toggleForce": if (confirm) confirm = { ...confirm, force: !confirm.force }; break;
+      case "toggleRemoveAfter": if (confirm) confirm = { ...confirm, removeAfter: !confirm.removeAfter }; break;
+      case "confirmMerge": case "confirmSquash": {
+        const c = confirm; if (!c) break;
+        const r = await run("Merging task…", () => ctx.modules.call("git-tasks", "merge", { taskId: c.id, squash: ev.action === "confirmSquash" }, { timeoutMs: 300000 }));
+        if (!r) break;
+        let message = r.merged ? `Merged ${r.branch} into ${r.target}${r.commits ? ` (${r.commits} commit${r.commits === 1 ? "" : "s"})` : ""}.` : r.message;
+        if (c.removeAfter && r.merged) {
+          // A squash merge leaves the branch unmerged by ancestry, so only -d after a real merge.
+          const removed = await run("Deleting task…", () => ctx.modules.call("git-tasks", "remove", { taskId: c.id, deleteBranch: r.squash ? "force" : "merged" }, { timeoutMs: 180000 }));
+          if (!removed) break;
+          if (removed.warning) message += ` ${removed.warning}`;
+        }
+        confirm = null; notice = message;
+        break;
+      }
+      case "confirmDeleteTask": {
+        const c = confirm; if (!c) break;
+        const r = await run("Deleting task…", () => ctx.modules.call("git-tasks", "remove", { taskId: c.id, force: c.force, deleteBranch: c.deleteBranch ? (c.force ? "force" : "merged") : false }, { timeoutMs: 180000 }));
+        if (r) { confirm = null; notice = r.warning || null; }
+        break;
+      }
+      case "confirmRemoveProject": {
+        const c = confirm; if (!c) break;
+        if (await run("Removing project…", () => ctx.modules.call("projects", "remove", { projectId: c.id }))) confirm = null;
         break;
       }
       case "newTask": taskFormFor = selectedProject()?.id || null; notice = null; break;

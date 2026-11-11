@@ -73,6 +73,16 @@ const mod: AppModule = {
       ctx.events.emit("workspace.selected", { workspaceId: d.id });
       return d;
     },
+    /** Clear the selection when it points at a workspace being removed (ids in `workspaceIds`). */
+    async forget(ctx, a) {
+      const ids: string[] = Array.isArray(a.workspaceIds) ? a.workspaceIds.map(String) : [];
+      if (!selectedId || !ids.includes(selectedId)) return false;
+      selectedId = null;
+      await ctx.modules.call("persistence", "settings.set", { key: "workspace.selected", value: null });
+      await publish(ctx);
+      ctx.events.emit("workspace.selected", { workspaceId: null });
+      return true;
+    },
     "view.get": (ctx, a) => ctx.modules.call("persistence", "views.get", { workspaceId: a.workspaceId }),
     async "view.patch"(ctx, a) {
       const v = await ctx.modules.call("persistence", "views.patch", { workspaceId: a.workspaceId, patch: a.patch });

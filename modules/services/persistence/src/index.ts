@@ -136,6 +136,14 @@ const mod: AppModule = {
     },
     "projects.findByRoot": async (ctx, a) => { const r = await q(ctx, "SELECT * FROM projects WHERE root_path = ? AND COALESCE(ssh_profile_id,'') = COALESCE(?, '')", [str(a.rootPath, "rootPath"), optStr(a.sshProfileId)]); return r.length ? projectRow(r[0]) : null; },
     "projects.setExpanded": async (ctx, a) => { await x(ctx, "UPDATE projects SET expanded = ? WHERE id = ?", [a.expanded ? 1 : 0, str(a.id, "id")]); return null; },
+    /** Unregister a project that has no tasks left. Files on disk are never touched. */
+    "projects.delete": async (ctx, a) => {
+      const id = str(a.id, "id");
+      if ((await q(ctx, "SELECT id FROM tasks WHERE project_id = ?", [id])).length) throw new Error("Delete the project's tasks first");
+      await x(ctx, "DELETE FROM workspace_views WHERE workspace_id = ?", [`project:${id}:root`]);
+      await x(ctx, "DELETE FROM projects WHERE id = ?", [id]);
+      return null;
+    },
     "projects.rename": async (ctx, a) => { await x(ctx, "UPDATE projects SET name = ? WHERE id = ?", [str(a.name, "name", 200), str(a.id, "id")]); return null; },
 
     // ---- tasks
@@ -145,6 +153,13 @@ const mod: AppModule = {
       const t = a.task;
       await x(ctx, "INSERT INTO tasks(id, project_id, name, branch, worktree_path, status, created_at) VALUES(?,?,?,?,?,?,?)",
         [str(t.id, "id"), str(t.projectId, "projectId"), str(t.name, "name", 200), str(t.branch, "branch", 250), str(t.worktreePath, "worktreePath"), t.status || "ready", now()]);
+      return null;
+    },
+    // Removes only Hato's record and view state; worktrees/branches are handled by git-tasks first.
+    "tasks.delete": async (ctx, a) => {
+      const id = str(a.id, "id");
+      await x(ctx, "DELETE FROM workspace_views WHERE workspace_id = ?", [`task:${id}`]);
+      await x(ctx, "DELETE FROM tasks WHERE id = ?", [id]);
       return null;
     },
     "tasks.setStatus": async (ctx, a) => { await x(ctx, "UPDATE tasks SET status = ? WHERE id = ?", [str(a.status, "status", 40), str(a.id, "id")]); return null; },

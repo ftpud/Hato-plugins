@@ -266,6 +266,8 @@ const mod: AppModule = {
       }
       return null;
     },
+    /** Tool catalog as agents see it (`desktopOnly` hides terminal tools, like the local endpoint). */
+    tools: (_ctx, a) => registry.list().filter((t: any) => !a?.desktopOnly || !t.name.startsWith("terminals__")).map((t: any) => ({ name: String(t.name), title: t.title || undefined, description: String(t.description || ""), readOnly: !!t.annotations?.readOnlyHint, destructive: !!t.annotations?.destructiveHint })),
     status: () => ({ port: listener ? listener.port : null, tokens: tokens.size, connections: connsByHandle.size, forwards: Array.from(forwards.entries()).map(([m, f]) => ({ machineId: m, remotePort: f.remotePort })), stats, tools: registry.list().map((t) => t.name), skills: Object.keys(SKILLS) }),
   },
 };

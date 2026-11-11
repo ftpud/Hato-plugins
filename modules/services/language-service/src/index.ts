@@ -131,7 +131,9 @@ async function start(ctx: ModuleContext, d: WorkspaceDescriptor, server: Languag
       clientInfo: { name: "Hato", version: "0.1.0" },
       capabilities: { window: { workDoneProgress: true }, general: { positionEncodings: ["utf-16"] }, workspace: { configuration: true, workspaceFolders: true, symbol: { dynamicRegistration: false } },
         textDocument: { definition: { linkSupport: true }, hover: { contentFormat: ["markdown", "plaintext"] },
-          completion: { completionItem: { snippetSupport: false, documentationFormat: ["markdown", "plaintext"] } },
+          completion: { completionItem: { snippetSupport: false, documentationFormat: ["markdown", "plaintext"], labelDetailsSupport: true,
+            resolveSupport: { properties: ["documentation", "detail", "additionalTextEdits"] } } },
+          signatureHelp: { contextSupport: true, signatureInformation: { documentationFormat: ["markdown", "plaintext"], activeParameterSupport: true, parameterInformation: { labelOffsetSupport: true } } },
           documentSymbol: { hierarchicalDocumentSymbolSupport: true }, publishDiagnostics: {}, synchronization: { dynamicRegistration: false, didSave: true } } },
       initializationOptions: { ...server.initializationOptions, ...(server.projectSettings?.initializationSettings ? { workspaceFolders: [rootUri] } : {}) },
     }, 120000);
@@ -231,7 +233,6 @@ const mod: AppModule = {
           if(d.machineId!==scope.machineId)throw new Error("MCP workspace machine does not match its authenticated scope");
           if(method === "project.set" && (!args.config || typeof args.config !== "object"))throw new Error("config is required; read project_get first");
           const result=await mod.methods![String(method)](ctx,{...args,workspaceId:scope.workspaceId},{caller:"language-service"});
-          if(method === "project.set")ctx.events.emit("language-service.configurationChanged",{workspaceId:scope.workspaceId});
           return result;
         },
       })),
@@ -291,7 +292,7 @@ const mod: AppModule = {
       const { config } = await configuredServer(ctx, d, server);
       return { config, schema: server.projectSettings || null, status: statuses.get(sessionKey(d, server)) || { phase: config.enabled ? "idle" : "disabled", message: config.enabled ? "Open a supported source file to start" : "Disabled for this workspace", serverId: server.id, machineId: d.machineId } };
     },
-    async "project.set"(ctx, a) {
+    async "project.set"(ctx, a, meta) {
       const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
       const server = servers().find(s => s.id === a.serverId);
       if (!server) throw new Error("Language server is no longer available");
@@ -300,6 +301,7 @@ const mod: AppModule = {
       const key = sessionKey(d, server), pending = sessions.get(key);
       if (pending) { sessions.delete(key); await pending.then(s => dispose(ctx, s)).catch(() => {}); }
       report(ctx, d, server, { phase: config.enabled ? "idle" : "disabled", message: config.enabled ? "Configuration saved; restarting on next request" : "Disabled for this workspace" });
+      ctx.events.emit("language-service.configurationChanged", { workspaceId: d.id, serverId: server.id, enabled: config.enabled, caller: meta?.caller || null });
       return { saved: true };
     },
     async restart(ctx, a) {
@@ -337,6 +339,23 @@ const mod: AppModule = {
     async completions(ctx, a) {
       if (!validPosition(a.position)) throw new Error("Invalid completion position");
       return (await documentRequest(ctx, a, "textDocument/completion", "completionProvider")) || [];
+    },
+    async signatureHelp(ctx, a) {
+      if (!validPosition(a.position)) throw new Error("Invalid signature position");
+      return documentRequest(ctx, a, "textDocument/signatureHelp", "signatureHelpProvider");
+    },
+    /** Resolve an accepted completion item (details and additionalTextEdits such as imports). */
+    async resolveCompletion(ctx, a) {
+      if (!a.item || typeof a.item !== "object") throw new Error("A completion item is required");
+      const path = relativeFile(String(a.path));
+      const lang = languageForPath(languages, path);
+      if (!lang?.server) return a.item;
+      const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
+      const pending = sessions.get(sessionKey(d, lang.server));
+      if (!pending) return a.item;
+      const s = await pending;
+      if (!s.capabilities.completionProvider?.resolveProvider) return a.item;
+      return s.queue.catch(() => {}).then(() => s.peer.request("completionItem/resolve", a.item, 30000));
     },
     async definitions(ctx, a) {
       if (typeof a.text !== "string" || !validPosition(a.position)) throw new Error("Definition requires text and a UTF-16 position");

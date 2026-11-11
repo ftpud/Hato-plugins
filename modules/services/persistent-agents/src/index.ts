@@ -213,7 +213,7 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     // Keep this UI adapter allowlist narrow instead of exposing arbitrary module calls.
     const allowed=new Set(["create","catalog","list","view","send","cancel","stop","reconnect","setModel","setConfig","setAutopilot","setPolicy","update","updateRuntime","reviewPermission","clear"]);
     ctx.events.on("mcp-panel.request",async(request:any)=>{
-      if(typeof request?.requestId!=="string"||!["listMcps","saveMcp","removeMcp","probeMcp","signInMcp","signOutMcp","cancelSignInMcp"].includes(request.method))return;
+      if(typeof request?.requestId!=="string"||!["listMcps","saveMcp","removeMcp","probeMcp","signInMcp","signOutMcp","cancelSignInMcp","listMcpTools"].includes(request.method))return;
       try{const value=await mod.methods![request.method](ctx,request.args||{},{caller:"mcp-panel"});ctx.events.emit("persistent-agents.mcpResponse",{requestId:request.requestId,value});}
       catch(e){ctx.events.emit("persistent-agents.mcpResponse",{requestId:request.requestId,error:e instanceof Error?e.message:String(e)});}
     });
@@ -237,6 +237,16 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     const remote=list.filter(m=>transportOf(m)!=="stdio"&&m.auth?.type==="oauth").map(m=>({id:m.id,url:m.url}));
     const status=remote.length?await ctx.modules.call("mcp-auth","status",{servers:remote}).catch(()=>({})):{};
     return [...builtInMcps,...list.map(m=>status[m.id]?{...m,authStatus:status[m.id]}:m)];
+  },
+  /** Tools a server exposes: built-ins from their modules, remote servers over HTTP. */
+  async listMcpTools(ctx,a) {
+    const id=String(a.id||"");
+    if(id==="internal-local-mcp")return {tools:await ctx.modules.call("internal-local-mcp","tools",{})};
+    if(id==="internal-remote-mcp"||id==="internal-remote-mcp-local")return {tools:await ctx.modules.call("internal-remote-mcp","tools",{})};
+    const server=(await mcps(ctx)).find(m=>m.id===id);
+    if(!server)throw new Error("Unknown MCP server");
+    if(transportOf(server)==="stdio")throw new Error("Local (command) servers start on the agent's machine when an agent connects; their tools cannot be listed from here yet.");
+    return ctx.modules.call("mcp-auth","listTools",{serverId:server.id,url:server.url,transport:server.transport,headers:server.headers,auth:server.auth},{timeoutMs:90000});
   },
   async probeMcp(ctx,a) {return ctx.modules.call("mcp-auth","probe",{url:a.url,transport:a.transport,headers:a.headers},{timeoutMs:60000});},
   async signInMcp(ctx,a) {

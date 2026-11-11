@@ -6,6 +6,8 @@ import type { McpScope, ModuleMcpTool } from "@hato/sdk/mcp";
 interface TaskOps {
   create(args: { projectId: string; name?: string; branch?: string; select: boolean }): Promise<any>;
   reconcile(projectId: string): Promise<any>;
+  merge(args: { taskId: string; target?: string; squash?: boolean }): Promise<any>;
+  remove(args: { taskId: string; force?: boolean; deleteBranch?: false | "merged" | "force" }): Promise<any>;
 }
 
 const object = (properties: Record<string, any>, required: string[] = []) => ({ type: "object", properties, required, additionalProperties: false });
@@ -46,6 +48,40 @@ export function taskTools(ctx: ModuleContext, ops: TaskOps): ModuleMcpTool[] {
         if (!name?.trim() && !branch?.trim()) throw new Error("Provide a task name or a branch");
         const { projectId } = await projectOf(scope);
         return ops.create({ projectId, name, branch, select: false });
+      },
+    },
+    {
+      name: "merge",
+      title: "Merge a Git task",
+      description: "Merge a task's branch into the branch checked out in the project root (normally main). Refuses when the task or the project checkout has uncommitted changes, and aborts without changing anything on conflicts. Never switches branches.",
+      inputSchema: object({
+        taskId: { type: "string", description: "Task id from the list tool." },
+        squash: { type: "boolean", description: "Squash the task into one commit instead of a merge commit." },
+      }, ["taskId"]),
+      timeoutMs: 300000,
+      async handler(args, scope) {
+        const { projectId } = await projectOf(scope);
+        const tasks = await ctx.modules.call("persistence", "tasks.list", { projectId });
+        if (!tasks.some((t: any) => t.id === args.taskId)) throw new Error("Task not found in the current project");
+        return ops.merge({ taskId: String(args.taskId), squash: args.squash === true });
+      },
+    },
+    {
+      name: "delete",
+      title: "Delete a Git task",
+      description: "Delete a task of the current project: removes its linked worktree and Hato's task entry. Refuses when the worktree has uncommitted changes. With deleteMergedBranch, also deletes the branch if it is fully merged. Cannot delete the task this session runs in.",
+      inputSchema: object({
+        taskId: { type: "string", description: "Task id from the list tool." },
+        deleteMergedBranch: { type: "boolean", description: "Also delete the branch when it is fully merged (git branch -d)." },
+      }, ["taskId"]),
+      annotations: { destructiveHint: true },
+      timeoutMs: 180000,
+      async handler(args, scope) {
+        const { projectId, currentTaskId } = await projectOf(scope);
+        if (args.taskId === currentTaskId) throw new Error("Cannot delete the task this session is running in");
+        const tasks = await ctx.modules.call("persistence", "tasks.list", { projectId });
+        if (!tasks.some((t: any) => t.id === args.taskId)) throw new Error("Task not found in the current project");
+        return ops.remove({ taskId: String(args.taskId), force: false, deleteBranch: args.deleteMergedBranch === true ? "merged" : false });
       },
     },
     {

@@ -149,6 +149,8 @@ const mod:AppModule={id:"internal-remote-mcp",moduleApiVersion:1,
  async activate(ctx){db=await ctx.host.db.openNamespace("internal-remote-mcp");await ctx.host.db.exec(db,"CREATE TABLE IF NOT EXISTS scopes(token TEXT PRIMARY KEY,data TEXT NOT NULL)");for(const r of await ctx.host.db.query<any>(db,"SELECT data FROM scopes")){const s:Scope=JSON.parse(r.data);scopes.set(s.token,s);}},
  canSwap:()=>({ok:scopes.size===0&&taskRequests.size===0,reason:"Workspace MCP endpoints are active"}),
  methods:{
+  /** Static workspace tool catalog (same list served by tools/list). */
+  tools:()=>tools.map((t: any) => ({ name: String(t.name), title: t.title || undefined, description: String(t.description || ""), readOnly: !!t.annotations?.readOnlyHint, destructive: !!t.annotations?.destructiveHint })),
   /** Desktop gateway (over the daemon link): take unclaimed task requests. A claim that was not resolved is offered again later. */
   async claimTaskRequests(ctx,_a,meta){
     if(meta.caller!=="daemon-client")throw new Error("Only the desktop gateway handles task requests");

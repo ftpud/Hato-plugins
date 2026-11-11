@@ -74,7 +74,8 @@ test('LSP framing counts bytes and survives every byte boundary, coalescing and 
   await assert.rejects(peer.request('after-close'),/Content-Length/);
 });
 
-function context(location = 'local') {
+// Language servers are opt-in per workspace; most fixtures model a workspace that opted in.
+function context(location = 'local', {optedIn = true} = {}) {
   const handlers = {}, watchers = {}, settings = new Map(), processes = [], calls = [], sent = [], events = [];
   const workspace = {id:'ws',name:'Fixture',location,machineId:location === 'ssh' ? 'ssh:test' : 'local',rootAbsolutePath:'/srv/project with spaces', ...(location === 'ssh' ? {ssh:{profileId:'test',host:'host',port:22,user:'dev'}} : {})};
   let seq = 0;
@@ -84,7 +85,7 @@ function context(location = 'local') {
     modules:{call:async (id,method,a)=>{
       calls.push({id,method,a});
       if (id === 'workspace') return workspace;
-      if (method === 'scoped.resolve') return settings.has(a.key) ? {value:settings.get(a.key)} : null;
+      if (method === 'scoped.resolve') return settings.has(a.key) ? {value:settings.get(a.key)} : optedIn && /^language-server\.[^.]+\.project$/.test(a.key) ? {value:{enabled:true,values:{},settings:{}}} : null;
       if (method === 'scoped.set') { settings.set(a.key,a.value); return {applied:true,rev:1}; }
       throw Error(`${id}.${method}`);
     }},
@@ -192,6 +193,23 @@ for (const location of ['local','ssh']) test(`Java project settings, startup, sy
     await assert.rejects(mod.methods.definitions(c.ctx,{...args,position:{line:0,character:1}}),/disabled/);
     assert.equal(c.processes.length,1);
   } finally {await mod.deactivate(c.ctx);}
+});
+
+test('language servers stay disabled until a workspace opts in', async () => {
+  const {default:mod}=await load('modules/services/language-service/src/index.ts');
+  const c=context('local',{optedIn:false}); await mod.activate(c.ctx);
+  const args={workspaceId:'ws',serverId:'jdtls',path:'src/Main.java',text:'class Main {}'};
+  try {
+    const initial=await mod.methods['project.get'](c.ctx,args);
+    assert.equal(initial.config.enabled,false);
+    assert.equal(initial.status.phase,'disabled');
+    await assert.rejects(mod.methods.synchronize(c.ctx,args),/disabled for this workspace/);
+    assert.equal(c.processes.length,0);
+    await mod.methods['project.set'](c.ctx,{...args,config:{enabled:true}},{caller:'language-tools'});
+    assert.ok(c.events.some(e=>e.name==='language-service.configurationChanged'&&e.value.enabled===true&&e.value.serverId==='jdtls'));
+    await mod.methods.synchronize(c.ctx,args);
+    assert.equal(c.processes.length,1);
+  } finally { await mod.deactivate?.(c.ctx); }
 });
 
 test('project settings reject escaping folders and keep unspecified build defaults', async () => {

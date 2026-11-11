@@ -14,6 +14,7 @@ import { animeWallpaper } from "./anime-wallpaper";
 import { applicationIcon } from "./application-icon";
 import { moduleVersions } from "./module-versions";
 import { colorScheme } from "@hato/sdk/color-scheme";
+import { bundledSchemes, parseScheme, schemeNode, type SyntaxScheme } from "@hato/sdk/syntax-schemes";
 import { debounce, errMsg } from "@hato/sdk/runtime";
 import { BAR_ITEMS, PANELS, setContributedBarItems, defaultLayout, dropPanel, homeOf, locate, moveBarItem, moveTo, panelSignature, removeBarItem, repair, setPanels, type BarId, type Layout, type PanelDef } from "./model";
 import { loadContributions, watchContributions, type Contributions } from "@hato/sdk/plugins";
@@ -33,6 +34,28 @@ const modeOptions = [{ value: "dark", label: "Dark" }, { value: "light", label: 
 const sizeOptions = [{ value: "14", label: "Small" }, { value: "15", label: "Compact" }, { value: "16", label: "Standard" }, { value: "18", label: "Large" }];
 const weightOptions = [{ value: "400", label: "Regular" }, { value: "500", label: "Medium" }];
 let appearanceTheme = "classic";
+// Syntax color scheme: bundled ones plus user JSON files in <sharedDir>/syntax-schemes.
+let syntaxScheme = "default";
+let customSchemes: SyntaxScheme[] = [];
+let schemeProblems: string[] = [];
+let schemesDir = "the syntax-schemes folder in Hato's shared data directory";
+const allSchemes = () => [...bundledSchemes, ...customSchemes];
+/** Custom schemes are read by the settings module (workspace-layout holds no file access). */
+async function loadSchemes(ctx: ModuleContext) {
+  const found: SyntaxScheme[] = [], problems: string[] = [];
+  try {
+    const r = await ctx.modules.call("settings", "syntaxSchemeFiles", {}, { timeoutMs: 30000 });
+    if (typeof r?.dir === "string") schemesDir = r.dir;
+    for (const file of Array.isArray(r?.files) ? r.files : []) {
+      if (typeof file.text !== "string") { problems.push(`${file.name}: ${file.error || "unreadable"}`); continue; }
+      try {
+        const scheme = parseScheme(file.text, String(file.name).replace(/\.json$/i, ""));
+        if (!found.some(s => s.id === scheme.id)) found.push(scheme);
+      } catch (e) { problems.push(`${file.name}: ${e instanceof Error ? e.message : String(e)}`); }
+    }
+  } catch { /* Settings unavailable: bundled schemes only. */ }
+  customSchemes = found; schemeProblems = problems;
+}
 let panelOpacity = "balanced";
 let projectsBackground = "subtle";
 const projectsBackgroundOptions = [{ value: "off", label: "Off" }, { value: "subtle", label: "Subtle · 12%" }, { value: "visible", label: "Visible · 24%" }];
@@ -397,14 +420,14 @@ async function resetCustomization(ctx: ModuleContext) {
   const values: Record<string, any> = {
     "layout.v1": nextLayout, "activity-sidebar.v1": defaultSidebarButtons(), "sidebar-order.v1": defaultSidebarOrder(), "panel-sharing.v1": defaultPanelSharing(),
     "ui-tables.v1": nextTables, "appearance.fontFamily": "JetBrains Mono", "appearance.fontSize": "15",
-    "appearance.fontWeight": "400", "appearance.mode": "system", "appearance.theme": "classic", "appearance.panelOpacity": "balanced", "appearance.projectsBackground": "subtle",
+    "appearance.fontWeight": "400", "appearance.mode": "system", "appearance.theme": "classic", "appearance.panelOpacity": "balanced", "appearance.projectsBackground": "subtle", "appearance.syntaxScheme": "default",
   };
   for (const [key, value] of Object.entries(values)) await ctx.modules.call("persistence", "settings.set", { key, value });
   sidebarButtons = defaultSidebarButtons(); sidebarOrder = defaultSidebarOrder(); panelSharing = defaultPanelSharing(); tableStyle = nextTables;
   groupBySpace = true; await ctx.modules.call("persistence", "settings.set", { key: "sidebar-grouping.v1", value: true });
   publishSharing(ctx);
   fontFamily = "JetBrains Mono"; fontSize = "15"; fontWeight = "400"; mode = "system"; appearanceTheme = "classic"; panelOpacity = "balanced";
-  projectsBackground = "subtle";
+  projectsBackground = "subtle"; syntaxScheme = "default";
   ctx.state.set("workspace-layout.projectsBackgroundOpacity", projectsBackgroundOpacity());
   ctx.state.set("workspace-layout.sidebarButtons", sidebarButtons);
   ctx.state.set("workspace-layout.sidebarOrder", sidebarOrder);
@@ -456,6 +479,9 @@ const mod: AppModule = {
     const savedProjectsBackground = await ctx.modules.call("persistence", "settings.get", { key: "appearance.projectsBackground" });
     projectsBackground = projectsBackgroundOptions.some(option => option.value === savedProjectsBackground) ? savedProjectsBackground : "subtle";
     ctx.state.set("workspace-layout.projectsBackgroundOpacity", projectsBackgroundOpacity());
+    const savedScheme = await ctx.modules.call("persistence", "settings.get", { key: "appearance.syntaxScheme" });
+    await loadSchemes(ctx);
+    syntaxScheme = typeof savedScheme === "string" ? savedScheme : "default";
     publishSettings = exportSettings(ctx, () => [{ key: "appearance", title: "Appearance", group: "Appearance", layout: "table", fields: [
       { key: "theme", label: "Theme", type: "select", value: appearanceTheme, options: themeOptions,
         description: "Sakura Twilight pairs an original anime wallpaper with floating indigo glass and pink accents." },
@@ -465,6 +491,12 @@ const mod: AppModule = {
         description: "A faint, oversized dove behind the project list." },
       { key: "mode", label: "Color mode", type: "select", value: mode, options: modeOptions,
         description: "Classic follows this color mode. Sakura Twilight uses its own twilight palette." },
+    ] }, { key: "syntax", title: "Syntax colors", group: "Appearance", layout: "table", fields: [
+      { key: "scheme", label: "Color scheme", type: "select", value: allSchemes().some(s => s.id === syntaxScheme) ? syntaxScheme : "default",
+        options: allSchemes().map(s => ({ value: s.id, label: s.id.startsWith("custom:") ? `${s.name} (custom)` : s.name })),
+        description: "Highlighting in the editor, diffs and Markdown code. Each scheme has light and dark variants." },
+      { key: "reload", label: "Custom schemes", type: "action", buttonLabel: "Reload",
+        description: `Add .json files to ${schemesDir} (see the bundled schemes in sdk/syntax-schemes.ts for the format), then reload.${customSchemes.length ? ` Loaded ${customSchemes.length}.` : ""}${schemeProblems.length ? ` Problems: ${schemeProblems.join("; ")}` : ""}` },
     ] }, { key: "typography", title: "Typography", group: "Appearance", layout: "table", fields: [
       { key: "fontFamily", label: "Interface font", type: "select", value: fontFamily, options: fontOptions,
         description: "Applies to panels, chat, file previews and terminals. JetBrains Mono is bundled." },
@@ -543,6 +575,12 @@ const mod: AppModule = {
         ctx.state.set("workspace-layout.sidebarButtons", sidebarButtons);
         return;
       }
+      if (section === "syntax") {
+        if (key !== "scheme" || !allSchemes().some(s => s.id === value)) throw new Error("Unknown syntax color scheme");
+        await ctx.modules.call("persistence", "settings.set", { key: "appearance.syntaxScheme", value });
+        syntaxScheme = String(value); ctx.ui.invalidate();
+        return;
+      }
       if (section === "appearance") {
         if (key === "projectsBackground") {
           if (!projectsBackgroundOptions.some(option => option.value === value)) throw new Error("Invalid background preference");
@@ -572,7 +610,8 @@ const mod: AppModule = {
       if (key === "fontFamily") fontFamily = value;
       else if (key === "fontSize") fontSize = value;
       else fontWeight = value;
-    }, { reset: { label: "Reset appearance & layout", run: () => resetCustomization(ctx) } });
+    }, { reset: { label: "Reset appearance & layout", run: () => resetCustomization(ctx) },
+      action: async (section, key) => { if (section === "syntax" && key === "reload") { await loadSchemes(ctx); publishSettings(); ctx.ui.invalidate(); } } });
     ws = ctx.state.get("workspace.selected") || null;
     ctx.state.watch("workspace.selected", (v: any) => { ws = v; ctx.ui.invalidate(); });
     ctx.events.on("agents-panel.openMcps", () => revealPanel(ctx, "mcps"));
@@ -612,7 +651,8 @@ const mod: AppModule = {
     resetLayout: (ctx) => { set(ctx, defaultLayout()); return layout; },
   },
   render(): UiNode {
-    const kids: UiNode[] = [{ type: "theme", key: "color-scheme", applicationIcon, controls: { listRowHeight: listRowHeight(tableStyle), stripedRows: tableStyle.stripes, rowDividers: tableStyle.dividers }, palette: appearanceTheme === "anime" ? animePalette(panelOpacity) : colorScheme, ...(appearanceTheme === "anime" ? { terminal: { light: animeTerminal, dark: animeTerminal } } : {}), typography: typography(fontFamily, fontSize, fontWeight), ...(mode === "system" ? {} : { mode }) }];
+    const kids: UiNode[] = [{ type: "theme", key: "color-scheme", applicationIcon, controls: { listRowHeight: listRowHeight(tableStyle), stripedRows: tableStyle.stripes, rowDividers: tableStyle.dividers }, palette: appearanceTheme === "anime" ? animePalette(panelOpacity) : colorScheme, ...(appearanceTheme === "anime" ? { terminal: { light: animeTerminal, dark: animeTerminal } } : {}), typography: typography(fontFamily, fontSize, fontWeight), ...(mode === "system" ? {} : { mode }),
+      ...(schemeNode(allSchemes().find(s => s.id === syntaxScheme)) ? { syntax: schemeNode(allSchemes().find(s => s.id === syntaxScheme)) } : {}) }];
     const top = barNode("top");
     if (top) kids.push(top);
     if (!["top", "bottom"].some((b) => layout.bars[b as BarId].visible && layout.bars[b as BarId].items.includes("layoutMenu"))) {
