@@ -75,11 +75,11 @@ test('LSP framing counts bytes and survives every byte boundary, coalescing and 
 });
 
 function context(location = 'local') {
-  const handlers = {}, watchers = {}, settings = new Map(), processes = [], calls = [], sent = [];
+  const handlers = {}, watchers = {}, settings = new Map(), processes = [], calls = [], sent = [], events = [];
   const workspace = {id:'ws',name:'Fixture',location,machineId:location === 'ssh' ? 'ssh:test' : 'local',rootAbsolutePath:'/srv/project with spaces', ...(location === 'ssh' ? {ssh:{profileId:'test',host:'host',port:22,user:'dev'}} : {})};
   let seq = 0;
   const ctx = {moduleId:'language-service',generation:1,version:1,log:console,ui:{invalidate(){}},
-    events:{on:(name,fn)=>{handlers[name]=fn;},emit(){}},
+    events:{on:(name,fn)=>{handlers[name]=fn;},emit:(name,value)=>events.push({name,value})},
     state:{get:()=>workspace,set(){},watch:(key,fn)=>{watchers[key]=fn;}},
     modules:{call:async (id,method,a)=>{
       calls.push({id,method,a});
@@ -94,7 +94,7 @@ function context(location = 'local') {
         write:async (handle,frame)=>{
           const p=processes.find(p=>p.handle===handle), message=JSON.parse(frame.split('\r\n\r\n')[1]);sent.push(message);
           if(message.id){
-            const result=message.method==='initialize'?{capabilities:{textDocumentSync:2,definitionProvider:true}}:[{uri:registry.documentUri(workspace.rootAbsolutePath,'src/target.ts'),range:{start:{line:1,character:2},end:{line:1,character:5}}}];
+            const result=message.method==='initialize'?{capabilities:{textDocumentSync:{openClose:true,change:2,save:{includeText:true}},definitionProvider:true,documentSymbolProvider:true,hoverProvider:true,completionProvider:{triggerCharacters:['.']}}}:message.method==='textDocument/documentSymbol'?[{name:'Main',kind:5,range:{start:{line:0,character:0},end:{line:3,character:1}},selectionRange:{start:{line:0,character:6},end:{line:0,character:10}},children:[{name:'run',kind:6,selectionRange:{start:{line:1,character:7},end:{line:1,character:10}}}]}]:message.method==='textDocument/hover'?{contents:{kind:'markdown',value:'int target'}}:message.method==='textDocument/completion'?[{label:'target',insertText:'target'}]:[{uri:registry.documentUri(workspace.rootAbsolutePath,'src/target.ts'),range:{start:{line:1,character:2},end:{line:1,character:5}}}];
             p.listeners.stdout(Buffer.from(lspFrame({jsonrpc:'2.0',id:message.id,result})).toString('base64'));
           }
         },terminate:async handle=>{processes.find(p=>p.handle===handle).stopped=true;}},
@@ -102,7 +102,7 @@ function context(location = 'local') {
       resources:{release:async()=>{}},
     },
   };
-  return {ctx,workspace,processes,calls,sent,handlers,watchers,settings};
+  return {ctx,workspace,processes,calls,sent,handlers,watchers,settings,events};
 }
 for (const location of ['local','ssh']) test(`language service uses ${location} process scopes, synchronizes unsaved buffers and restarts dead servers`, async () => {
   const {default:mod}=await load('modules/services/language-service/src/index.ts');
@@ -126,6 +126,7 @@ for (const location of ['local','ssh']) test(`language service uses ${location} 
     assert.deepEqual(change.contentChanges[0].range.end,{line:1,character:17});
     assert.equal(c.sent.filter(m=>m.method==='initialize').length,1);
     c.processes[0].end(null);
+    assert.equal(c.events.at(-1).value.phase,'error');
     await mod.methods.definitions(c.ctx,args);
     assert.equal(c.processes.length,2);assert.ok(c.processes[0].stopped);
     c.handlers['settings.change']({module:'language-service',section:'typescript-language-server',key:'executable',value:'/custom/server'});
@@ -147,4 +148,55 @@ test('Java uses a workspace-specific JDTLS data directory and SAP never launches
     assert.deepEqual(c.processes[0].spec.args,['-data','/srv/project with spaces/.hato/jdtls']);
     assert.equal(c.processes[0].spec.executable,'jdtls');
   } finally {await mod.deactivate(c.ctx);}
+});
+
+for (const location of ['local','ssh']) test(`Java project settings, startup, symbols and context stay on the ${location} workspace`, async () => {
+  const {default:mod}=await load('modules/services/language-service/src/index.ts');
+  const c=context(location); await mod.activate(c.ctx);
+  const args={workspaceId:'ws',serverId:'jdtls',path:'src/Main.java',text:'class Main { void run() {} }'};
+  try {
+    const initial=await mod.methods['project.get'](c.ctx,args);
+    assert.equal(initial.status.phase,'idle');
+    assert.equal(initial.config.enabled,true);
+    await mod.methods['project.set'](c.ctx,{...args,config:{enabled:true,values:{sourcePaths:['src','test'],outputPath:'out',referencedLibraries:['lib/**/*.jar'],gradle:false},settings:{java:{configuration:{runtimes:[{name:'JavaSE-21',path:'/remote/jdk21',default:true}]}}}}});
+    assert.deepEqual(c.settings.get('language-server.jdtls.project').values.sourcePaths,['src','test']);
+    assert.ok(c.calls.some(call=>call.method==='scoped.set'&&call.a.scope==='workspace:ws'));
+    const status=await mod.methods.synchronize(c.ctx,args);
+    assert.equal(status.phase,'ready');
+    await mod.methods.saved(c.ctx,args);
+    assert.equal(c.sent.find(m=>m.method==='textDocument/didSave').params.text,args.text);
+    assert.equal(c.processes[0].spec.target.kind,location);
+    const init=c.sent.find(m=>m.method==='initialize');
+    assert.deepEqual(init.params.initializationOptions.settings.java.project.sourcePaths,['src','test']);
+    assert.equal(init.params.initializationOptions.settings.java.import.gradle.enabled,false);
+    assert.equal(init.params.initializationOptions.settings.java.configuration.runtimes[0].path,'/remote/jdk21');
+    const symbols=await mod.methods.symbols(c.ctx,args);
+    assert.deepEqual(symbols.map(s=>[s.name,s.container]),[['Main',''],['run','Main']]);
+    assert.equal(symbols[1].range.start.line,1);
+    const hover=await mod.methods.hover(c.ctx,{...args,position:{line:0,character:20}});
+    assert.equal(hover.contents.value,'int target');
+    assert.equal((await mod.methods.completions(c.ctx,{...args,position:{line:0,character:20},context:{triggerKind:1}}))[0].label,'target');
+    const process=c.processes[0];
+    const notification=(method,params)=>process.listeners.stdout(Buffer.from(lspFrame({jsonrpc:'2.0',method,params})).toString('base64'));
+    notification('$/progress',{token:1,value:{kind:'begin',title:'Importing Java projects'}});
+    assert.equal(c.events.at(-1).value.phase,'indexing');
+    notification('$/progress',{token:1,value:{kind:'end'}});
+    assert.equal(c.events.at(-1).value.phase,'ready');
+    notification('textDocument/publishDiagnostics',{uri:'file:///Main.java',diagnostics:[{message:'error'}]});
+    assert.equal(c.events.at(-1).value.diagnostics,1);
+    await mod.methods['project.set'](c.ctx,{...args,config:{enabled:false}});
+    assert.ok(process.stopped);
+    await assert.rejects(mod.methods.definitions(c.ctx,{...args,position:{line:0,character:1}}),/disabled/);
+    assert.equal(c.processes.length,1);
+  } finally {await mod.deactivate(c.ctx);}
+});
+
+test('project settings reject escaping folders and keep unspecified build defaults', async () => {
+  const {projectConfiguration,projectServer}=await load('modules/services/language-service/src/project.ts');
+  const server=all.find(p=>p.id==='language-java').contributes.languages[0].server;
+  for(const value of ['../src','/outside','C:\\outside'])assert.throws(()=>projectConfiguration(server,{values:{sourcePaths:[value]}}),/inside the workspace/);
+  const defaults=projectServer(server,projectConfiguration(server,{}));
+  assert.equal(defaults.settings.java.project,undefined);
+  assert.equal(defaults.settings.java.configuration.updateBuildConfiguration,'automatic');
+  assert.throws(()=>projectServer(server,projectConfiguration(server,{settings:JSON.parse('{"__proto__":{"unsafe":true}}')})),/Invalid settings/);
 });

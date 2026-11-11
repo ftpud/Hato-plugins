@@ -1,0 +1,45 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {build} from 'esbuild';
+const code=(await build({entryPoints:[new URL('../modules/ui/viewer/src/language-panel.ts',import.meta.url).pathname],bundle:true,format:'esm',write:false})).outputFiles[0].text;
+const {LanguagePanel}=await import('data:text/javascript;base64,'+Buffer.from(code).toString('base64'));
+const project=()=>({config:{enabled:true,values:{sourcePaths:[]},settings:{}},schema:{title:'Java project',fields:[{key:'sourcePaths',type:'paths',directory:true}]},status:{phase:'idle'}});
+const event=(action,value,key='',inputs={})=>({action,value,key,inputs});
+test('folder browser uses the captured SSH workspace, applies folders and reveals returned symbols',async()=>{
+ const calls=[],panel=new LanguagePanel();
+ const ctx={ui:{invalidate(){}},modules:{call:async(id,method,args)=>{
+  calls.push({id,method,args});
+  if(method==='project.get')return project();
+  if(method==='list')return {entries:[{name:'src',relativePath:'src',kind:'dir'},{name:'file',kind:'file'}]};
+  if(method==='symbols')return [{name:'run',range:{start:{line:4,character:2}}}];
+ }}};
+ await panel.attach(ctx,'ssh-workspace','jdtls','Main.java');
+ await panel.event(ctx,event('languageBrowse','sourcePaths'),()=>({}),()=>{});
+ assert.equal(calls.at(-1).args.workspaceId,'ssh-workspace');
+ await panel.event(ctx,event('languageBrowseDir','src'),()=>({}),()=>{});
+ await panel.event(ctx,event('languageChooseDir'),()=>({}),()=>{});
+ assert.deepEqual(panel.project.config.values.sourcePaths,['src']);
+ await panel.event(ctx,event('languageApply',null,'',{'project-sourcePaths':'src\ntest','project-settings':'{"java":{"x":true}}'}),()=>({workspaceId:'ssh-workspace',path:'Main.java',text:'class Main {}'}),()=>{});
+ const saved=calls.find(c=>c.method==='project.set');
+ assert.equal(saved.args.workspaceId,'ssh-workspace');assert.equal(saved.args.config.values.sourcePaths,'src\ntest');
+ assert.equal(saved.args.config.settings.java.x,true);
+ await panel.event(ctx,event('languageSymbols'),()=>({workspaceId:'ssh-workspace'}),()=>{});
+ let selected;
+ await panel.event(ctx,event('languageSymbol',0),()=>({}),s=>{selected=s;});
+ assert.equal(selected.range.start.line,4);
+});
+test('workspace changes discard stale project results and never synchronize a new workspace after an old restart',async()=>{
+ let finish, resolveRestart;
+ const panel=new LanguagePanel(),calls=[];
+ const ctx={ui:{invalidate(){}},modules:{call:async(id,method,a)=>{
+  calls.push({id,method,a});
+  if(method==='project.get')return a.workspaceId==='old'?new Promise(r=>{finish=r;}):project();
+  if(method==='restart')return new Promise(r=>{resolveRestart=r;});
+ }}};
+ const first=panel.attach(ctx,'old','jdtls','Old.java');
+ await panel.attach(ctx,'new','jdtls','New.java');finish({...project(),status:{phase:'old'}});await first;
+ assert.equal(panel.status.phase,'idle');
+ const restart=panel.event(ctx,event('languageRestart'),()=>({workspaceId:'new'}),()=>{});
+ await panel.attach(ctx,'third','jdtls','Third.java');resolveRestart({});await restart;
+ assert.equal(calls.filter(c=>c.method==='synchronize').length,0);
+});

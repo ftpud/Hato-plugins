@@ -2,6 +2,7 @@
 import type { AppModule, ModuleContext, StreamSubscription, SettingsSection } from "@hato/sdk/types";
 import { errMsg, targetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { languageDefinitions, languageForPath, documentUri, definitionLinks, relativeFile, validPosition, type LanguageDefinition, type LanguageServerSpec } from "@hato/sdk/languages";
+import { projectConfiguration, projectServer, documentSymbols } from "./project";
 import { LanguageDependencies } from "./dependencies";
 import { LspPeer, decodeBase64 } from "@hato/sdk/lsp";
 import { exportSettings } from "@hato/sdk/settings";
@@ -16,6 +17,18 @@ let languages: LanguageDefinition[] = [];
 let publishSettings = (_error?: string | null) => {};
 const sessions = new Map<string, Promise<Session>>();
 const paths = new Map<string, string>();
+const statuses = new Map<string, any>();
+function sessionKey(d: WorkspaceDescriptor, server: LanguageServerSpec) { return `${d.machineId}|${d.rootAbsolutePath}|${server.id}`; }
+function report(ctx: ModuleContext, d: WorkspaceDescriptor, server: LanguageServerSpec, update: any) {
+  const key = sessionKey(d, server);
+  const next = { serverId: server.id, workspaceId: d.id, machineId: d.machineId, ...statuses.get(key), ...update };
+  statuses.set(key, next); ctx.events.emit("language-service.status", next);
+}
+async function configuredServer(ctx: ModuleContext, d: WorkspaceDescriptor, server: LanguageServerSpec) {
+  const stored = await scopedGet(ctx, `language-server.${server.id}.project`, d);
+  const config = projectConfiguration(server, stored?.value);
+  return { config, server: projectServer(server, config) };
+}
 let selected: WorkspaceDescriptor | null = null;
 let refreshVersion = 0;
 let stopped = false;
@@ -58,6 +71,10 @@ function configValue(settings: Record<string, any>, section?: string) {
   return section.split(".").reduce((value, key) => value?.[key], settings) ?? null;
 }
 async function start(ctx: ModuleContext, d: WorkspaceDescriptor, server: LanguageServerSpec, key: string): Promise<Session> {
+  const configured = await configuredServer(ctx, d, server);
+  if (!configured.config.enabled) { report(ctx, d, server, { phase: "disabled", message: "Disabled for this workspace" }); throw new Error(`${server.id} is disabled for this workspace`); }
+  server = configured.server;
+  report(ctx, d, server, { phase: "starting", message: "Starting language server…", capabilities: {}, diagnostics: 0, log: [] });
   const executableSetting = await scopedGet(ctx, `language-server.${server.id}.executable`, d);
   const executable = typeof executableSetting?.value === "string" && executableSetting.value.trim() ? executableSetting.value.trim() : server.executable;
   const grant = await workspaceGrant(ctx, d, "process");
@@ -71,27 +88,51 @@ async function start(ctx: ModuleContext, d: WorkspaceDescriptor, server: Languag
   peer.onRequest = async (method, params) => {
     if (method === "workspace/configuration") return (params?.items || []).map((item: any) => configValue(server.settings || {}, item.section));
     if (method === "workspace/workspaceFolders") return [{ uri: documentUri(d.rootAbsolutePath, ".hato-root").replace(/\/\.hato-root$/, ""), name: d.name }];
-    if (["client/registerCapability", "client/unregisterCapability", "window/workDoneProgress/create"].includes(method)) return null;
+    if (method === "client/registerCapability") {
+      const names: Record<string, string> = { "textDocument/definition": "definitionProvider", "textDocument/documentSymbol": "documentSymbolProvider", "textDocument/hover": "hoverProvider", "textDocument/completion": "completionProvider" };
+      for (const r of params?.registrations || []) if (names[r.method]) s.capabilities[names[r.method]] = r.registerOptions || true;
+      report(ctx, d, server, { capabilities: s.capabilities }); return null;
+    }
+    if (["client/unregisterCapability", "window/workDoneProgress/create"].includes(method)) return null;
     if (method === "workspace/applyEdit") return { applied: false, failureReason: "Workspace edits are not enabled" };
     throw Object.assign(new Error(`Unsupported server request: ${method}`), { code: -32601 });
+  };
+  const diagnostics = new Map<string, number>();
+  peer.onNotification = (method, params) => {
+    if (method === "textDocument/publishDiagnostics") {
+      diagnostics.set(params.uri, Array.isArray(params.diagnostics) ? params.diagnostics.length : 0);
+      report(ctx, d, server, { diagnostics: [...diagnostics.values()].reduce((a, b) => a + b, 0) });
+    } else if (method === "$/progress") {
+      const value = params?.value;
+      if (value?.kind === "begin" || value?.kind === "report") report(ctx, d, server, { phase: "indexing", message: value.message || value.title || "Indexing project…" });
+      else if (value?.kind === "end") report(ctx, d, server, { phase: "ready", message: value.message || "Ready" });
+    } else if (["language/status", "window/showMessage", "window/logMessage"].includes(method)) {
+      const message = String(params?.message || "").slice(-2000);
+      const log = [...(statuses.get(key)?.log || []), message].slice(-30);
+      const phase = method === "language/status" ? (params?.type === "Started" ? "ready" : params?.type === "Error" ? "error" : "indexing") : undefined;
+      report(ctx, d, server, { log, ...(phase ? { phase, message } : {}) });
+    }
   };
   try {
     s.subscriptions.push(await ctx.host.streams.listen(handle, { channel: "stdout", encoding: "base64" }, chunk => {
       try { peer.feed(decodeBase64(chunk)); } catch (error) { peer.fail(error); }
-    }, error => peer.fail(error ? errMsg(error) : `${server.id} exited. ${s.stderr.slice(-1500)}`)));
+    }, error => { const message = error ? errMsg(error) : `${server.id} exited. ${s.stderr.slice(-1500)}`; peer.fail(message); report(ctx, d, server, { phase: "error", message }); }));
     s.subscriptions.push(await ctx.host.streams.listen(handle, { channel: "stderr" }, chunk => { s.stderr = (s.stderr + chunk).slice(-4000); }));
     const rootUri = documentUri(d.rootAbsolutePath, ".hato-root").replace(/\/\.hato-root$/, "");
     const initialized = await peer.request("initialize", {
       processId: null, rootUri, workspaceFolders: [{ uri: rootUri, name: d.name }],
       clientInfo: { name: "Hato", version: "0.1.0" },
-      capabilities: { general: { positionEncodings: ["utf-16"] }, workspace: { configuration: true, workspaceFolders: true },
-        textDocument: { definition: { linkSupport: true }, synchronization: { dynamicRegistration: false, didSave: true } } },
-      initializationOptions: server.initializationOptions || {},
+      capabilities: { window: { workDoneProgress: true }, general: { positionEncodings: ["utf-16"] }, workspace: { configuration: true, workspaceFolders: true },
+        textDocument: { definition: { linkSupport: true }, hover: { contentFormat: ["markdown", "plaintext"] },
+          completion: { completionItem: { snippetSupport: false, documentationFormat: ["markdown", "plaintext"] } },
+          documentSymbol: { hierarchicalDocumentSymbolSupport: true }, publishDiagnostics: {}, synchronization: { dynamicRegistration: false, didSave: true } } },
+      initializationOptions: { ...server.initializationOptions, ...(server.projectSettings?.initializationSettings ? { workspaceFolders: [rootUri] } : {}) },
     }, 120000);
     s.capabilities = initialized?.capabilities || {};
     if (s.capabilities.positionEncoding && s.capabilities.positionEncoding !== "utf-16") throw new Error("Server selected an unsupported position encoding");
     await peer.notify("initialized", {});
     await peer.notify("workspace/didChangeConfiguration", { settings: server.settings || {} });
+    report(ctx, d, server, { phase: "ready", message: "Connected; project import may still be running", capabilities: s.capabilities });
     return s;
   } catch (error) { await dispose(ctx, s); throw new Error(`${server.id}: ${errMsg(error)}. ${s.stderr.slice(-1500)} ${server.installHint}`); }
 }
@@ -104,7 +145,7 @@ async function sessionFor(ctx: ModuleContext, d: WorkspaceDescriptor, server: La
     sessions.delete(key); await dispose(ctx, existing); pending = undefined;
   }
   if (!pending) {
-    pending = start(ctx, d, server, key); sessions.set(key, pending);
+    pending = start(ctx, d, server, key).catch(error => { if (statuses.get(key)?.phase !== "disabled") report(ctx, d, server, { phase: "error", message: errMsg(error) }); throw error; }); sessions.set(key, pending);
     pending.catch(() => { if (sessions.get(key) === pending) sessions.delete(key); });
   }
   return pending;
@@ -132,6 +173,27 @@ async function synchronize(s: Session, path: string, text: string) {
     s.documents.set(uri, { text, version: old.version + 1 });
   }
 }
+async function documentRequest(ctx: ModuleContext, a: any, method?: string, capability?: string) {
+  if (typeof a.text !== "string") throw new Error("Document text is required");
+  const path = relativeFile(String(a.path));
+  const lang = languageForPath(languages, path);
+  if (!lang?.server) return null;
+  const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
+  const s = await sessionFor(ctx, d, lang.server);
+  const operation = s.queue.catch(() => {}).then(async () => {
+    const documents = (Array.isArray(a.documents) ? a.documents : []).filter((doc: any) => typeof doc.text === "string")
+      .map((doc: any) => ({ path: relativeFile(doc.path), text: doc.text }));
+    const keep = new Set([documentUri(d.rootAbsolutePath, path), ...documents.map((doc: any) => documentUri(d.rootAbsolutePath, doc.path))]);
+    for (const uri of s.documents.keys()) if (!keep.has(uri)) { await s.peer.notify("textDocument/didClose", { textDocument: { uri } }); s.documents.delete(uri); }
+    for (const doc of documents) await synchronize(s, doc.path, doc.text);
+    await synchronize(s, path, a.text);
+    if (!method) return { ...statuses.get(s.key) };
+    if (capability && !s.capabilities[capability]) return null;
+    const uri = documentUri(d.rootAbsolutePath, path);
+    return s.peer.request(method, { textDocument: { uri }, ...(a.position ? { position: a.position } : {}), ...(a.context ? { context: a.context } : {}) }, 60000);
+  });
+  s.queue = operation; return operation;
+}
 const mod: AppModule = {
   id: "language-service", moduleApiVersion: 1,
   async activate(ctx) {
@@ -142,6 +204,7 @@ const mod: AppModule = {
       const session = sessions.get(key);
       if (session) { sessions.delete(key); await session.then(s => dispose(ctx, s)).catch(() => {}); }
       if (selected?.id === workspace.id) paths.set(server.id, executable);
+      ctx.events.emit("language-service.changed", { workspaceId: workspace.id });
     });
     publishSettings = exportSettings(ctx, sections, async (section, key, value) => {
       if (dependencies?.busy) throw new Error("Wait for dependency setup to finish before changing the executable");
@@ -149,6 +212,7 @@ const mod: AppModule = {
       if (!servers().some(s => s.id === section)) throw new Error("Language server is no longer available");
       await scopedSet(ctx, selected ? `workspace:${selected.id}` : "user", `language-server.${section}.executable`, value.trim());
       paths.set(section, value.trim()); dependencies?.invalidate(section, selected?.id); await stopSessions(ctx);
+      ctx.events.emit("language-service.changed", { workspaceId: selected?.id });
     }, { invalidate: false, action: async (section, key) => { await dependencies!.action(section, key); } });
     await refresh(ctx);
     ctx.events.on("kernel.modules.changed", () => { void refresh(ctx).catch(e => publishSettings(errMsg(e))); });
@@ -168,27 +232,62 @@ const mod: AppModule = {
     async "dependencies.check"(_ctx, a) { return dependencies!.action(String(a.serverId), "checkDependencies", a.workspaceId); },
     async "dependencies.install"(_ctx, a) { return dependencies!.action(String(a.serverId), "installDependencies", a.workspaceId); },
     async describe(_ctx, a) { return languageForPath(languages, String(a.path)); },
+    async "project.get"(ctx, a) {
+      const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
+      const server = servers().find(s => s.id === a.serverId);
+      if (!server) throw new Error("Language server is no longer available");
+      const { config } = await configuredServer(ctx, d, server);
+      return { config, schema: server.projectSettings || null, status: statuses.get(sessionKey(d, server)) || { phase: config.enabled ? "idle" : "disabled", message: config.enabled ? "Open a supported source file to start" : "Disabled for this workspace", serverId: server.id, machineId: d.machineId } };
+    },
+    async "project.set"(ctx, a) {
+      const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
+      const server = servers().find(s => s.id === a.serverId);
+      if (!server) throw new Error("Language server is no longer available");
+      const config = projectConfiguration(server, a.config);
+      await scopedSet(ctx, `workspace:${d.id}`, `language-server.${server.id}.project`, config as any);
+      const key = sessionKey(d, server), pending = sessions.get(key);
+      if (pending) { sessions.delete(key); await pending.then(s => dispose(ctx, s)).catch(() => {}); }
+      report(ctx, d, server, { phase: config.enabled ? "idle" : "disabled", message: config.enabled ? "Configuration saved; restarting on next request" : "Disabled for this workspace" });
+      return { saved: true };
+    },
+    async restart(ctx, a) {
+      const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
+      const server = servers().find(s => s.id === a.serverId);
+      if (!server) throw new Error("Language server is no longer available");
+      const key = sessionKey(d, server), pending = sessions.get(key);
+      if (pending) { sessions.delete(key); await pending.then(s => dispose(ctx, s)).catch(() => {}); }
+      await sessionFor(ctx, d, server); return statuses.get(key);
+    },
+    async synchronize(ctx, a) { return documentRequest(ctx, a); },
+    async saved(ctx, a) {
+      const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
+      const server = languageForPath(languages, String(a.path))?.server;
+      if (!server) return;
+      const pending = sessions.get(sessionKey(d, server));
+      if (!pending) return; // Saving an unrelated file must not start a new server.
+      const s = await pending;
+      const operation = s.queue.catch(() => {}).then(async () => {
+        await synchronize(s, relativeFile(a.path), a.text);
+        const save = typeof s.capabilities.textDocumentSync === "object" ? s.capabilities.textDocumentSync.save : false;
+        if (save) await s.peer.notify("textDocument/didSave", { textDocument: { uri: documentUri(d.rootAbsolutePath, a.path) }, ...(save.includeText ? { text: a.text } : {}) });
+      });
+      s.queue = operation; return operation;
+    },
+    async symbols(ctx, a) {
+      const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
+      return documentSymbols(await documentRequest(ctx, a, "textDocument/documentSymbol", "documentSymbolProvider"), documentUri(d.rootAbsolutePath, relativeFile(String(a.path))));
+    },
+    async hover(ctx, a) {
+      if (!validPosition(a.position)) throw new Error("Invalid hover position");
+      return documentRequest(ctx, a, "textDocument/hover", "hoverProvider");
+    },
+    async completions(ctx, a) {
+      if (!validPosition(a.position)) throw new Error("Invalid completion position");
+      return (await documentRequest(ctx, a, "textDocument/completion", "completionProvider")) || [];
+    },
     async definitions(ctx, a) {
       if (typeof a.text !== "string" || !validPosition(a.position)) throw new Error("Definition requires text and a UTF-16 position");
-      const path = relativeFile(String(a.path));
-      const lang = languageForPath(languages, path);
-      if (!lang?.server) return [];
-      const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
-      const s = await sessionFor(ctx, d, lang.server);
-      const operation = s.queue.catch(() => {}).then(async () => {
-        const documents = (Array.isArray(a.documents) ? a.documents : []).filter((doc: any) => typeof doc.text === "string")
-          .map((doc: any) => ({ path: relativeFile(doc.path), text: doc.text }));
-        const keep = new Set([documentUri(d.rootAbsolutePath, path), ...documents.map((doc: any) => documentUri(d.rootAbsolutePath, doc.path))]);
-        // Release saved/closed overlays so later lookups see dependency changes on disk.
-        for (const uri of s.documents.keys()) if (!keep.has(uri)) {
-          await s.peer.notify("textDocument/didClose", { textDocument: { uri } }); s.documents.delete(uri);
-        }
-        for (const doc of documents) await synchronize(s, doc.path, doc.text);
-        await synchronize(s, path, a.text);
-        return definitionLinks(await s.peer.request("textDocument/definition", { textDocument: { uri: documentUri(d.rootAbsolutePath, path) }, position: a.position }));
-      });
-      s.queue = operation;
-      return operation;
+      return definitionLinks(await documentRequest(ctx, a, "textDocument/definition", "definitionProvider"));
     },
   },
 };

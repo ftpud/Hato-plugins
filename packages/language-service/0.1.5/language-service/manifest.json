@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 2,
+  "id": "language-service",
+  "name": "Language services",
+  "kind": "service",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [
+    "workspace",
+    "persistence"
+  ],
+  "capabilities": [
+    "process.scope",
+    "ssh.connect"
+  ],
+  "runsOn": "ui",
+  "provides": [
+    "editor.languages"
+  ],
+  "stateVersion": 1,
+  "version": "0.1.5",
+  "pluginPackage": "language-service",
+  "pluginType": "Languages",
+  "description": "Shared LSP client and language contributions; launches servers on the local or SSH workspace machine.",
+  "distribution": "marketplace",
+  "calls": [
+    "workspace",
+    "persistence"
+  ]
+}

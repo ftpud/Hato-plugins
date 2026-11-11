@@ -52,7 +52,40 @@ Install the package in Settings → Plugins. Highlighting works without a server
 
 Settings → Languages exposes a server executable field for each enabled server. Press Enter to save. With a workspace selected this persists a workspace-specific override, including for an SSH project. Without a workspace it sets the user default. Values are executable paths/command names, not shell commands. Changing the setting restarts the affected language sessions.
 
-Ctrl-click on Linux/Windows or Cmd-click on macOS opens the definition at its UTF-16 position. The first request starts the server and may wait for project indexing. All unsaved editor buffers belonging to that server are synchronized before the request, including when autosave is disabled.
+Ctrl-click on Linux/Windows or Cmd-click on macOS opens the definition at its UTF-16 position. Opening a supported source file starts the server and synchronizes the document; indexing may continue in the background. All unsaved editor buffers belonging to that server are synchronized before the request, including when autosave is disabled.
+
+## Server status and Java project settings
+
+These controls ship in Hato essentials 0.1.7, Language services 0.1.5 and Java 0.1.3. Update the packages together.
+
+Open a Java/JS/TS source file. The editor's bottom bar shows the server id and its current phase
+(idle, starting, indexing, ready, disabled or error). Click it to view startup errors, server messages,
+advertised features and diagnostic count, or restart the server. A connected status is not proof that
+project import has finished. **Symbols…** lists classes, methods and fields in the active file and
+reveals the selected symbol; refresh it after import if the list is initially empty.
+
+The Java panel includes **Treat this workspace as a Java project** (enabled by default). It can
+be disabled per workspace. **Source folders** and **Output folder** accept workspace-relative paths
+or selections from **Browse folders…**. The browser uses the Files service for the selected machine,
+including SSH. Source folders and referenced JAR paths/globs accept one entry per line. Empty
+source/output overrides preserve JDTLS defaults. Source/output/library overrides are for unmanaged
+plain Java projects; Maven/Gradle projects should keep using their build files. Import toggles can
+disable Maven or Gradle import. **Apply and restart** persists workspace settings and restarts that
+workspace's server so the new import configuration takes effect.
+
+Additional server settings accept a JSON object, for example a remote project's JDK 21:
+
+```json
+{"java":{"configuration":{"runtimes":[{"name":"JavaSE-21","path":"/remote/path/to/jdk21","default":true}]}}}
+```
+
+That is the project's runtime, not the tooling JVM that runs JDTLS. Paths are on the workspace
+machine. The settings are stored through persistence, not written into source files or build files.
+JDTLS receives the merged configuration in initialization options and subsequent configuration RPCs.
+
+The status button, project settings and symbol picker hot reload through modules. Native hover and
+completion callbacks require the updated desktop build once; updating marketplace bundles alone
+cannot add those callbacks to an older running host. No new SSH daemon primitive is required.
 
 ## SSH
 
@@ -69,11 +102,11 @@ Servers must be installed on the remote machine. Remote launches use its login s
 
 ## Current scope
 
-Go to definition opens files within the current workspace. External files and JDTLS virtual/class-file URIs show an explanatory message; dependency-source viewers are not implemented yet. Completion, diagnostics UI, rename and refactoring are outside this first implementation. Only UTF-16 LSP positions are negotiated. Marketplace installation does not download language runtimes automatically; use the explicit dependency Install button or supply your own servers.
+Go to definition opens files within the current workspace. External files and JDTLS virtual/class-file URIs show an explanatory message; dependency-source viewers are not implemented yet. Hover documentation, automatic completion and the file-symbol picker are supported. Diagnostics are counted in the server panel; editor squiggles, rename and refactoring are not implemented. Only UTF-16 LSP positions are negotiated. Marketplace installation does not download language runtimes automatically; use the explicit dependency Install button or supply your own servers.
 
 ## Development and checks
 
-`contributes.languages` owns file matching, grammar selection, lexical rules and server specifications. The shared SDK validates/matches contributions and frames LSP JSON-RPC by UTF-8 byte length. The native bridge only connects the editor's definition provider and document activation hook to the owning UI module, applies grammar/lexical data, and reveals a requested cursor position. No Java, TypeScript or SAP policy lives in Rust.
+`contributes.languages` owns file matching, grammar selection, lexical rules and server specifications. The shared SDK validates/matches contributions and frames LSP JSON-RPC by UTF-8 byte length. The native bridge connects the editor's definition, hover and completion providers and document activation hook to the owning UI module, applies grammar/lexical data, and reveals a requested cursor position. No Java, TypeScript or SAP policy lives in Rust.
 
 Run `npm test`, build affected modules, and prepare immutable marketplace artifacts with `npm run release:prepare`. To smoke test a real server against a temporary project:
 

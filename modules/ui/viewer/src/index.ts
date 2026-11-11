@@ -13,6 +13,7 @@ import { uiIcons } from "@hato/sdk/ui-icons";
 
 import { languageDefinitions, languageForPath, workspacePath, validPosition, type LanguageDefinition } from "@hato/sdk/languages";
 
+import { LanguagePanel } from "./language-panel";
 import { shellBlocks } from "./markdown";
 
 let showMetadata = true;
@@ -54,6 +55,7 @@ async function save(ctx: ModuleContext, b: Buffer, force = false) {
     if (current?.workspaceId === b.workspaceId && current.relativePath === b.path) current.text = text;
     if (b.text === text) { b.state = "clean"; b.text = null; } else b.state = "dirty";
     b.error = undefined;
+    if (languageService) void ctx.modules.call("language-service", "saved", { workspaceId: b.workspaceId, path: b.path, text }, { timeoutMs: 175000 }).catch(e => ctx.log.warn(errMsg(e)));
   } catch (e: any) {
     const msg = errMsg(e);
     b.state = e?.code === "ECONFLICT" || /changed on disk/.test(msg) ? "conflict" : "error";
@@ -85,12 +87,42 @@ let generation = 0;
 let languages: LanguageDefinition[] = [];
 let languageService = false;
 let languageError: string | null = null;
+const languagePanel = new LanguagePanel();
+let languageTimer: ReturnType<typeof setTimeout> | null = null;
+function languageRequest() {
+  const buffer = current?.document ? buffers.get(current.document) : undefined;
+  return { workspaceId: ws?.id, path: current?.relativePath, text: buffer?.text ?? current?.text,
+    documents: [...buffers.values()].filter(b => b.workspaceId === ws?.id && b.text !== null).map(b => ({ path: b.path, text: b.text })) };
+}
+async function synchronizeLanguage(ctx: ModuleContext) {
+  const request = languageRequest();
+  const language = languageForPath(languages, request.path || "");
+  if (!languageService || !language?.server || current?.binary || current?.truncated || current?.diff || typeof request.text !== "string") { languagePanel.reset(); ctx.ui.invalidate(); return; }
+  await languagePanel.attach(ctx, request.workspaceId, language.server.id, request.path);
+  if (request.workspaceId !== ws?.id || request.path !== current?.relativePath || languagePanel.project?.config.enabled === false) return;
+  try {
+    await ctx.modules.call("language-service", "synchronize", request, { timeoutMs: 175000 });
+    if (request.workspaceId === ws?.id && request.path === current?.relativePath) { languagePanel.error = null; ctx.ui.invalidate(); }
+  }
+  catch (e) { if (request.workspaceId === ws?.id && request.path === current?.relativePath) { languagePanel.error = errMsg(e); ctx.ui.invalidate(); } }
+}
+async function editorRequest(ctx: ModuleContext, a: any, method: string) {
+  const buffer = buffers.get(a.document);
+  if (!languageService || !buffer || buffer.workspaceId !== a.workspaceId || buffer.path !== a.path || typeof a.text !== "string") return method === "hover" ? null : [];
+  try {
+    const result = await ctx.modules.call("language-service", method, { ...a,
+      documents: [...buffers.values()].filter(b => b.workspaceId === buffer.workspaceId && b.text !== null).map(b => ({ path: b.path, text: b.text })),
+    }, { timeoutMs: 175000 });
+    languageError = null; ctx.ui.invalidate(); return result;
+  } catch (e) { languageError = errMsg(e); ctx.ui.invalidate(); return method === "hover" ? null : []; }
+}
 let navigation: { workspaceId: string; path: string; key: string; line: number; character: number } | null = null;
 async function refreshLanguages(ctx: ModuleContext) {
   const { plugins } = await ctx.host.plugins.list();
   languages = languageDefinitions(plugins);
   languageService = plugins.some(p => p.id === "language-service" && p.enabled && !!p.active);
   ctx.ui.invalidate();
+  void synchronizeLanguage(ctx);
 }
 function restoreTabs() {
   const saved = ws?.view?.ui?.viewerTabs;
@@ -102,19 +134,19 @@ async function saveTabs(ctx: ModuleContext) {
 async function load(ctx: ModuleContext, force = false) {
   const path = ws?.view?.previewPath || null;
   const workspaceId = ws?.id;
-  if (!workspaceId || !path) { generation++; loadingPath = null; current = null; error = null; ctx.ui.invalidate(); return; }
+  if (!workspaceId || !path) { generation++; loadingPath = null; current = null; languagePanel.reset(); error = null; ctx.ui.invalidate(); return; }
   if (!tabs.includes(path)) { tabs.push(path); await saveTabs(ctx); }
   if (ws?.id !== workspaceId || ws?.view?.previewPath !== path) return;
   if (!force && current?.workspaceId === workspaceId && current.tab === path || loadingPath === path) return;
   const mine = ++generation;
   // A forced reload (diff refresh) keeps the current view until the new one arrives.
-  if (!force) current = null;
+  if (!force) { current = null; languageError = null; }
   error = null; loadingPath = path; ctx.ui.invalidate();
   try {
     const diffPath = diffTabPath(path);
     const r = diffPath
       ? { ...(await ctx.modules.call("git", "diff", { workspaceId, path: diffPath }, { timeoutMs: 45000 })), diff: true, relativePath: diffPath }
-      : await ctx.modules.call("files", "open", { workspaceId, relativePath: path, includeText: /\.(md|markdown)$/i.test(path) });
+      : await ctx.modules.call("files", "open", { workspaceId, relativePath: path, includeText: true });
     if (mine === generation) {
       current = { ...r, workspaceId, tab: path }; error = null;
       if (!r.diff && r.document && !buffers.has(r.document)) {
@@ -124,7 +156,7 @@ async function load(ctx: ModuleContext, force = false) {
       }
     }
   } catch (e) { if (mine === generation) { error = errMsg(e); current = null; } }
-  finally { if (mine === generation) loadingPath = null; ctx.ui.invalidate(); }
+  finally { if (mine === generation) { loadingPath = null; void synchronizeLanguage(ctx); } ctx.ui.invalidate(); }
 }
 
 function tabLabel(tab: string) {
@@ -220,15 +252,18 @@ const mod: AppModule = {
     ctx.events.on("git-panel.statusChanged", (e: any) => {
       if (current?.diff && e?.workspaceId === ws?.id && ws?.view?.previewPath === current.tab) void load(ctx, true);
     });
+    ctx.events.on("language-service.changed", () => { void synchronizeLanguage(ctx); });
+    ctx.events.on("language-service.status", (status: any) => languagePanel.update(ctx, status));
     ctx.events.on("files.changed", (e: any) => { if (e?.workspaceId === ws?.id) void refreshFromDisk(ctx); });
     ctx.state.watch("workspace.selected", (v: any) => {
       const changed = ws?.id !== v?.id; ws = v;
-      if (changed) { languageError = null; navigation = null; generation++; current = null; loadingPath = null; restoreTabs(); }
+      if (changed) { languagePanel.reset(); languageError = null; navigation = null; generation++; current = null; loadingPath = null; restoreTabs(); }
       void load(ctx);
     });
     await load(ctx);
   },
   async deactivate(ctx) {
+    if (languageTimer) clearTimeout(languageTimer);
     for (const pending of shellRequests.values()) { clearTimeout(pending.timer); pending.reject(new Error("Editor reloaded.")); }
     shellRequests.clear();
     // Flush pending edits before a hot swap; unsaved buffers also survive in the snapshot.
@@ -237,18 +272,9 @@ const mod: AppModule = {
   },
   snapshot: () => ({ current, buffers: Object.fromEntries([...buffers].filter(([, b]) => b.state !== "clean" || b.mtime != null).map(([d, b]) => [d, { ...b, inflight: false }])) }),
   methods: {
-    async "editor.definitions"(ctx, a) {
-      const buffer = buffers.get(a.document);
-      if (!languageService || !buffer || buffer.workspaceId !== a.workspaceId || buffer.path !== a.path || typeof a.text !== "string") return [];
-      try {
-        const locations = await ctx.modules.call("language-service", "definitions", {
-          workspaceId: buffer.workspaceId, path: buffer.path, text: a.text, position: a.position,
-          documents: [...buffers.values()].filter(b => b.workspaceId === buffer.workspaceId && b.text !== null)
-            .map(b => ({ path: b.path, text: b.text })),
-        }, { timeoutMs: 175000 });
-        languageError = null; ctx.ui.invalidate(); return locations;
-      } catch (e) { languageError = errMsg(e); ctx.ui.invalidate(); return []; }
-    },
+    async "editor.definitions"(ctx, a) { return editorRequest(ctx, a, "definitions"); },
+    async "editor.hover"(ctx, a) { return editorRequest(ctx, a, "hover"); },
+    async "editor.completions"(ctx, a) { return editorRequest(ctx, a, "completions"); },
   },
   render(): UiNode {
     const diff = !!current?.diff;
@@ -305,7 +331,10 @@ const mod: AppModule = {
       kids.push({ type: "codeViewer", key: "code", document: current && !current.binary ? current.document : null, placeholder: ws ? "Open a file from the explorer." : "Select a workspace.", grow: true,
         editable: canEdit, changeAction: canEdit ? "edit" : undefined, changeDebounceMs: 250,
         language: language?.grammar, syntaxRules: language?.syntaxRules,
-        definitionMethod: languageService && language?.server && !current?.truncated ? "editor.definitions" : undefined,
+        definitionMethod: languageService && language?.server && languagePanel.project?.config.enabled !== false && !current?.truncated ? "editor.definitions" : undefined,
+        hoverMethod: languageService && language?.server && languagePanel.project?.config.enabled !== false && !current?.truncated ? "editor.hover" : undefined,
+        completionMethod: languageService && language?.server && languagePanel.project?.config.enabled !== false && !current?.truncated ? "editor.completions" : undefined,
+        completionTriggers: languagePanel.status?.capabilities?.completionProvider?.triggerCharacters || ["."],
         definitionArgs: { workspaceId: ws?.id, path: current?.relativePath }, openLocationAction: "openDefinition",
         reveal: navigation && navigation.workspaceId === ws?.id && navigation?.path === current?.relativePath ? navigation : undefined });
     }
@@ -318,6 +347,7 @@ const mod: AppModule = {
           { type: "button", key: "diff-mode", text: diffMode === "split" ? "Unified" : "Side by side", action: "toggleDiffMode", small: true, variant: "ghost", tooltip: "Switch diff layout" } as UiNode,
           ...(current.kind !== "deleted" ? [{ type: "button", key: "open-file", text: "Open file", action: "openFile", small: true, variant: "ghost", tooltip: `Open ${current.relativePath}` } as UiNode] : []),
         ] : []),
+        ...languagePanel.controls(),
         ...(status.text ? [{ type: "label", key: "save-state", text: status.text, size: "xs", color: status.color, tooltip: status.tooltip } as UiNode] : []),
         ...(buf && (buf.state === "error" || (buf.state === "dirty" && !autosave)) ? [{ type: "button", key: "save", text: buf.state === "error" ? "Retry" : "Save", action: "save", small: true, variant: "ghost", tooltip: `Save ${current.relativePath}` } as UiNode] : []),
         ...(buf?.state === "conflict" ? [
@@ -328,6 +358,8 @@ const mod: AppModule = {
         { type: "label", key: "lang", text: diff ? (current.truncated ? "diff (truncated)" : "") : current && showMetadata ? `${current.language} · ${current.size} B${current.truncated ? " (truncated)" : ""}` : "", size: "xs", color: "muted" },
       ] }
     );
+    const languageOverlay = languagePanel.overlay();
+    if (languageOverlay) kids.push(languageOverlay);
     // Compact fallback for a host that has not yet loaded the native context-menu capability.
     if (tabMenu && tabs.includes(tabMenu)) kids.push({ type: "popover", key: "tab-menu", width: 236, top: 34, left: 4, maxHeight: 92,
       style: { background: "panel", padding: 6, radius: 6, borderWidth: 1, borderColor: "border" }, closeAction: "dismissTabMenu", children: [
@@ -339,6 +371,9 @@ const mod: AppModule = {
   async onEvent(ctx, ev) {
     if (!ws) return;
     try {
+      if (await languagePanel.event(ctx, ev, languageRequest, symbol => {
+        navigation = { workspaceId: ws.id, path: current.relativePath, key: crypto.randomUUID(), ...symbol.range.start };
+      })) return;
       if (ev.action === "openDefinition") {
         const value: any = ev.value || {};
         if (value.document !== current?.document) return;
@@ -356,6 +391,8 @@ const mod: AppModule = {
         b.text = v.text;
         if (b.state === "clean" || b.state === "error") b.state = "dirty";
         if (autosave && b.state === "dirty") scheduleSaves(ctx);
+        if (languageTimer) clearTimeout(languageTimer);
+        languageTimer = setTimeout(() => { languageTimer = null; void synchronizeLanguage(ctx); }, 500);
       } else if (ev.action === "runShellBlock" && current && !current.diff) {
         const text = bufferFor(current.relativePath)?.text ?? current.text;
         const blocks = typeof text === "string" ? shellBlocks(text) : [];
