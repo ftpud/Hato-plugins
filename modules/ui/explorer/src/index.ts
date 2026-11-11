@@ -130,6 +130,7 @@ const mod: AppModule = {
     ws = ctx.state.get("workspace.selected") || null;
     ctx.state.watch("workspace.selected", (next: any) => { const changed = ws?.id !== next?.id; ws = next; if (changed) void reset(ctx); else ctx.ui.invalidate(); });
     const gitSoon = debounce(() => { void refreshGit(ctx); }, 300);
+    ctx.events.on("files.indexed", (event: any) => { if (event.workspaceId === ws?.id && query.trim() && !contentMode) searchSoon(); });
     ctx.events.on("git.changed", (event: any) => { if (event.workspaceId === ws?.id) gitSoon(); });
     ctx.events.on("files.changed", (event: any) => {
       if (event.workspaceId !== ws?.id) return;
@@ -147,7 +148,7 @@ const mod: AppModule = {
     const loaded = [...dirs.values()].reduce((count, entries) => count + entries.length, 0);
     const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
     const count = grepping ? searching ? "Searching file contents…" : query.trim().length < 2 ? "Type at least 2 characters" : `${plural(grep?.matchCount || 0, "match", "matches")} in ${plural(grep?.fileCount || 0, "file", "files")}${grep?.truncated ? " · first results" : ""}`
-      : filtering ? searching ? "Searching workspace…" : `${plural(results?.matchCount || 0, "match", "matches")}${results?.partial ? " · partial results" : ""}` : `${loaded} items loaded`;
+      : filtering ? searching ? "Searching workspace…" : `${plural(results?.matchCount || 0, "match", "matches")}${results?.indexing ? " · indexing…" : results?.partial ? " · first results" : ""}` : `${loaded} items loaded`;
     const toggle = (key: string, icon: string, on: boolean, action: string, tooltip: string): UiNode => ({ type: "button", key, text: "", iconSvg: icon, action, small: true, variant: on ? "primary" : "ghost", tooltip, disabled: !ws });
     const children: UiNode[] = [
       { type: "row", key: "filter-bar", gap: 4, align: "center", children: [
@@ -160,7 +161,7 @@ const mod: AppModule = {
     if (!ws) children.push({ type: "label", key: "none", text: "Select a project or task.", color: "muted", padding: 8 });
     else {
       children.push({ type: "row", key: "tools", gap: 4, children: [
-        { type: "label", key: "count", text: count, size: "xs", color: "muted", grow: true, tooltip: filtering ? "Search covers workspace paths, excluding .git object storage. All folders are cached, including collapsed folders; up to 1,000 matching paths are shown." : "Folders load as you expand them; filtering searches the workspace." },
+        { type: "label", key: "count", text: count, size: "xs", color: "muted", grow: true, tooltip: filtering ? "Search covers workspace paths, excluding .git object storage. Project paths are cached, including collapsed folders. Hidden ignored folders are skipped before traversal; results update while indexing. Up to 1,000 matches are shown." : "Folders load as you expand them; filtering searches the workspace." },
         { type: "button", key: "reveal", text: "", iconSvg: uiIcons["locate"], action: "reveal", small: true, variant: "ghost", disabled: !ws.view?.previewPath, tooltip: "Reveal selected file" },
         { type: "button", key: "collapse", text: "", iconSvg: uiIcons["collapse"], action: "collapseAll", small: true, variant: "ghost", tooltip: "Collapse all folders" },
         { type: "button", key: "refresh", text: "", iconSvg: uiIcons["refresh"], action: "refresh", small: true, variant: "ghost", tooltip: "Refresh files" },
@@ -201,7 +202,7 @@ const mod: AppModule = {
       }
       if (ev.action === "collapseAll") { expanded.clear(); query = ""; results = null; searchVersion++; searching = false; }
       else if (ev.action === "reveal") { await reveal(ctx); }
-      else if (ev.action === "refresh") { await ctx.modules.call("files", "search", { workspaceId, query: "", refresh: true }); if (version !== epoch) return; await refreshTree(ctx); }
+      else if (ev.action === "refresh") { await ctx.modules.call("files", "search", { workspaceId, query: "", refresh: true, hideIgnored: !showIgnored }); if (version !== epoch) return; await refreshTree(ctx); }
       else if (["open", "expand"].includes(ev.action) && ev.rowKey) {
         const entry = (query.trim() ? filteredEntries() : [...dirs.values()].flat()).find((item: Entry) => item.relativePath === ev.rowKey);
         if (!entry) return;

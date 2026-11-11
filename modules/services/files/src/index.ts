@@ -1,7 +1,7 @@
 // files: workspace-scoped listing and reading through scoped FS grants (local fs or SFTP on the
 // workspace's machine). Returns native document handles for the viewer.
 import { fileWatch } from "@hato/sdk/file-watch";
-import { searchFiles, invalidateSearch } from "./search";
+import { searchFiles, invalidateSearch, stopSearchIndexes } from "./search";
 import { workspaceSkills } from "./skills";
 import { grepFiles, ignoredAmong, invalidateIgnored } from "./gitignore";
 import type { AppModule, ModuleContext } from "@hato/sdk/types";
@@ -57,7 +57,7 @@ async function watchSelected(ctx: ModuleContext) {
     if (next) {
       // This root was unwatched while another workspace was selected.
       invalidateSearch(next); invalidateIgnored(next);
-      void searchFiles(ctx, next, "").catch(e => ctx.log.warn(`File index: ${errMsg(e)}`));
+      void searchFiles(ctx, next, "", false, true).catch(e => ctx.log.warn(`File index: ${errMsg(e)}`));
     }
   } catch (e) { ctx.log.warn(`File watcher: ${errMsg(e)}`); }
 }
@@ -111,13 +111,14 @@ const mod: AppModule = {
   },
   async deactivate() {
     selection++; skillsVersion++;
+    stopSearchIndexes();
     if (changeTimer) clearTimeout(changeTimer);
     await watcher?.stop(); watcher = null;
   },
   methods: {
     async search(ctx, a) {
       const query = String(a.query || "").slice(0, 300).trim();
-      if (!query && a.refresh) { const d = await desc(ctx, a.workspaceId); invalidateSearch(d); await searchFiles(ctx, d, ""); }
+      if (!query && a.refresh) { const d = await desc(ctx, a.workspaceId); invalidateSearch(d); invalidateIgnored(d); await searchFiles(ctx, d, "", false, a.hideIgnored !== false); }
       if (!query) return { entries: [], matchCount: 0, indexedCount: 0, partial: false, skipped: 0 };
       const d = await desc(ctx, a.workspaceId);
       if (a.refresh) invalidateIgnored(d);
