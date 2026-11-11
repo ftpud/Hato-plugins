@@ -168,10 +168,15 @@ export function shapeHover(hover: any, context: { text?: string; path?: string; 
   let source: { name: string; uri: string; line: number } | null = null;
   for (const p of parts) {
     if (p.markdown === undefined || !p.markdown.trim()) continue;
-    const s = /^Source:\s*\*?\[([^\]]+)\]\(([^)]+)\)\*?\s*$/.exec(p.markdown.trim());
+    const text = p.markdown.trim();
+    const s = /^Source:\s*\*?\[([^\]]+)\]\(([^)]+)\)\*?$/.exec(text);
+    const plain = /^Source:\s*\*?([^*\n]+?)\*?$/.exec(text); // e.g. "Java 21 (module: java.base)"
     if (s) source = { name: s[1], uri: s[2], line: Number(/#(\d+)$/.exec(s[2])?.[1] || 0) };
+    else if (plain) source = { name: plain[1].trim(), uri: "", line: 0 };
     else docs.push(shapeDocs(p.markdown));
   }
+  // A bare package segment ("com", "java") has nothing worth a card.
+  if (/^[a-z_$][\w$]*$/.test(code) && !docs.length) return null;
   let header = "", signature = code, context2 = "";
   const paren = code.indexOf("(");
   const variable = /^(.+?)\s+-\s+(.+)$/.exec(code);

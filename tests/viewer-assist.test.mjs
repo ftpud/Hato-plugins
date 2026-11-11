@@ -63,6 +63,10 @@ test('variable hover shows its type and local declaration', () => {
   assert.equal(field, '```java\nHelper requestBuilder\n```');
   assert.equal(a.shapeHover({ contents: '' }), null);
   assert.equal(a.shapeHover({ contents: [] }), null);
+  // jdtls hovers on package segments: a bare name with a plain-text source.
+  assert.equal(a.shapeHover({ contents: [{ language: 'java', value: 'com' }, 'Source: *Java 26.0.2.1 (module: java.xml.crypto)*'] }), null);
+  const jdk = a.shapeHover({ contents: [{ language: 'java', value: 'java.lang.String' }, 'The `String` class.', 'Source: *Java 21 (module: java.base)*'] }).contents.value;
+  assert.ok(jdk.endsWith('*Java 21 (module: java.base)*') && !jdk.includes('Source:'), jdk);
   const plain = { contents: { kind: 'markdown', value: 'just text' } };
   assert.equal(a.shapeHover(plain), plain);
 });
