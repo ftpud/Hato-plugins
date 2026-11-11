@@ -3,12 +3,11 @@
 import { fileWatch } from "@hato/sdk/file-watch";
 import { searchFiles, invalidateSearch } from "./search";
 import { workspaceSkills } from "./skills";
-import { grepFiles, ignoredAmong, ignoredSet, invalidateIgnored, isIgnored } from "./gitignore";
+import { grepFiles, ignoredAmong, invalidateIgnored } from "./gitignore";
 import type { AppModule, ModuleContext } from "@hato/sdk/types";
 import { errMsg, langFromPath, targetFor, withWorkspace, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import type { ScopeGrant } from "@hato/sdk/types";
 
-const words = (q: string) => q.toLowerCase().trim().split(/\s+/).filter(Boolean);
 const MAX_VIEW_BYTES = 2 * 1024 * 1024;
 const docCache = new Map<string, { document: string; mtime: number | null; size: number; text?: string; truncated: boolean }>();
 
@@ -51,9 +50,15 @@ async function watchSelected(ctx: ModuleContext) {
   try {
     const next = ws?.id ? await desc(ctx, ws.id) : null;
     if (mine !== selection) return;
-    if (selected?.id === next?.id && selected?.rootAbsolutePath === next?.rootAbsolutePath) return;
+    if (selected?.id === next?.id && selected?.machineId === next?.machineId && selected?.rootAbsolutePath === next?.rootAbsolutePath) return;
     selected = next;
     await watcher?.select(next);
+    // Warm all paths independently of which folders are expanded.
+    if (next) {
+      // This root was unwatched while another workspace was selected.
+      invalidateSearch(next); invalidateIgnored(next);
+      void searchFiles(ctx, next, "").catch(e => ctx.log.warn(`File index: ${errMsg(e)}`));
+    }
   } catch (e) { ctx.log.warn(`File watcher: ${errMsg(e)}`); }
 }
 let skillsVersion = 0;
@@ -112,17 +117,11 @@ const mod: AppModule = {
   methods: {
     async search(ctx, a) {
       const query = String(a.query || "").slice(0, 300).trim();
-      if (!query && a.refresh) invalidateSearch(await desc(ctx, a.workspaceId));
+      if (!query && a.refresh) { const d = await desc(ctx, a.workspaceId); invalidateSearch(d); await searchFiles(ctx, d, ""); }
       if (!query) return { entries: [], matchCount: 0, indexedCount: 0, partial: false, skipped: 0 };
       const d = await desc(ctx, a.workspaceId);
       if (a.refresh) invalidateIgnored(d);
-      const found = await searchFiles(ctx, d, query, !!a.refresh);
-      if (!a.hideIgnored) return found;
-      const ignored = await ignoredSet(ctx, d);
-      const entries = found.entries.filter((e: any) => !isIgnored(ignored, e.relativePath));
-      // Recount among visible paths: ancestor folders are included for display, not as matches.
-      const w = words(query), hits = entries.filter((e: any) => w.every(x => e.relativePath.toLowerCase().includes(x))).length;
-      return { ...found, entries, matchCount: found.partial ? Math.max(hits, found.matchCount - (found.entries.length - entries.length)) : hits, hiddenIgnored: found.entries.length - entries.length };
+      return searchFiles(ctx, d, query, !!a.refresh, !!a.hideIgnored);
     },
     /** Literal, case-insensitive search of file contents (git grep; grep outside repositories). */
     async grep(ctx, a) {

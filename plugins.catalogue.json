@@ -8,7 +8,7 @@
       "type": "System",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.13",
+      "version": "0.1.14",
       "coreVersion": "^0.1.0",
       "description": "Hato essentials services and panels.",
       "dependencies": {},

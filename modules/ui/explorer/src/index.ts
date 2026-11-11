@@ -63,7 +63,7 @@ async function refreshTree(ctx: ModuleContext) {
       }));
       if (version !== epoch) { refreshAgain = true; continue; }
       for (const listing of listings) if (listing) dirs.set(listing[0], listing[1]);
-      if (query.trim()) await search(ctx, true);
+      if (query.trim()) await search(ctx);
       ctx.ui.invalidate();
     } while (refreshAgain);
   } finally { refreshing = false; }
@@ -160,7 +160,7 @@ const mod: AppModule = {
     if (!ws) children.push({ type: "label", key: "none", text: "Select a project or task.", color: "muted", padding: 8 });
     else {
       children.push({ type: "row", key: "tools", gap: 4, children: [
-        { type: "label", key: "count", text: count, size: "xs", color: "muted", grow: true, tooltip: filtering ? "Search covers workspace paths, excluding .git object storage. Very large workspaces show partial results." : "Folders load as you expand them; filtering searches the workspace." },
+        { type: "label", key: "count", text: count, size: "xs", color: "muted", grow: true, tooltip: filtering ? "Search covers workspace paths, excluding .git object storage. All folders are cached, including collapsed folders; up to 1,000 matching paths are shown." : "Folders load as you expand them; filtering searches the workspace." },
         { type: "button", key: "reveal", text: "", iconSvg: uiIcons["locate"], action: "reveal", small: true, variant: "ghost", disabled: !ws.view?.previewPath, tooltip: "Reveal selected file" },
         { type: "button", key: "collapse", text: "", iconSvg: uiIcons["collapse"], action: "collapseAll", small: true, variant: "ghost", tooltip: "Collapse all folders" },
         { type: "button", key: "refresh", text: "", iconSvg: uiIcons["refresh"], action: "refresh", small: true, variant: "ghost", tooltip: "Refresh files" },
