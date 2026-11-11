@@ -6,6 +6,7 @@ import type { AppModule, ModuleContext, UiNode } from "@hato/sdk/types";
 import { fileIcons } from "@hato/sdk/file-icons";
 import { fileTabStyle, tabButtonStyle } from "@hato/sdk/tab-style";
 import { exportSettings } from "@hato/sdk/settings";
+import { fontOptions } from "@hato/sdk/typography";
 import { errMsg } from "@hato/sdk/runtime";
 import { resolveWorkspaceLink } from "@hato/sdk/links";
 import { diffTabPath } from "@hato/sdk/git";
@@ -14,6 +15,7 @@ import { uiIcons } from "@hato/sdk/ui-icons";
 import { languageDefinitions, languageForPath, workspacePath, relativeFile, validPosition, type LanguageDefinition } from "@hato/sdk/languages";
 
 import { shellBlocks } from "./markdown";
+import { enclosingType, hoverType, receiverAt, shapeCompletions, shapeHover } from "./assist";
 import { diffLines } from "@hato/sdk/text-diff";
 
 // ---- Git change markers -------------------------------------------------------------------
@@ -55,6 +57,32 @@ let editable = true;
 let autosave = true;
 let autosaveDelay = 800;
 const AUTOSAVE_DELAYS = [300, 800, 2000, 5000];
+
+// Source editor font. Empty values follow the global (interface) font settings.
+const GLOBAL_FONT = "global";
+const editorFontOptions = [{ value: GLOBAL_FONT, label: "Global default" }, ...fontOptions.filter(o => o.value !== "system")];
+const FONT_NUMBERS = {
+  fontWeight: { min: 100, max: 900, label: "Font weight" },
+  fontSize: { min: 8, max: 40, label: "Size" },
+  lineHeight: { min: 1, max: 3, label: "Line height" },
+} as const;
+type FontNumber = keyof typeof FONT_NUMBERS;
+let editorFont = { family: GLOBAL_FONT, fontWeight: "", fontSize: "", lineHeight: "" };
+function fontNumber(key: FontNumber, raw: unknown): string {
+  const text = String(raw ?? "").trim();
+  if (!text) return "";
+  const value = Number(text), { min, max, label } = FONT_NUMBERS[key];
+  if (!Number.isFinite(value) || value < min || value > max) throw new Error(`${label} must be between ${min} and ${max}, or empty for the global default`);
+  return String(value);
+}
+function editorFontNode() {
+  const font: { family?: string; weight?: number; size?: number; lineHeight?: number } = {};
+  if (editorFont.family !== GLOBAL_FONT) font.family = editorFont.family;
+  if (editorFont.fontWeight) font.weight = Number(editorFont.fontWeight);
+  if (editorFont.fontSize) font.size = Number(editorFont.fontSize);
+  if (editorFont.lineHeight) font.lineHeight = Number(editorFont.lineHeight);
+  return Object.keys(font).length ? font : undefined;
+}
 
 // Edits keyed by document handle so a debounced change that lands after a tab switch still
 // saves the right file. `mtime` is the on-disk version this buffer is based on.
@@ -120,6 +148,36 @@ function languageRequest() {
   return { workspaceId: ws?.id, path: current?.relativePath, text: buffer?.text ?? current?.text,
     documents: [...buffers.values()].filter(b => b.workspaceId === ws?.id && b.text !== null).map(b => ({ path: b.path, text: b.text })) };
 }
+// Semantic classes from the language server, per file: identifier → LSP token kind.
+const semantic = new Map<string, Record<string, string>>();
+// Which semantic kinds restyle which grammar capture (scheme keys such as "type.interface").
+const SEMANTIC_CAPTURES: Record<string, [base: string, capture: string]> = {
+  interface: ["type", "type.interface"], enum: ["type", "type.enum"], typeParameter: ["type", "type.typeParameter"],
+  property: ["variable", "property"], enumMember: ["variable", "constant"],
+};
+function nameCaptures(workspaceId: string | undefined, path: string | undefined) {
+  const names = workspaceId && path ? semantic.get(headKey(workspaceId, path)) : undefined;
+  if (!names) return undefined;
+  const out: Record<string, Record<string, string>> = {};
+  for (const [name, kind] of Object.entries(names)) {
+    const target = SEMANTIC_CAPTURES[kind];
+    if (target) (out[target[0]] ??= {})[name] = target[1];
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+async function refreshSemantic(ctx: ModuleContext, request: ReturnType<typeof languageRequest>) {
+  const key = headKey(request.workspaceId, request.path!);
+  try {
+    const names = await ctx.modules.call("language-service", "semanticNames", request, { timeoutMs: 60000 });
+    if (!names || typeof names !== "object") return;
+    // An empty answer while the server is still importing must not wipe known classes.
+    if (!Object.keys(names).length && semantic.has(key)) return;
+    if (JSON.stringify(semantic.get(key)) === JSON.stringify(names)) return;
+    semantic.delete(key); semantic.set(key, names);
+    while (semantic.size > 40) semantic.delete(semantic.keys().next().value!);
+    if (request.workspaceId === ws?.id && request.path === current?.relativePath) ctx.ui.invalidate();
+  } catch (e) { ctx.log.warn(`semantic names: ${errMsg(e)}`); }
+}
 async function synchronizeLanguage(ctx: ModuleContext) {
   const request = languageRequest();
   const language = languageForPath(languages, request.path || "");
@@ -129,7 +187,7 @@ async function synchronizeLanguage(ctx: ModuleContext) {
   if (request.workspaceId !== ws?.id || request.path !== current?.relativePath || !projectLanguageEnabled) return;
   try {
     await ctx.modules.call("language-service", "synchronize", request, { timeoutMs: 175000 });
-    if (request.workspaceId === ws?.id && request.path === current?.relativePath) { languageError = null; ctx.ui.invalidate(); }
+    if (request.workspaceId === ws?.id && request.path === current?.relativePath) { languageError = null; ctx.ui.invalidate(); void refreshSemantic(ctx, request); }
   }
   catch (e) { if (request.workspaceId === ws?.id && request.path === current?.relativePath) { languageError = errMsg(e); ctx.ui.invalidate(); } }
 }
@@ -145,30 +203,23 @@ async function editorRequest(ctx: ModuleContext, a: any, method: string) {
   } catch (e) { languageError = errMsg(e); ctx.ui.invalidate(); return empty; }
 }
 
-// ---- IDEA-style completion items ------------------------------------------------------------
-// The native menu shows `label` on the left and `detail` (muted) on the right. Present the
-// symbol with its parameters on the left and its type / package on the right, like IntelliJ.
+// ---- IDEA-style completion items and hovers (see ./assist) --------------------------------
 // Shaped items map back to the server's originals for completionItem/resolve (auto-import).
 const shapedOriginals = new Map<string, any>();
 const shapeKey = (item: any) => `${item.label}\u0000${JSON.stringify(item.data ?? null)}`;
-function shapeCompletions(result: any) {
-  const items: any[] = Array.isArray(result) ? result : Array.isArray(result?.items) ? result.items : [];
-  shapedOriginals.clear();
-  const shaped = items.map(original => {
-    const name = String(original.filterText || original.label || "").replace(/\(.*$/, "").replace(/ [-:] .*$/, "").trim() || String(original.label);
-    const params = original.labelDetails?.detail ?? (/^[^(]*(\(.*?\))/.exec(String(original.label))?.[1] || "");
-    // Right side: return/field type for members, package for types.
-    const typed = / : (.+)$/.exec(String(original.label))?.[1];
-    const pkg = / - (.+)$/.exec(String(original.label))?.[1];
-    const right = original.labelDetails?.description || typed || pkg || (original.detail && String(original.detail).length <= 48 ? original.detail : "");
-    const item = { ...original, label: `${name}${params}`, detail: right || undefined, filterText: original.filterText || name,
-      // Without an explicit edit the menu inserts the label; keep inserting just the name.
-      ...(!original.textEdit && !original.insertText ? { insertText: name } : {}) };
-    shapedOriginals.set(shapeKey(item), original);
-    return item;
-  });
-  shaped.sort((a, b) => String(a.sortText ?? a.label).localeCompare(String(b.sortText ?? b.label)));
-  return Array.isArray(result) ? shaped : { ...result, items: shaped };
+/** Simple name of the type whose members are being completed (receiver type, else enclosing type). */
+async function completionOwner(ctx: ModuleContext, a: any): Promise<string | null> {
+  if (typeof a.text !== "string" || !validPosition(a.position)) return null;
+  const lines = a.text.split("\n");
+  const line = lines[a.position.line] ?? "";
+  let offset = 0;
+  for (let i = 0; i < a.position.line; i++) offset += lines[i].length + 1;
+  const enclosing = enclosingType(a.text, offset + a.position.character);
+  const receiver = receiverAt(line, a.position.character);
+  if (!receiver) return enclosing;
+  if (receiver.name === "this") return enclosing;
+  const hover = await editorRequest(ctx, { ...a, position: { line: a.position.line, character: receiver.character } }, "hover");
+  return hoverType(hover) ?? (/^[A-Z]/.test(receiver.name) ? receiver.name : null);
 }
 let navigation: { workspaceId: string; path: string; key: string; line: number; character: number } | null = null;
 async function refreshLanguages(ctx: ModuleContext) {
@@ -193,24 +244,48 @@ async function load(ctx: ModuleContext, force = false) {
   if (ws?.id !== workspaceId || ws?.view?.previewPath !== path) return;
   if (!force && current?.workspaceId === workspaceId && current.tab === path || loadingPath === path) return;
   const mine = ++generation;
+  const diffPath = diffTabPath(path);
+  // Switching back to a file shows its last opened document at once (remote workspaces pay a
+  // round trip per open); the open below still runs and swaps in a newer version if the file changed.
+  const known = !force && !diffPath ? opened.get(openedKey(workspaceId, path)) : undefined;
+  if (known) { current = known; languageError = null; updateHunks(); }
   // A forced reload (diff refresh) keeps the current view until the new one arrives.
-  if (!force) { current = null; languageError = null; }
+  else if (!force) { current = null; languageError = null; }
   error = null; loadingPath = path; ctx.ui.invalidate();
+  if (known) void synchronizeLanguage(ctx);
   try {
-    const diffPath = diffTabPath(path);
     const r = diffPath
       ? { ...(await ctx.modules.call("git", "diff", { workspaceId, path: diffPath }, { timeoutMs: 45000 })), diff: true, relativePath: diffPath }
       : await ctx.modules.call("files", "open", { workspaceId, relativePath: path, includeText: true });
-    if (mine === generation) {
+    // Keep unsaved edits on screen when the file changed underneath them; saving reports the conflict.
+    const keep = known && r.document !== known.document && unsaved(buffers.get(known.document));
+    if (mine === generation && !keep) {
       current = { ...r, workspaceId, tab: path }; error = null;
+      if (!r.diff && !r.binary && r.document) rememberOpened(current);
       if (!r.diff && r.document && !buffers.has(r.document)) {
         // A fresh handle replaces any older clean buffer for the same file.
         for (const [doc, b] of buffers) if (b.workspaceId === workspaceId && b.path === r.relativePath && b.state === "clean") buffers.delete(doc);
         buffers.set(r.document, { workspaceId, path: r.relativePath, mtime: r.mtime ?? null, text: null, state: "clean" });
       }
     }
-  } catch (e) { if (mine === generation) { error = errMsg(e); current = null; } }
-  finally { if (mine === generation) { loadingPath = null; void synchronizeLanguage(ctx); void refreshHead(ctx); } ctx.ui.invalidate(); }
+  } catch (e) { if (mine === generation) { error = errMsg(e); current = null; opened.delete(openedKey(workspaceId, path)); } }
+  finally {
+    if (mine === generation) {
+      loadingPath = null;
+      if (!known || current?.document !== known.document) void synchronizeLanguage(ctx);
+      void refreshHead(ctx);
+    }
+    ctx.ui.invalidate();
+  }
+}
+// Last opened result per file tab, so switching tabs needs no round trip before drawing.
+const opened = new Map<string, any>();
+const OPENED_LIMIT = 40;
+const openedKey = (workspaceId: string, path: string) => `${workspaceId}|${path}`;
+function rememberOpened(result: any) {
+  const key = openedKey(result.workspaceId, result.tab);
+  opened.delete(key); opened.set(key, result);
+  while (opened.size > OPENED_LIMIT) opened.delete(opened.keys().next().value!);
 }
 function updateHunks() {
   const head = current && !current.diff && !current.binary && !current.truncated && ws ? heads.get(headKey(ws.id, current.relativePath)) : undefined;
@@ -285,6 +360,9 @@ const mod: AppModule = {
     autosave = typeof savedAutosave === "boolean" ? savedAutosave : true;
     const savedDelay = await ctx.modules.call("persistence", "settings.get", { key: "viewer.autosaveDelay" });
     autosaveDelay = AUTOSAVE_DELAYS.includes(Number(savedDelay)) ? Number(savedDelay) : 800;
+    const savedFont = await ctx.modules.call("persistence", "settings.get", { key: "viewer.editorFont" });
+    editorFont = { family: editorFontOptions.some(o => o.value === savedFont?.family) ? savedFont.family : GLOBAL_FONT, fontWeight: "", fontSize: "", lineHeight: "" };
+    for (const key of Object.keys(FONT_NUMBERS) as FontNumber[]) { try { editorFont[key] = fontNumber(key, savedFont?.[key]); } catch { /* ignore invalid saved value */ } }
     for (const [doc, b] of Object.entries(prev?.buffers || {}) as [string, Buffer][]) buffers.set(doc, { ...b, inflight: false, again: false });
     publishSettings = exportSettings(ctx, () => [{ key: "viewer", title: "Source editor", fields: [
       { key: "editable", label: "Edit files", type: "toggle", value: editable,
@@ -307,7 +385,22 @@ const mod: AppModule = {
       { key: "diffMode", label: "Diff layout", type: "select", value: diffMode,
         options: [{ value: "split", label: "Side by side" }, { value: "unified", label: "Unified" }],
         description: "How Git diffs are compared. Switch in the viewer status bar." },
-    ] }], async (_section, key, value) => {
+    ] }, { key: "viewer-font", title: "Editor font", fields: [
+      { key: "fontFamily", label: "Font", type: "select", value: editorFont.family, options: editorFontOptions,
+        description: editorFont.family === GLOBAL_FONT ? "Global default" : "Source editor only" },
+      ...(Object.keys(FONT_NUMBERS) as FontNumber[]).map(key => ({ key, label: FONT_NUMBERS[key].label, type: "text" as const, value: editorFont[key],
+        placeholder: "Default", description: editorFont[key] ? `Source editor only · ${FONT_NUMBERS[key].min}–${FONT_NUMBERS[key].max}` : "Global default" })),
+    ] }], async (section, key, value) => {
+      if (section === "viewer-font") {
+        const next = { ...editorFont };
+        if (key === "fontFamily") {
+          if (typeof value !== "string" || !editorFontOptions.some(o => o.value === value)) throw new Error("Invalid editor font");
+          next.family = value;
+        } else if (key in FONT_NUMBERS) next[key as FontNumber] = fontNumber(key as FontNumber, value);
+        else throw new Error("Invalid editor font setting");
+        await ctx.modules.call("persistence", "settings.set", { key: "viewer.editorFont", value: next });
+        editorFont = next; ctx.ui.invalidate(); return;
+      }
       if (key === "diffMode") {
         if (value !== "split" && value !== "unified") throw new Error("Invalid diff layout");
         await ctx.modules.call("persistence", "settings.set", { key: "viewer.diffMode", value });
@@ -370,8 +463,14 @@ const mod: AppModule = {
       await ctx.modules.call("workspace","view.patch",{workspaceId:ws.id,patch:{previewPath:path}});
     },
     async "editor.definitions"(ctx, a) { return editorRequest(ctx, a, "definitions"); },
-    async "editor.hover"(ctx, a) { return editorRequest(ctx, a, "hover"); },
-    async "editor.completions"(ctx, a) { return shapeCompletions(await editorRequest(ctx, a, "completions")); },
+    async "editor.hover"(ctx, a) {
+      const hover = await editorRequest(ctx, a, "hover");
+      return hover ? shapeHover(hover, { text: a.text, path: a.path, language: languageForPath(languages, String(a.path || ""))?.grammar }) : hover;
+    },
+    async "editor.completions"(ctx, a) {
+      const [result, owner] = await Promise.all([editorRequest(ctx, a, "completions"), completionOwner(ctx, a).catch(() => null)]);
+      return shapeCompletions(result, owner, shapedOriginals, shapeKey);
+    },
     async "editor.signature"(ctx, a) { return editorRequest(ctx, a, "signatureHelp"); },
     async "editor.resolveCompletion"(ctx, a) {
       const original = shapedOriginals.get(shapeKey(a.item || {}));
@@ -398,7 +497,7 @@ const mod: AppModule = {
     ];
     if (languageError) kids.push({ type: "status", key: "language-error", text: languageError, level: "warn" });
     if (error) kids.push({ type: "status", key: "err", text: error, level: "error" });
-    if (loadingPath) kids.push({ type: "progress", key: "ld", indeterminate: true, label: `Opening ${loadingPath}…` });
+    if (loadingPath && current?.tab !== loadingPath) kids.push({ type: "progress", key: "ld", indeterminate: true, label: `Opening ${loadingPath}…` });
     if (current && current.binary) kids.push({ type: "status", key: "bin", text: current.message, level: "info" });
     if (diff) kids.push({ type: "diff", key: "diff", changeNavigation: { previous: "Previous change", next: "Next change" }, document: current.document, mode: diffMode, softWrap: viewerWrap, header: false, emptyText: "No changes against HEAD.", grow: true });
     else if (markdown && renderMarkdown) {
@@ -435,11 +534,13 @@ const mod: AppModule = {
       const language = current ? languageForPath(languages, current.relativePath) : null;
       kids.push({ type: "codeViewer", key: "code", document: current && !current.binary ? current.document : null, placeholder: ws ? "Open a file from the explorer." : "Select a workspace.", grow: true,
         editable: canEdit, changeAction: canEdit ? "edit" : undefined, changeDebounceMs: 250,
-        language: language?.grammar, syntaxRules: language?.syntaxRules, softWrap: editorWrap,
+        language: language?.grammar, syntaxRules: language?.syntaxRules, softWrap: editorWrap, font: editorFontNode(),
+        highlightQuery: Array.isArray(language?.highlightQuery) ? language.highlightQuery.join("\n") : language?.highlightQuery,
+        nameCaptures: languageService && language?.server && projectLanguageEnabled ? nameCaptures(ws?.id, current?.relativePath) : undefined,
         definitionMethod: languageService && language?.server && projectLanguageEnabled && !current?.truncated ? "editor.definitions" : undefined,
         hoverMethod: languageService && language?.server && projectLanguageEnabled && !current?.truncated ? "editor.hover" : undefined,
         completionMethod: languageService && language?.server && projectLanguageEnabled && !current?.truncated ? "editor.completions" : undefined,
-        completionTriggers: ["."],
+        completionTriggers: ["."], completionMenu: { width: 720, minWidth: 420, maxHeight: 420 },
         signatureMethod: languageService && language?.server && projectLanguageEnabled && !current?.truncated && canEdit ? "editor.signature" : undefined,
         completionResolveMethod: languageService && language?.server && projectLanguageEnabled && !current?.truncated && canEdit ? "editor.resolveCompletion" : undefined,
         lineMarkers: hunks.map((h, index) => ({ line: h.line, endLine: h.line + h.added, color: !h.added ? "danger" : h.removed.length ? "primary" : "success", value: index })),

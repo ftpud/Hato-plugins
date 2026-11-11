@@ -6,7 +6,7 @@ import { serverData } from "./server-data";
 import { exportMcpTools } from "@hato/sdk/mcp";
 import { projectConfiguration, projectServer, documentSymbols } from "./project";
 import { LanguageDependencies } from "./dependencies";
-import { LspPeer, decodeBase64 } from "@hato/sdk/lsp";
+import { LspPeer, decodeBase64, SEMANTIC_TYPES, semanticNames } from "@hato/sdk/lsp";
 import { exportSettings } from "@hato/sdk/settings";
 import { get as scopedGet, set as scopedSet } from "@hato/sdk/scoped-settings";
 
@@ -127,7 +127,7 @@ async function start(ctx: ModuleContext, d: WorkspaceDescriptor, server: Languag
     if (method === "workspace/configuration") return (params?.items || []).map((item: any) => configValue(server.settings || {}, item.section));
     if (method === "workspace/workspaceFolders") return [{ uri: documentUri(d.rootAbsolutePath, ".hato-root").replace(/\/\.hato-root$/, ""), name: d.name }];
     if (method === "client/registerCapability") {
-      const names: Record<string, string> = { "textDocument/definition": "definitionProvider", "textDocument/documentSymbol": "documentSymbolProvider", "textDocument/hover": "hoverProvider", "textDocument/completion": "completionProvider" };
+      const names: Record<string, string> = { "textDocument/definition": "definitionProvider", "textDocument/documentSymbol": "documentSymbolProvider", "textDocument/hover": "hoverProvider", "textDocument/completion": "completionProvider", "textDocument/semanticTokens": "semanticTokensProvider" };
       for (const r of params?.registrations || []) if (names[r.method]) s.capabilities[names[r.method]] = r.registerOptions || true;
       report(ctx, d, server, { capabilities: s.capabilities }); return null;
     }
@@ -167,7 +167,8 @@ async function start(ctx: ModuleContext, d: WorkspaceDescriptor, server: Languag
           completion: { completionItem: { snippetSupport: false, documentationFormat: ["markdown", "plaintext"], labelDetailsSupport: true,
             resolveSupport: { properties: ["documentation", "detail", "additionalTextEdits"] } } },
           signatureHelp: { contextSupport: true, signatureInformation: { documentationFormat: ["markdown", "plaintext"], activeParameterSupport: true, parameterInformation: { labelOffsetSupport: true } } },
-          documentSymbol: { hierarchicalDocumentSymbolSupport: true }, publishDiagnostics: {}, synchronization: { dynamicRegistration: false, didSave: true } } },
+          documentSymbol: { hierarchicalDocumentSymbolSupport: true },
+          semanticTokens: { dynamicRegistration: false, requests: { full: true }, formats: ["relative"], tokenTypes: SEMANTIC_TYPES, tokenModifiers: [], overlappingTokenSupport: false, multilineTokenSupport: false }, publishDiagnostics: {}, synchronization: { dynamicRegistration: false, didSave: true } } },
       initializationOptions: { ...server.initializationOptions, ...(server.projectSettings?.initializationSettings ? { workspaceFolders: [rootUri] } : {}) },
     }, 120000);
     s.capabilities = initialized?.capabilities || {};
@@ -220,7 +221,7 @@ async function synchronize(s: Session, path: string, text: string) {
     s.documents.set(uri, { text, version: old.version + 1 });
   }
 }
-async function documentRequest(ctx: ModuleContext, a: any, method?: string, capability?: string) {
+async function documentRequest(ctx: ModuleContext, a: any, method?: string, capability?: string, map?: (result: any, s: Session) => any) {
   if (typeof a.text !== "string") throw new Error("Document text is required");
   const path = relativeFile(String(a.path));
   const lang = languageForPath(languages, path);
@@ -237,7 +238,8 @@ async function documentRequest(ctx: ModuleContext, a: any, method?: string, capa
     if (!method) return { ...statuses.get(s.key) };
     if (capability && !s.capabilities[capability]) return null;
     const uri = documentUri(d.rootAbsolutePath, path);
-    return s.peer.request(method, { textDocument: { uri }, ...(a.position ? { position: a.position } : {}), ...(a.context ? { context: a.context } : {}) }, 60000);
+    const result = await s.peer.request(method, { textDocument: { uri }, ...(a.position ? { position: a.position } : {}), ...(a.context ? { context: a.context } : {}) }, 60000);
+    return map ? map(result, s) : result;
   });
   s.queue = operation; return operation;
 }
@@ -381,6 +383,11 @@ const mod: AppModule = {
       const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
       const path=relativeFile(String(a.path)), uri=documentUri(d.rootAbsolutePath,path);
       return documentSymbols(await documentRequest(ctx, a, "textDocument/documentSymbol", "documentSymbolProvider"), uri).map(s=>({...s,path,uri}));
+    },
+    /** Identifiers in a document by semantic kind (`{EventHandler: "interface"}`), or {} without support. */
+    async semanticNames(ctx, a) {
+      return (await documentRequest(ctx, a, "textDocument/semanticTokens/full", "semanticTokensProvider",
+        (result, s) => semanticNames(result, s.capabilities.semanticTokensProvider?.legend, a.text))) || {};
     },
     async hover(ctx, a) {
       if (!validPosition(a.position)) throw new Error("Invalid hover position");
