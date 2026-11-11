@@ -48,6 +48,22 @@ with tarfile.open(archive,'w:gz') as tar:
  item=tarfile.TarInfo('link');item.type=tarfile.SYMTYPE;item.linkname='../../escape';tar.addfile(item)
 try:namespace['extract'](archive,root/'link-extract');raise AssertionError('accepted escaping link')
 except ValueError:pass
+# JDK legal files use relative sibling links. Repeated entries must resolve
+# relative to the link's directory, not the existing link's target directory.
+archive=root/'jdk-links.tar.gz'
+with tarfile.open(archive,'w:gz') as tar:
+ item=tarfile.TarInfo('jdk/legal/java.base/ASSEMBLY_EXCEPTION');item.size=7;tar.addfile(item,io.BytesIO(b'license'))
+ for unused in range(2):
+  item=tarfile.TarInfo('jdk/legal/jdk.nio.mapmode/ASSEMBLY_EXCEPTION');item.type=tarfile.SYMTYPE;item.linkname='../java.base/ASSEMBLY_EXCEPTION';tar.addfile(item)
+namespace['extract'](archive,root/'jdk-links')
+assert (root/'jdk-links/jdk/legal/jdk.nio.mapmode/ASSEMBLY_EXCEPTION').read_bytes()==b'license'
+# A later archive member cannot write through an escaping link either.
+archive=root/'chain.tar.gz'
+with tarfile.open(archive,'w:gz') as tar:
+ item=tarfile.TarInfo('jdk/legal');item.type=tarfile.SYMTYPE;item.linkname='../../escape';tar.addfile(item)
+ item=tarfile.TarInfo('jdk/legal/file');item.size=1;tar.addfile(item,io.BytesIO(b'x'))
+try:namespace['extract'](archive,root/'chain-extract');raise AssertionError('accepted escaping chain')
+except ValueError:pass
 class Response(io.BytesIO):
  def geturl(self):return 'https://fixture.invalid/archive'
 with mock.patch('urllib.request.urlopen',return_value=Response(b'corrupt')):

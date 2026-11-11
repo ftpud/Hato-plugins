@@ -104,12 +104,22 @@ def extract(archive, destination):
         if len(members) > 50000 or sum(m.size for m in members) > 2 * 1024**3: raise ValueError('Dependency archive is too large')
         for member in members:
             if not (member.isfile() or member.isdir() or member.issym() or member.islnk()): raise ValueError('Unsupported archive entry')
-            target = (root / member.name).resolve()
+            if os.path.isabs(member.name): raise ValueError('Absolute archive path')
+            path = root / member.name
+            target = path.resolve()
             if target != root and root not in target.parents: raise ValueError('Archive path escapes destination')
             if member.issym() or member.islnk():
-                link = ((target.parent if member.issym() else root) / member.linkname).resolve()
+                if os.path.isabs(member.linkname): raise ValueError('Absolute archive link')
+                link = ((path.parent.resolve() if member.issym() else root) / member.linkname).resolve()
                 if link != root and root not in link.parents: raise ValueError('Archive link escapes destination')
-            # Recheck after prior symlinks were created. On Python 3.12+, use its data filter too.
+            # Create validated symlinks directly: Python data-filter versions differ in
+            # resolving relative links through already-created archive symlinks.
+            if member.issym():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if os.path.lexists(path): path.unlink()
+                os.symlink(member.linkname, path)
+                continue
+            # Recheck after prior symlinks were created; retain the data filter for other entries.
             if hasattr(tarfile, 'data_filter'): tar.extract(member, destination, filter='data')
             else: tar.extract(member, destination)
 
