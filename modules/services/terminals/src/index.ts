@@ -106,9 +106,8 @@ const mod: AppModule = {
     },
     async runCode(ctx, a) {
       const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
-      const tool = commands.tools.find(tool => tool.name === "run_and_wait_for_answer")!;
-      // Return after launch; the same terminal stays reserved until its completion marker arrives.
-      return tool.handler({ tab: a.key, command: a.command, timeoutMs: 100 }, { conversationId: "markdown", workspaceId: d.id, machineId: d.machineId });
+      const tool = commands.tools.find(tool => tool.name === "send")!;
+      return tool.handler({ tab: a.key, text: a.command, enter: true }, { conversationId: "markdown", workspaceId: d.id, machineId: d.machineId });
     },
     async activity(ctx, a) {
       const keys = [...new Set<string>((Array.isArray(a.keys) ? a.keys : []).filter((key: unknown) => typeof key === "string"))].slice(0, 128);
