@@ -1,6 +1,6 @@
 // Runs on the workspace machine through its approved process scope; no administrator install.
 export const DEPENDENCY_SCRIPT = String.raw`
-import hashlib, json, os, pathlib, platform, re, shlex, shutil, subprocess, sys, tarfile, tempfile, urllib.request, uuid
+import hashlib, json, os, pathlib, platform, re, shlex, shutil, subprocess, sys, tarfile, tempfile, urllib.request, uuid, zipfile
 MARKER = '__HATO_DEPENDENCIES__='
 
 def command(args, env=None, timeout=20):
@@ -27,7 +27,7 @@ def java_home(path):
 
 def java_candidates(root, minimum):
     candidates = [os.path.join(os.environ.get('JAVA_HOME', ''), 'bin/java') if os.environ.get('JAVA_HOME') else None,
-                  executable('java'), str(root / 'java/bin/java'), str(root / 'java/Contents/Home/bin/java')]
+                  executable('java'), str(root / ('java-' + str(minimum)) / 'bin/java'), str(root / ('java-' + str(minimum)) / 'Contents/Home/bin/java'), str(root / 'java/bin/java'), str(root / 'java/Contents/Home/bin/java')]
     if sys.platform == 'darwin':
         candidates += ['/opt/homebrew/opt/openjdk/bin/java', '/usr/local/opt/openjdk/bin/java']
         try:
@@ -41,6 +41,18 @@ def read_metadata(root, server):
     try: return json.loads((root / (server + '.json')).read_text())
     except (OSError, ValueError): return {}
 
+def required_java(recipe, root, server_root=None):
+    # The Python launcher and upstream README can lag behind the actual core bundle.
+    minimum = recipe['javaMajor']
+    plugins = pathlib.Path(server_root or root / ('jdtls-' + recipe['version'])) / 'plugins'
+    for jar in plugins.glob('org.eclipse.jdt.core_*.jar'):
+        with zipfile.ZipFile(jar) as archive:
+            manifest = archive.read('META-INF/MANIFEST.MF').decode('utf-8')
+        manifest = re.sub(r'\r?\n ', '', manifest)
+        environments = re.findall(r'JavaSE-(\d+)', manifest)
+        if environments: minimum = max(minimum, *map(int, environments))
+    return minimum
+
 def inspect(request, root):
     recipe, server = request['setup'], request['server']
     wrapper = str(root / 'bin' / server)
@@ -51,8 +63,9 @@ def inspect(request, root):
     components = [{'label': 'Python 3', 'found': os.path.isfile(python), 'version': platform.python_version(), 'path': python}]
     if recipe['kind'] == 'jdtls':
         effective = metadata.get('runtime') or (os.path.join(os.environ['JAVA_HOME'], 'bin/java') if os.environ.get('JAVA_HOME') else executable('java'))
-        jdk = runtime(effective, 'java', recipe['javaMajor'])
-        components.append({'label': 'JDK ' + str(recipe['javaMajor']) + '+', 'found': bool(jdk), **(jdk or {})})
+        minimum = required_java(recipe, root, metadata.get('serverRoot'))
+        jdk = runtime(effective, 'java', minimum)
+        components.append({'label': 'JDK ' + str(minimum) + '+ (language server)', 'found': bool(jdk), **(jdk or {})})
     else:
         node = runtime(metadata.get('runtime') or executable('node'), 'node', 20)
         npm = metadata.get('npm') or executable('npm')
@@ -134,7 +147,7 @@ def install_java(root, major):
     url = 'https://api.adoptium.net/v3/assets/latest/' + str(major) + '/hotspot?architecture=' + arch + '&image_type=jdk&os=' + system + '&vendor=eclipse'
     assets = json.loads(fetch(url))
     package = assets[0]['binary']['package']
-    destination = install_archive(root, 'java', package['link'], package['checksum'], True)
+    destination = install_archive(root, 'java-' + str(major), package['link'], package['checksum'], True)
     candidates = [destination / 'bin/java', destination / 'Contents/Home/bin/java']
     for candidate in candidates:
         if runtime(str(candidate), 'java', major): return str(candidate)
@@ -194,15 +207,15 @@ def install(request, root):
     acquire_lock(lock)
     try:
         if recipe['kind'] == 'jdtls':
-            java = install_java(root, recipe['javaMajor'])
             destination = root / ('jdtls-' + recipe['version'])
             if not (destination / 'bin/jdtls').is_file():
                 destination = install_archive(root, destination.name, recipe['url'], recipe['sha256'], False)
+            java = install_java(root, required_java(recipe, root, destination))
             launcher = destination / 'bin/jdtls'
             if not launcher.is_file(): raise ValueError('JDTLS archive is missing its launcher')
             # Use this Python and chosen JDK regardless of the GUI/login shell's older JAVA_HOME.
             body = '#!/bin/sh\nexport JAVA_HOME=' + shlex.quote(java_home(java)) + '\nexec ' + shlex.quote(sys.executable) + ' ' + shlex.quote(str(launcher)) + ' "$@"\n'
-            metadata = {'runtime': str(pathlib.Path(java).resolve()), 'python': sys.executable}
+            metadata = {'runtime': str(pathlib.Path(java).resolve()), 'python': sys.executable, 'serverRoot': str(destination)}
         else:
             node, npm = install_node(root, recipe['nodeMajor'])
             prefix = root / 'typescript'

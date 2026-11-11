@@ -32,7 +32,7 @@ test('Python installer verifies checksums, rejects escaping archives and creates
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'hato-dependency-install-'));
  try{
   const python=`
-import io, json, os, pathlib, subprocess, tarfile, unittest.mock as mock, hashlib, shutil
+import io, json, os, pathlib, subprocess, tarfile, zipfile, unittest.mock as mock, hashlib, shutil
 namespace={'__name__':'hato_dependency_test'}
 exec(${JSON.stringify(DEPENDENCY_SCRIPT)},namespace)
 root=pathlib.Path(${JSON.stringify(root)})
@@ -77,6 +77,11 @@ assert len(downloads)==1,'repeat installation must reuse downloaded artifacts'
 (root/'managed tools/.install.lock').write_text('99999999')
 assert namespace['main'](request)['ready'],'recover an installation lock left by a dead helper'
 assert not (root/'managed tools/.install.lock').exists()
+# The real core bundle can require a newer JVM than the configured/launcher minimum.
+plugins=root/'managed tools/jdtls-new/plugins';plugins.mkdir(parents=True)
+with zipfile.ZipFile(plugins/'org.eclipse.jdt.core_fixture.jar','w') as jar:
+ jar.writestr('META-INF/MANIFEST.MF','Bundle-RequiredExecutionEnvironment: JavaSE-25\\n')
+assert namespace['required_java']({'version':'new','javaMajor':21},root/'managed tools')==25
 # Missing runtimes select platform-specific, checksummed official downloads.
 namespace['java_candidates']=lambda root,minimum:[]
 namespace['machine']=lambda:('linux','x64')
@@ -85,13 +90,13 @@ def jdk_fetch(url):
  requests.append(url)
  return json.dumps([{'binary':{'package':{'link':'https://fixture.invalid/java.tar.gz','checksum':'f'*64}}}]).encode()
 def jdk_archive(root,name,url,digest,flatten):
- assert name=='java' and digest=='f'*64 and flatten
+ assert name=='java-21' and digest=='f'*64 and flatten
  binary=root/name/'bin/java';binary.parent.mkdir(parents=True)
  binary.write_text(${JSON.stringify("#!/bin/sh\necho 'openjdk version \"21.0.1\"' >&2\n")});binary.chmod(0o755)
  return root/name
 namespace['fetch']=jdk_fetch;namespace['install_archive']=jdk_archive
 jdk=namespace['install_java'](root,21)
-assert jdk.endswith('/java/bin/java')
+assert jdk.endswith('/java-21/bin/java')
 assert 'os=linux' in requests[-1] and 'architecture=x64' in requests[-1]
 namespace['executable']=lambda value:None
 namespace['runtime']=lambda path,kind,minimum:{'path':path,'version':'v24'} if path and path.endswith('/node/bin/node') else None

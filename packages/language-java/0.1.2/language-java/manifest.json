@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 2,
+  "id": "language-java",
+  "name": "Java",
+  "kind": "service",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [],
+  "capabilities": [],
+  "provides": [
+    "language.provider"
+  ],
+  "runsOn": "ui",
+  "contributes": {
+    "languages": [
+      {
+        "id": "java",
+        "name": "Java",
+        "extensions": [
+          "java"
+        ],
+        "grammar": "java",
+        "server": {
+          "id": "jdtls",
+          "executable": "jdtls",
+          "args": [
+            "-data",
+            "$WORKSPACE/.hato/jdtls"
+          ],
+          "settings": {
+            "java": {
+              "configuration": {
+                "updateBuildConfiguration": "automatic"
+              }
+            }
+          },
+          "installHint": "Install Eclipse JDTLS and a supported JDK on the workspace machine; put jdtls on PATH or set its full path here.",
+          "dependencySetup": {
+            "kind": "jdtls",
+            "version": "1.63.0",
+            "url": "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz",
+            "sha256": "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4",
+            "javaMajor": 25
+          }
+        }
+      }
+    ]
+  },
+  "stateVersion": 1,
+  "description": "Java syntax highlighting and go to definition through Eclipse JDTLS, locally or over SSH.",
+  "author": "Hato contributors",
+  "version": "0.1.2",
+  "pluginPackage": "language-java",
+  "pluginType": "Languages",
+  "distribution": "marketplace"
+}

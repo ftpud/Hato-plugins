@@ -23,7 +23,7 @@ launcher as the workspace's executable preference, and restarts only that worksp
 The buttons show progress and are disabled while their operation runs; failures remain visible.
 
 - Java installs the pinned, SHA-256-verified Eclipse JDTLS archive. It reuses a suitable installed
-  JDK, or downloads a checksummed Eclipse Temurin JDK 21 when none is available. Its launcher
+  JDK, or downloads a checksummed Eclipse Temurin JDK 25 when none is available. Its launcher
   selects the correct JDK even when the GUI/login shell has an older `JAVA_HOME`.
 - JS/TS installs `typescript-language-server` and TypeScript into a private npm prefix. It reuses
   suitable Node.js/npm, or downloads a checksummed Node.js 24 distribution when needed.
@@ -47,7 +47,7 @@ In a development checkout, the marketplace keeps locally known packages visible 
 
 Install the package in Settings → Plugins. Highlighting works without a server. For navigation, install the server **on the machine that holds the workspace**:
 
-- Java: install [Eclipse JDTLS](https://github.com/eclipse-jdtls/eclipse.jdt.ls) and a JDK supported by that JDTLS version (currently JDK 21 or newer). Put its `jdtls` launcher on PATH or supply its absolute path. If needed, use a launcher wrapper that selects the correct `JAVA_HOME`. Each workspace uses its own `.hato/jdtls` data directory; exclude that generated directory from version control. Open the Maven/Gradle project root.
+- Java: install [Eclipse JDTLS](https://github.com/eclipse-jdtls/eclipse.jdt.ls) and a JDK supported by that JDTLS version (currently JDK 25 or newer). Put its `jdtls` launcher on PATH or supply its absolute path. If needed, use a launcher wrapper that selects the correct `JAVA_HOME`. Each workspace uses its own `.hato/jdtls` data directory; exclude that generated directory from version control. Open the Maven/Gradle project root.
 - JS/TS: install Node.js, then `npm install -g typescript-language-server typescript@6`. See the [server documentation](https://github.com/typescript-language-server/typescript-language-server). The semantic server is used for definitions so navigation resolves imports even during initial project loading.
 
 Settings → Languages exposes a server executable field for each enabled server. Press Enter to save. With a workspace selected this persists a workspace-specific override, including for an SSH project. Without a workspace it sets the user default. Values are executable paths/command names, not shell commands. Changing the setting restarts the affected language sessions.
@@ -94,3 +94,17 @@ In this checkout, Settings → Plugins → Installed → Install from folder can
 `packages/language-service/0.1.1/language-service`. This package update works without restarting.
 The host artifact-cache fix additionally makes future manifest-only updates take effect while
 preserving custom builds and rollback artifacts; the rebuilt host takes effect on the next restart.
+
+## Java server JVM versus project JDK
+
+The pinned JDTLS 1.63.0 archive contains a core bundle requiring Java 25, despite the launcher's
+older minimum check. Java plugin 0.1.2 requires Language services 0.1.3: dependency checks inspect
+the installed core bundle and installation provisions the matching JVM in a versioned user directory
+(such as `java-25`). The managed launcher sets `JAVA_HOME` only for JDTLS; the project's JDK 21
+and machine-wide environment are left intact. Project Maven/Gradle toolchains may still specify 21.
+
+A source manifest edit does not update an installed marketplace plugin. Prepare/export the new
+packages, install/update both Java and Language services, select the SSH workspace, then run Check
+and Install missing dependencies there. The remote workspace's persisted executable must point at
+the generated remote `~/.local/share/hato/language-tools/bin/jdtls` launcher. A plain `jdtls` command
+or a wrapper hardcoded to the old JDK can still launch Java 21 after editing a version requirement.

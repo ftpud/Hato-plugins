@@ -40,7 +40,7 @@
             "version": "1.63.0",
             "url": "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz",
             "sha256": "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4",
-            "javaMajor": 21
+            "javaMajor": 25
           }
         }
       }
@@ -49,7 +49,7 @@
   "stateVersion": 1,
   "description": "Java syntax highlighting and go to definition through Eclipse JDTLS, locally or over SSH.",
   "author": "Hato contributors",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "pluginPackage": "language-java",
   "pluginType": "Languages",
   "distribution": "marketplace"
