@@ -210,7 +210,7 @@ const mod: AppModule = {
           if (query.trim()) { if (filterCollapsed.has(entry.relativePath)) filterCollapsed.delete(entry.relativePath); else filterCollapsed.add(entry.relativePath); }
           else if (expanded.has(entry.relativePath)) expanded.delete(entry.relativePath);
           else { expanded.add(entry.relativePath); await loadDir(ctx, entry.relativePath); await compactChildren(ctx, entry.relativePath, version); }
-        } else if (ev.action === "open") await ctx.modules.call("workspace", "view.patch", { workspaceId: ws.id, patch: { previewPath: entry.relativePath } });
+        } else if (ev.action === "open") await ctx.modules.call("workspace", "view.patch", { workspaceId: ws.id, patch: { previewPath: entry.relativePath, ...(contentMode && query.trim() ? { ui: { viewerSearch: { key: crypto.randomUUID(), path: entry.relativePath, query: query.trim() } } } : {}) } });
       }
       if (version !== epoch) return;
       await ctx.modules.call("workspace", "view.patch", { workspaceId, patch: { ui: { explorerTree: { expanded: [...expanded], showIgnored } } } });

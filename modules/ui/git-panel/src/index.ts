@@ -27,7 +27,7 @@ function save(ctx: ModuleContext) {
   return ctx.modules.call("persistence", "settings.set", { key: `git-panel.changesets.${ws.id}`, value: draft() });
 }
 async function refresh(ctx: ModuleContext) {
-  if (!ws) return;
+  if (!ws) { ctx.state.set("git-panel.panelBadge.git", 0); return; }
   if (loading) { dirty = true; return; }
   loading = true; dirty = false;
   const id = ws.id, mine = epoch;
@@ -41,10 +41,11 @@ async function refresh(ctx: ModuleContext) {
       draftsLoaded.add(id);
     }
     status = r; error = "";
+    ctx.state.set("git-panel.panelBadge.git", r.files.length);
     selected = new Set([...selected].filter(p => r.files.some((f: Change) => f.path === p)));
     ctx.events.emit("git-panel.statusChanged", { workspaceId: id });
   } catch (e) { if (mine === epoch) error = errMsg(e); }
-  finally { if (mine === epoch) { loading = false; if (dirty && visible) void refresh(ctx); } ctx.ui.invalidate(); }
+  finally { if (mine === epoch) { loading = false; if (dirty && autoRefresh) void refresh(ctx); } ctx.ui.invalidate(); }
 }
 function button(key: string, text: string, action = key, extra: any = {}): UiNode {
   return { type: "button", key, text, action, small: true, variant: "ghost", disabled: busy, ...extra };
@@ -66,11 +67,11 @@ const mod: AppModule = {
     });
     visible = !!(ctx.state.get("workspace-layout.panels") as any)?.git;
     ctx.state.watch("workspace.selected", (v: any) => {
-      if (ws?.id !== v?.id) { epoch++; loading = false; status = null; selected.clear(); query = ""; stashOpen = false; error = ""; notice = ""; }
+      if (ws?.id !== v?.id) { epoch++; loading = false; status = null; ctx.state.set("git-panel.panelBadge.git", 0); selected.clear(); query = ""; stashOpen = false; error = ""; notice = ""; }
       ws = v; void refresh(ctx);
     });
     ctx.state.watch("workspace-layout.panels", (v: any) => { visible = !!v?.git; if (visible) void refresh(ctx); });
-    ctx.events.on("git.changed", (v: any) => { if (v.workspaceId === ws?.id) { dirty = true; if (visible && autoRefresh) void refresh(ctx); } });
+    ctx.events.on("git.changed", (v: any) => { if (v.workspaceId === ws?.id) { dirty = true; if (autoRefresh) void refresh(ctx); } });
     await refresh(ctx);
   },
   canSwap: () => ({ ok: !busy, reason: "A Git operation is running" }),
@@ -113,7 +114,7 @@ const mod: AppModule = {
               action: folder ? `folderCheck:${scope}:${node.path}` : `check:${node.path}`, disabled: busy,
               tooltip: folder ? `Include all changes in ${node.path}` : `Include ${node.path} in commit` },
             button(`${folder ? "folder" : "file"}:${scope}:${node.path}`, node.name,
-              folder ? "folder" : "diff", { value: folder ? key : node.path,
+              folder ? "folder" : "diff", { doubleClickAction: folder ? undefined : "edit", value: folder ? key : node.path,
                 iconSvg: folder ? (open ? fileIcons.folderOpen : fileIcons.folder) : fileIcons.file,
                 style: { justify: "start", paddingX: 4 },
                 tooltip: f?.origPath ? `${f.origPath} → ${node.path}` : node.path }),
@@ -191,6 +192,7 @@ const mod: AppModule = {
         if (target !== "main") d.sets.find(s => s.id === target)!.paths.push(...paths);
         d.active = target; selected.clear(); await save(ctx);
       } else if (ev.action === "removeSet" && a.id !== "main") { d.sets = d.sets.filter(s => s !== a); d.active = "main"; selected.clear(); await save(ctx); }
+      else if (ev.action === "edit") await ctx.modules.call("workspace", "view.patch", { workspaceId: id, patch: { previewPath: String(ev.value) } });
       else if (ev.action === "diff") await ctx.modules.call("workspace", "view.patch", { workspaceId: id, patch: { previewPath: diffTab(String(ev.value)) } });
       else if (ev.action === "refresh") await refresh(ctx);
       else if (ev.action === "closeStashes") { stashOpen = false; dropStash = null; }

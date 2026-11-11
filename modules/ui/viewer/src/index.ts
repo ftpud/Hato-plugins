@@ -481,6 +481,8 @@ const mod: AppModule = {
   },
   render(): UiNode {
     const diff = !!current?.diff;
+    const search = ws?.view?.ui?.viewerSearch;
+    const editorSearch = search?.path === current?.relativePath && typeof search?.query === "string" && typeof search?.key === "string" ? { key: search.key, query: search.query } : undefined;
     const markdown = current && !diff && !current.binary && (current.language === "markdown" || /\.(md|markdown)$/i.test(current.relativePath));
     const title = current ? (diff ? `Changes in ${current.relativePath}` : current.relativePath) : ws?.view?.previewPath || "No file selected";
     const kids: UiNode[] = [
@@ -500,7 +502,7 @@ const mod: AppModule = {
     if (loadingPath && current?.tab !== loadingPath) kids.push({ type: "progress", key: "ld", indeterminate: true, label: `Opening ${loadingPath}…` });
     if (current && current.binary) kids.push({ type: "status", key: "bin", text: current.message, level: "info" });
     if (diff) kids.push({ type: "diff", key: "diff", changeNavigation: { previous: "Previous change", next: "Next change" }, document: current.document, mode: diffMode, softWrap: viewerWrap, header: false, emptyText: "No changes against HEAD.", grow: true });
-    else if (markdown && renderMarkdown) {
+    else if (markdown && renderMarkdown && !editorSearch) {
       const markdownText = bufferFor(current.relativePath)?.text ?? current.text;
       const blocks = typeof markdownText === "string" ? shellBlocks(markdownText) : [];
       if (!blocks.length) kids.push({ type: "markdown", key: "preview", document: current.document, linkAction: "openLink", grow: true });
@@ -546,6 +548,7 @@ const mod: AppModule = {
         lineMarkers: hunks.map((h, index) => ({ line: h.line, endLine: h.line + h.added, color: !h.added ? "danger" : h.removed.length ? "primary" : "success", value: index })),
         lineMarkerAction: "showHunk",
         definitionArgs: { workspaceId: ws?.id, path: current?.relativePath }, openLocationAction: "openDefinition",
+        search: editorSearch,
         reveal: navigation && navigation.workspaceId === ws?.id && navigation?.path === current?.relativePath ? navigation : undefined });
     }
     const buf = !diff && current?.document ? buffers.get(current.document) : undefined;
