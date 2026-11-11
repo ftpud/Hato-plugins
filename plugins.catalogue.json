@@ -8,7 +8,7 @@
       "type": "System",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.12",
+      "version": "0.1.13",
       "coreVersion": "^0.1.0",
       "description": "Hato essentials services and panels.",
       "dependencies": {},
@@ -35,7 +35,7 @@
       "type": "AI",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.6",
+      "version": "0.1.7",
       "coreVersion": "^0.1.0",
       "description": "Provider-independent ACP sessions, chat UI and MCP tools. Install AI providers separately.",
       "dependencies": {
@@ -107,6 +107,23 @@
       "modules": [
         "codex-provider",
         "codex-usage"
+      ]
+    },
+    {
+      "id": "copilot-acp",
+      "name": "GitHub Copilot",
+      "type": "AI providers",
+      "core": false,
+      "author": "Hato contributors",
+      "version": "0.1.0",
+      "coreVersion": "^0.1.0",
+      "description": "GitHub Copilot CLI using its native ACP server. Available in AI Chat and Background Agents; install and authenticate Copilot on the workspace machine.",
+      "dependencies": {
+        "foundation": "^0.1.0",
+        "core-acp": "^0.1.7"
+      },
+      "modules": [
+        "copilot-provider"
       ]
     },
     {

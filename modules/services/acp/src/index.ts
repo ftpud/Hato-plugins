@@ -16,6 +16,12 @@ async function providerById(ctx: ModuleContext, id: string): Promise<AgentProvid
   if (!found) throw new Error(`Provider '${id}' is unavailable. Install or enable its plugin in Marketplace.`);
   return found;
 }
+/** Quota parsing is optional; standard ACP token/context usage never needs provider RPC access. */
+export async function providerSessionLimits(ctx: ModuleContext, providerId: string, update: any, previous: LimitsSnapshot | null): Promise<LimitsSnapshot | null> {
+  const definition = (await providers(ctx)).find(p => p.id === providerId);
+  if (!definition?.usageCommand) return null;
+  return ctx.modules.call(definition.module, "sessionLimits", { update, previous });
+}
 async function environmentPolicy(ctx: ModuleContext, profile: any) {
   const auth = (await providers(ctx)).find(p => p.id === profile.provider)?.auth;
   if (!auth) return [];
@@ -293,7 +299,7 @@ async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
         c.usage = reportedUsage(u); emitStatus(ctx, c);
         if (c.providerModule && c.providerId) {
           const providerId = c.providerId;
-          void ctx.modules.call(c.providerModule, 'sessionLimits', { update: u, previous: limits[providerId] || null })
+          void providerSessionLimits(ctx, providerId, u, limits[providerId] || null)
             .then((next: LimitsSnapshot | null) => { if (next) setLimits(ctx, providerId, next); })
             .catch((e) => ctx.log.warn('Provider usage update:', errMsg(e)));
         }

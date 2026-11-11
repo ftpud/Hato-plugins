@@ -30,7 +30,7 @@ test('fresh system dependency closure excludes optional features and satisfies m
  const selected=new Set();
  const include=id=>{if(selected.has(id))return;const p=catalogue.packages.find(p=>p.id===id);assert.ok(p);selected.add(id);Object.keys(p.dependencies).forEach(include);};
  catalogue.packages.filter(p=>p.core).forEach(p=>include(p.id));
- for(const id of ['codex-acp','claude-acp','automation','agents','remote'])assert.ok(!selected.has(id));
+ for(const id of ['codex-acp','claude-acp','copilot-acp','automation','agents','remote'])assert.ok(!selected.has(id));
  const modules=new Set(catalogue.packages.filter(p=>selected.has(p.id)).flatMap(p=>p.modules));
  for(const id of modules)for(const dependency of manifests.get(id).dependencies || [])assert.ok(modules.has(dependency),`${id} needs optional module ${dependency}`);
 });

@@ -63,3 +63,39 @@ test('provider modules own usage parsing and live update handling',async()=>{
  const a=claude.methods.parseLimits(null,{text:'',updates:[{_meta:{'_claude/rateLimit':{rateLimitType:'five_hour',utilization:0.42}}}]});
  assert.equal(a.windows[0].usedPercent,42);assert.equal(a.provider,'claude');
 });
+
+test('Copilot is an optional native ACP provider and preserves customized launch profiles',async()=>{
+ const {default:acp}=await load('modules/services/acp/src/index.ts');
+ const plugin=provider('copilot');
+ const ctx=context([plugin]);await acp.activate(ctx);
+ const [profile]=await acp.methods.profiles(ctx,{});
+ assert.equal(profile.provider,'copilot');assert.equal(profile.providerModule,'copilot-provider');
+ assert.equal(profile.executable,'copilot');assert.deepEqual(profile.args,['--acp','--stdio']);assert.equal(profile.machineId,'*');
+ assert.deepEqual(await acp.methods.authSettings(ctx),{},'Copilot uses its own login without a Claude-style environment policy');
+ const customized=context([plugin],[{...profile,executable:'/custom/copilot',args:['--acp','--stdio','--model','chosen-model']}]);
+ assert.equal((await acp.methods.profiles(customized,{}))[0].executable,'/custom/copilot');
+ plugin.enabled=false;assert.deepEqual(await acp.methods.profiles(customized,{}),[]);
+});
+
+test('Copilot is marketplace-only, has no native permissions and uses the official CLI package',()=>{
+ const manifest=JSON.parse(fs.readFileSync(new URL('../modules/services/copilot-provider/manifest.json',import.meta.url)));
+ const source=JSON.parse(fs.readFileSync(new URL('../plugins.catalogue.json',import.meta.url)));
+ const pkg=source.packages.find(p=>p.id==='copilot-acp');
+ assert.equal(manifest.distribution,'marketplace');assert.deepEqual(manifest.capabilities,[]);assert.deepEqual(manifest.calls,[]);
+ assert.equal(pkg.core,false);assert.deepEqual(pkg.modules,['copilot-provider']);
+ assert.deepEqual(manifest.contributes.agentProviders[0].adapter,{pkg:'@github/copilot',bin:'copilot'});
+ const grants=JSON.parse(fs.readFileSync(new URL('../../grants/first-party.json',import.meta.url)));
+ assert.equal(grants.modules['copilot-provider'],undefined);
+});
+
+
+test('standard Copilot usage does not require quota-parser RPC permissions',async()=>{
+ const {providerSessionLimits}=await load('modules/services/acp/src/index.ts');
+ const ctx=context([provider('copilot')]);const calls=[];
+ ctx.modules.call=async(id,method,args)=>{calls.push({id,method,args});return {provider:'claude',windows:[]};};
+ assert.equal(await providerSessionLimits(ctx,'copilot',{sessionUpdate:'usage_update'},null),null);
+ assert.deepEqual(calls,[]);
+ ctx.host.plugins.list=async()=>({plugins:[provider('claude')]});
+ assert.equal((await providerSessionLimits(ctx,'claude',{sessionUpdate:'usage_update'},null)).provider,'claude');
+ assert.equal(calls[0].id,'claude-provider');assert.equal(calls[0].method,'sessionLimits');
+});

@@ -146,7 +146,7 @@ test('refreshing an older published catalogue preserves unpublished offers and n
  const fresh=await import('data:text/javascript;base64,'+Buffer.from(result.outputFiles[0].text).toString('base64')+'#catalogue-lag');
  const fs=await import('node:fs');
  const catalogue=JSON.parse(fs.readFileSync(new URL('../catalogue.json',import.meta.url),'utf8'));
- const remote={...catalogue,packages:catalogue.packages.filter(p=>!p.id.startsWith('language-')).map(p=>({...p,version:'0.1.0'}))};
+ const remote={...catalogue,packages:catalogue.packages.filter(p=>!p.id.startsWith('language-')&&p.id!=='copilot-acp').map(p=>({...p,version:'0.1.0'}))};
  const installed=remote.packages.flatMap(p=>p.modules.map(id=>({id,source:'builtin',enabled:true,active:id,metadata:{version:catalogue.packages.find(local=>local.id===p.id).version}})));
  const before=fresh.packageRows(installed,'marketplace').map(p=>p.key);
  let broken=false;
@@ -205,4 +205,13 @@ for(const corrupt of [false,true])test(`unpublished SAP plugin installs from pre
  }
  assert.ok(releases.includes('local-read'),'release the source grant on success and failure');
  assert.ok(requests.some(args=>args.root===localRoot&&!args.write));
+});
+
+
+test('Copilot marketplace installation plans the compatible shared ACP update first',async()=>{
+ const fs=await import('node:fs');
+ const catalogue=JSON.parse(fs.readFileSync(new URL('../plugins.catalogue.json',import.meta.url),'utf8'));
+ const planned=plan(catalogue.packages,'copilot-acp','0.1.0');
+ assert.deepEqual(planned.map(p=>p.id),['foundation','core-acp','copilot-acp']);
+ assert.ok(satisfies(planned.find(p=>p.id==='core-acp').version,'^0.1.7'));
 });
