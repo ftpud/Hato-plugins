@@ -100,22 +100,36 @@ async function reload(ctx: ModuleContext) {
   ctx.ui.invalidate();
 }
 
+/** Privacy: show a neutral label instead of an SSH project's user and host (e.g. when screen sharing). */
+let hideRemoteAddress = false;
+let remoteLabel = "Remote";
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Replace `user@host[:port]` and the bare host inside service messages such as connection errors. */
+function maskAddress(text: string, p: any): string {
+  // The projects service reports SSH hosts as `user@host[:port]`.
+  const host = String(p.host || "").trim().replace(/^[^@]*@/, "").replace(/:\d+$/, "");
+  if (!host) return text;
+  return text.replace(new RegExp(`(?:[^\\s@]+@)?${escapeRe(host)}(?::\\d+)?`, "g"), remoteLabel);
+}
+
 function rows(): TreeRow[] {
   const out: TreeRow[] = [];
   const query = filter.trim().toLowerCase();
   for (const p of tree) {
     const key = `project:${p.id}:root`;
-    const projectMatches = !query || [p.name, p.rootPath, p.host].some(value => String(value || "").toLowerCase().includes(query));
+    const masked = hideRemoteAddress && p.kind === "ssh" && p.transport !== "wsl";
+    const projectMatches = !query || [p.name, p.rootPath, masked ? remoteLabel : p.host].some(value => String(value || "").toLowerCase().includes(query));
     const tasks = projectMatches ? p.tasks : p.tasks.filter((task: any) => [task.name, task.branch].some(value => String(value || "").toLowerCase().includes(query)));
     if (!projectMatches && !tasks.length) continue;
-    const location = p.kind === "ssh" ? `${p.transport === "wsl" ? "WSL" : "SSH"} · ${p.host || p.rootPath}` : p.rootPath;
+    const location = masked ? remoteLabel : p.kind === "ssh" ? `${p.transport === "wsl" ? "WSL" : "SSH"} · ${p.host || p.rootPath}` : p.rootPath;
+    const offline = p.offline && masked ? maskAddress(String(p.offline), p) : p.offline;
     const open = !!query || p.expanded;
     // A collapsed project also reports activity in its hidden tasks.
     const busyCount = (aiBusy[key] || 0) + (open ? 0 : p.tasks.reduce((n: number, t: any) => n + (aiBusy[`task:${t.id}`] || 0), 0));
     out.push({
       key, label: p.name, depth: 0, expandable: tasks.length > 0, expanded: !!query || p.expanded, selected: selected === key,
       badge: p.needsPassword ? "Connect" : p.offline ? "Offline" : tasks.length ? `${tasks.length} ${tasks.length === 1 ? "task" : "tasks"}` : undefined,
-      detail: p.needsPassword ? `Password needed · ${location}` : p.offline ? `Offline · ${p.offline}` : busyCount ? `${busyText(busyCount)} · ${location}` : location,
+      detail: p.needsPassword ? `Password needed · ${location}` : offline ? `Offline · ${offline}` : busyCount ? `${busyText(busyCount)} · ${location}` : location,
       badges: statBadges(key), contextMenu: projectMenu(p),
       icon: p.offline ? "warning" : p.kind === "ssh" ? "remote" : "folder",
       iconSvg: busyCount ? spinnerSvg() : p.offline ? uiIcons.warning : p.kind === "ssh" ? uiIcons.terminal : uiIcons.folder, iconColor: busyCount ? "primary" : "muted", weight: "semibold",
@@ -203,11 +217,23 @@ const mod: AppModule = {
     updateBackground(ctx.state.get("workspace-layout.projectsBackgroundOpacity"));
     const savedHover = Number(await ctx.modules.call("persistence", "settings.get", { key: "projects-panel.hoverOpacity" }).catch(() => null));
     if (HOVER_OPACITIES.includes(savedHover)) hoverOpacity = savedHover;
+    const privacy: any = await ctx.modules.call("persistence", "settings.get", { key: "projects-panel.remoteAddress" }).catch(() => null);
+    if (privacy && typeof privacy === "object") {
+      hideRemoteAddress = privacy.hide === true;
+      if (typeof privacy.label === "string" && privacy.label.trim()) remoteLabel = privacy.label.trim();
+    }
+    const savePrivacy = () => ctx.modules.call("persistence", "settings.set", { key: "projects-panel.remoteAddress", value: { hide: hideRemoteAddress, label: remoteLabel } });
     exportSettings(ctx, () => [{ key: "projects-panel", title: "Projects", fields: [
       { key: "hoverOpacity", label: "Row hover opacity", type: "select", value: String(hoverOpacity),
         options: HOVER_OPACITIES.map(v => ({ value: String(v), label: v === 1 ? "Opaque" : `${Math.round(v * 100)}%` })),
         description: "How solid the highlight is when the pointer is over a project or task." },
+      { key: "hideRemoteAddress", label: "Hide SSH user and host", type: "toggle", value: hideRemoteAddress,
+        description: "Show a label instead of user@host under SSH projects, for example while screen sharing." },
+      { key: "remoteLabel", label: "Label for SSH projects", type: "text", value: remoteLabel, placeholder: "Remote",
+        description: "Shown instead of the SSH address when it is hidden." },
     ] }], async (_section, key, value) => {
+      if (key === "hideRemoteAddress" && typeof value === "boolean") { hideRemoteAddress = value; await savePrivacy(); ctx.ui.invalidate(); return; }
+      if (key === "remoteLabel" && typeof value === "string") { remoteLabel = value.trim().slice(0, 40) || "Remote"; await savePrivacy(); ctx.ui.invalidate(); return; }
       const v = Number(value);
       if (key !== "hoverOpacity" || !HOVER_OPACITIES.includes(v)) throw new Error("Invalid projects setting");
       await ctx.modules.call("persistence", "settings.set", { key: "projects-panel.hoverOpacity", value: v });
