@@ -61,6 +61,8 @@ test('variable hover shows its type and local declaration', () => {
   assert.ok(param.startsWith('```java\nUUID artID\n```'), param);
   const field = a.shapeHover({ contents: [{ language: 'java', value: 'Helper requestBuilder' }] }).contents.value;
   assert.equal(field, '```java\nHelper requestBuilder\n```');
+  assert.equal(a.shapeHover({ contents: '' }), null);
+  assert.equal(a.shapeHover({ contents: [] }), null);
   const plain = { contents: { kind: 'markdown', value: 'just text' } };
   assert.equal(a.shapeHover(plain), plain);
 });

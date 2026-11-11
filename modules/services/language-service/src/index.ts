@@ -33,7 +33,7 @@ function report(ctx: ModuleContext, d: WorkspaceDescriptor, server: LanguageServ
 async function configuredServer(ctx: ModuleContext, d: WorkspaceDescriptor, server: LanguageServerSpec) {
   const stored = await scopedGet(ctx, `language-server.${server.id}.project`, d);
   const config = projectConfiguration(server, stored?.value);
-  return { config, server: projectServer(server, config) };
+  return { config, server: projectServer(server, config, d.rootAbsolutePath) };
 }
 let selected: WorkspaceDescriptor | null = null;
 let refreshVersion = 0;
@@ -136,10 +136,22 @@ async function start(ctx: ModuleContext, d: WorkspaceDescriptor, server: Languag
     throw Object.assign(new Error(`Unsupported server request: ${method}`), { code: -32601 });
   };
   const diagnostics = new Map<string, number>();
+  const buildProblems = new Map<string, string[]>();
   peer.onNotification = (method, params) => {
     if (method === "textDocument/publishDiagnostics") {
       diagnostics.set(params.uri, Array.isArray(params.diagnostics) ? params.diagnostics.length : 0);
-      report(ctx, d, server, { diagnostics: [...diagnostics.values()].reduce((a, b) => a + b, 0) });
+      // Dependency resolution failures (e.g. Maven "Missing artifact") land on build files, which
+      // are rarely open: surface them as import problems.
+      const file = decodeURIComponent(String(params.uri || "").split("/").pop() || "");
+      if (server.buildFiles?.includes(file)) {
+        const errors = (Array.isArray(params.diagnostics) ? params.diagnostics : []).filter((x: any) => x?.severity === 1)
+          .map((x: any) => `${workspacePath(d.rootAbsolutePath, params.uri) || file}:${(x.range?.start?.line ?? 0) + 1}: ${String(x.message).split("\n")[0].slice(0, 300)}`);
+        if (errors.length) buildProblems.set(params.uri, errors); else buildProblems.delete(params.uri);
+      }
+      const problems = [...buildProblems.values()].flat().slice(0, 50);
+      report(ctx, d, server, { diagnostics: [...diagnostics.values()].reduce((a, b) => a + b, 0), buildProblems: problems,
+        ...(statuses.get(key)?.importError ? {} : problems.length ? { phase: "error", message: `Build problems: ${problems[0]}${problems.length > 1 ? ` (+${problems.length - 1} more)` : ""}` }
+          : statuses.get(key)?.buildProblems?.length ? { phase: "ready", message: "Build problems resolved" } : {}) });
     } else if (method === "$/progress") {
       const value = params?.value;
       if ((value?.kind === "begin" || value?.kind === "report") && !statuses.get(key)?.importError) report(ctx, d, server, { phase: "indexing", message: value.message || value.title || "Indexing project…" });
@@ -228,20 +240,26 @@ async function documentRequest(ctx: ModuleContext, a: any, method?: string, capa
   if (!lang?.server) return null;
   const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
   const s = await sessionFor(ctx, d, lang.server);
-  const operation = s.queue.catch(() => {}).then(async () => {
+  // Only document synchronization is serialized. The request itself is sent in order after it,
+  // but its answer is awaited outside the queue, so a slow completion or semantic-token request
+  // does not hold back hovers (servers answer concurrent requests).
+  const synced = s.queue.catch(() => {}).then(async () => {
     const documents = (Array.isArray(a.documents) ? a.documents : []).filter((doc: any) => typeof doc.text === "string")
       .map((doc: any) => ({ path: relativeFile(doc.path), text: doc.text }));
     const keep = new Set([documentUri(d.rootAbsolutePath, path), ...documents.map((doc: any) => documentUri(d.rootAbsolutePath, doc.path))]);
     for (const uri of s.documents.keys()) if (!keep.has(uri)) { await s.peer.notify("textDocument/didClose", { textDocument: { uri } }); s.documents.delete(uri); }
     for (const doc of documents) await synchronize(s, doc.path, doc.text);
     await synchronize(s, path, a.text);
-    if (!method) return { ...statuses.get(s.key) };
-    if (capability && !s.capabilities[capability]) return null;
+    if (!method) return { status: { ...statuses.get(s.key) } };
+    if (capability && !s.capabilities[capability]) return { status: null };
     const uri = documentUri(d.rootAbsolutePath, path);
-    const result = await s.peer.request(method, { textDocument: { uri }, ...(a.position ? { position: a.position } : {}), ...(a.context ? { context: a.context } : {}) }, 60000);
-    return map ? map(result, s) : result;
+    return { answer: s.peer.request(method, { textDocument: { uri }, ...(a.position ? { position: a.position } : {}), ...(a.context ? { context: a.context } : {}) }, 60000) };
   });
-  s.queue = operation; return operation;
+  s.queue = synced;
+  const step: { status?: any; answer?: Promise<any> } = await synced;
+  if (!step.answer) return step.status;
+  const result = await step.answer;
+  return map ? map(result, s) : result;
 }
 const mod: AppModule = {
   id: "language-service", moduleApiVersion: 1,
@@ -412,8 +430,8 @@ const mod: AppModule = {
       if (!pending) return a.item;
       const s = await pending;
       if (!s.capabilities.completionProvider?.resolveProvider) return a.item;
-      const operation = s.queue.catch(() => {}).then(() => s.peer.request("completionItem/resolve", a.item, 30000));
-      s.queue = operation; return operation;
+      const sent = s.queue.catch(() => {}).then(() => ({ answer: s.peer.request("completionItem/resolve", a.item, 30000) }));
+      s.queue = sent; return (await sent).answer;
     },
     async definitions(ctx, a) {
       if (typeof a.text !== "string" || !validPosition(a.position)) throw new Error("Definition requires text and a UTF-16 position");

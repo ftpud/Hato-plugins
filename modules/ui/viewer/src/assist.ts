@@ -158,6 +158,8 @@ function declarationAt(text: string, line: number, declared: string): string | n
 /** IDEA-style hover card: owner, formatted signature, docs with compact parameter lines, source. */
 export function shapeHover(hover: any, context: { text?: string; path?: string; language?: string } = {}): any {
   const parts = hoverParts(hover);
+  // Servers answer unresolved symbols with empty contents: show no card rather than an empty one.
+  if (!parts.some(p => (p.code ?? p.markdown ?? "").trim())) return null;
   const codePart = parts.find(p => p.code !== undefined);
   if (!codePart?.code?.trim()) return hover;
   const code = codePart.code.trim();

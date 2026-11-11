@@ -18,7 +18,7 @@
     "editor.languages"
   ],
   "stateVersion": 1,
-  "version": "0.1.9",
+  "version": "0.1.10",
   "pluginPackage": "language-service",
   "pluginType": "Languages",
   "description": "Shared LSP client and language contributions; launches servers on the local or SSH workspace machine.",

@@ -128,13 +128,28 @@
                 "type": "toggle"
               },
               {
+                "key": "mavenSettings",
+                "label": "Maven settings file",
+                "setting": "java.configuration.maven.userSettings",
+                "type": "text",
+                "absolute": true,
+                "description": "Workspace-relative settings.xml for repositories, mirrors and credentials (for example .mvn/settings.xml when the build runs mvn -s). Leave empty for ~/.m2/settings.xml."
+              },
+              {
                 "key": "gradle",
                 "label": "Import Gradle projects",
                 "setting": "java.import.gradle.enabled",
                 "type": "toggle"
               }
             ]
-          }
+          },
+          "buildFiles": [
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts"
+          ]
         }
       }
     ]
@@ -142,7 +157,7 @@
   "stateVersion": 1,
   "description": "Java syntax highlighting and go to definition through Eclipse JDTLS, locally or over SSH.",
   "author": "Hato contributors",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "pluginPackage": "language-java",
   "pluginType": "Languages",
   "distribution": "marketplace"

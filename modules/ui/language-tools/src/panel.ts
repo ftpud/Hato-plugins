@@ -63,6 +63,9 @@ export class LanguagePanel {
       children.push(...this.symbols.map((symbol, index) => ({ symbol, index })).filter(({symbol}) => `${symbol.name} ${symbol.container} ${symbol.detail}`.toLowerCase().includes(this.filter.toLowerCase())).slice(0,300).map(({symbol, index}): UiNode => ({ type: "button", key: `symbol-${index}`, text: `${symbol.container ? symbol.container + " · " : ""}${symbol.name}${symbol.detail ? "  " + symbol.detail : ""}${symbol.path ? "  — " + symbol.path : ""}`, tooltip: `Line ${symbol.range.start.line + 1}`, action: "languageSymbol", value: index, variant: "ghost" })));
     } else {
       children.push({ type: "label", key: "status", text: `${this.serverId} on ${this.status?.machineId || this.workspaceId}: ${this.status?.message || "Idle"}`, wrap: true });
+      // Build-file errors (e.g. unresolved Maven artifacts) explain missing dependencies.
+      for (const [index, problem] of (this.status?.buildProblems || []).slice(0, 8).entries())
+        children.push({ type: "label", key: `build-problem-${index}`, text: problem, wrap: true, size: "xs", color: "danger", selectable: true });
       const cap = this.status?.capabilities;
       if (cap) children.push({ type: "label", key: "capabilities", text: `Server features: ${[["definitionProvider","navigation"],["hoverProvider","hover"],["completionProvider","completion"],["documentSymbolProvider","symbols"]].filter(([key]) => cap[key]).map(([,label]) => label).join(", ") || "none advertised"} · ${this.status?.diagnostics || 0} diagnostics`, wrap: true, size: "xs" });
       if (this.project) {

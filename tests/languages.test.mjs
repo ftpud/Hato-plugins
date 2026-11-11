@@ -220,6 +220,10 @@ test('project settings reject escaping folders and keep unspecified build defaul
   assert.equal(defaults.settings.java.project,undefined);
   assert.equal(defaults.settings.java.configuration.updateBuildConfiguration,'automatic');
   assert.throws(()=>projectServer(server,projectConfiguration(server,{settings:JSON.parse('{"__proto__":{"unsafe":true}}')})),/Invalid settings/);
+  const maven=projectServer(server,projectConfiguration(server,{values:{mavenSettings:'.mvn/settings.xml'}}),'/home/me/calc/');
+  assert.equal(maven.settings.java.configuration.maven.userSettings,'/home/me/calc/.mvn/settings.xml');
+  assert.equal(maven.initializationOptions.settings.java.configuration.maven.userSettings,'/home/me/calc/.mvn/settings.xml');
+  assert.ok(server.buildFiles.includes('pom.xml'));
 });
 
 test('language MCP configuration is scoped to the authenticated workspace and reports import failures', async()=>{

@@ -26,13 +26,14 @@ function merge(base: any, extra: any): any {
   }
   return result;
 }
-export function projectServer(server: LanguageServerSpec, config: ProjectConfiguration): LanguageServerSpec {
+export function projectServer(server: LanguageServerSpec, config: ProjectConfiguration, root?: string): LanguageServerSpec {
   let settings = merge(server.settings || {}, config.settings);
   for (const field of server.projectSettings?.fields || []) {
     const value = config.values[field.key];
     if (value === undefined || value === "" || Array.isArray(value) && !value.length) continue;
     const keys = field.setting.split(".");
-    let nested: any = value;
+    const absolute = (p: string) => root ? `${root.replace(/\/+$/, "")}/${p.replace(/^\.\//, "")}` : p;
+    let nested: any = field.absolute && typeof value === "string" ? absolute(value) : field.absolute && Array.isArray(value) ? value.map(absolute) : value;
     for (const key of keys.reverse()) nested = { [key]: nested };
     settings = merge(settings, nested);
   }

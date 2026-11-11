@@ -16,7 +16,7 @@
   ],
   "capabilities": [],
   "stateVersion": 1,
-  "version": "0.1.9",
+  "version": "0.1.10",
   "pluginPackage": "language-service",
   "pluginType": "Languages",
   "distribution": "marketplace",

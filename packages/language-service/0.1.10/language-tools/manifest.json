@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 2,
+  "id": "language-tools",
+  "name": "Language tools",
+  "kind": "ui",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [
+    "language-service"
+  ],
+  "calls": [
+    "language-service",
+    "workspace",
+    "files",
+    "viewer"
+  ],
+  "capabilities": [],
+  "stateVersion": 1,
+  "version": "0.1.10",
+  "pluginPackage": "language-service",
+  "pluginType": "Languages",
+  "distribution": "marketplace",
+  "contributes": {
+    "overlays": [
+      {}
+    ]
+  }
+}
