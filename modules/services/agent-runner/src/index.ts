@@ -282,7 +282,7 @@ const mod:AppModule={
     async fork(ctx,a,meta) {
       if(!["internal-remote-mcp","daemon-client"].includes(meta.caller))throw new Error("Only workspace controllers can create child agents");
       const parent=session(a.parentId);
-      const spec:AgentSession={...parent,id:crypto.randomUUID(),name:String(a.name||"Background worker").slice(0,120),model:String(a.model||parent.model),sessionId:null,contextSent:false,status:"starting",error:null,createdAt:now(),updatedAt:now(),revision:0,configOptions:[],models:null};
+      const spec:AgentSession={...parent,id:crypto.randomUUID(),name:String(a.name||"Background worker").slice(0,120),customName:true,model:String(a.model||parent.model),sessionId:null,contextSent:false,status:"starting",error:null,createdAt:now(),updatedAt:now(),revision:0,configOptions:[],models:null};
       sessions.set(spec.id,spec);await persist(ctx,spec);
       const c=await serialize(spec.id,()=>start(ctx,spec));
       if(a.text)await prompt(ctx,c,String(a.text));
@@ -419,6 +419,7 @@ const mod:AppModule={
       if(configChanged&&wasLive)await stop(ctx,s.id);
       const newProvider=configChanged&&s.profile.id!==p.profile.id;
       s.name=name;
+      if(typeof p.customName==="boolean")s.customName=p.customName;
       if(configChanged) {
         Object.assign(s,{profile:p.profile,model:String(p.model||""),agentFile:p.agentFile||null,skills:p.skills,mcps:p.mcps,workspaceMcp:!!p.workspaceMcp,contextSent:false});
         if(newProvider){s.sessionId=null;s.configOptions=[];s.models=null;s.modes=null;s.usage=null;s.reasoning="";s.settings={};}

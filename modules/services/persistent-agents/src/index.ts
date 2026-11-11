@@ -2,7 +2,7 @@ import { providerProfiles } from "@hato/sdk/agent-providers";
 import type { AppModule, ModuleContext, DaemonTarget } from "@hato/sdk/types";
 import { sshConnect, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { workspaceSkills } from "../../files/src/skills";
-import { agentActivity, agentSettings, relativeAgentPath, type AgentMcp, type AgentSpec } from "@hato/sdk/persistent-agents";
+import { agentActivity, agentSettings, autoAgentName, isAutoAgentName, relativeAgentPath, type AgentMcp, type AgentSpec } from "@hato/sdk/persistent-agents";
 import { imageAttachments } from "@hato/sdk/images";
 import { acpServer, transportOf, validateMcp } from "@hato/sdk/mcp-servers";
 
@@ -273,7 +273,7 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     // Chats started from the AI panel carry the current chat's approval policy and provider options.
     const policy=a.approvalPolicy==="autopilot"?"autopilot":a.approvalPolicy==="auto-low"?"auto-low":"ask";
     const settings=agentSettings(a.settings);
-    const spec:AgentSpec={id,name:String(a.name||"Agent").trim().slice(0,120),workspaceId:c.workspace.id,workspaceName:c.workspace.name,root:c.workspace.rootAbsolutePath,machineId:c.workspace.machineId,
+    const spec:AgentSpec={id,name:String(a.name||"Agent").trim().slice(0,120),customName:a.autoName!==true&&!!String(a.name||"").trim(),workspaceId:c.workspace.id,workspaceName:c.workspace.name,root:c.workspace.rootAbsolutePath,machineId:c.workspace.machineId,
       ...config,claudeSubscription:subscription!==false,daemon:daemonInfo.get(c.workspace.machineId),
       ...(meta?.caller==="ai"&&policy!=="ask"?{autopilot:policy==="autopilot",approvalPolicy:policy==="auto-low"?"auto-low" as const:undefined}:{}),
       ...(Object.keys(settings).length?{settings}:{})};
@@ -283,17 +283,23 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
   async update(ctx,a) {
     const v=await owned(ctx,a),s=v.session;
     const name=String(a.name||"").trim().slice(0,120);if(!name)throw new Error("Agent name is required");
+    // The edit form sends the current name back; an untouched automatic name follows the new provider.
+    const followsProvider=name===s.name&&isAutoAgentName(s)&&s.profile.id!==a.profileId;
+    // Typing a different name makes it custom; keeping the automatic one leaves naming automatic.
+    const customName=!(name===s.name&&isAutoAgentName(s))&&name!==autoAgentName(s);
     const ids=[...new Set<string>(Array.isArray(a.mcps)?a.mcps:[])].sort();
     const skills=[...(Array.isArray(a.skills)?a.skills:[])].map(relativeAgentPath).sort();
     const agentFile=a.agentFile?relativeAgentPath(a.agentFile):null;
     const same=s.profile.id===a.profileId&&(s.agentFile||null)===agentFile&&JSON.stringify([...s.skills].sort())===JSON.stringify(skills)&&JSON.stringify(agentMcpIds(s).sort())===JSON.stringify(ids);
-    if(same)return invoke(ctx,a.workspaceId,"update",{id:s.id,patch:{name}});
+    if(same)return invoke(ctx,a.workspaceId,"update",{id:s.id,patch:{name,customName}});
     const c=await catalog(ctx,String(a.workspaceId));
     // Desktop-hosted endpoints are re-issued for the new selection.
     await ctx.modules.call("internal-local-mcp","revoke",{conversationId:s.id}).catch(()=>{});
     await ctx.modules.call("internal-remote-mcp","revoke",{sessionId:s.id}).catch(()=>{});
     const config=await agentConfig(ctx,c,{...a,mcps:ids,skills,agentFile,model:s.profile.id===a.profileId?s.model:""},s.id);
-    return invoke(ctx,a.workspaceId,"update",{id:s.id,patch:{name,...config}});
+    const result=await invoke(ctx,a.workspaceId,"update",{id:s.id,patch:{name,customName,...config}});
+    await followName(ctx,a.workspaceId,s.id,followsProvider);
+    return result;
   },
   async clear(ctx,a) {await owned(ctx,a);return invoke(ctx,a.workspaceId,"clear",{id:a.id});},
   async remove(ctx,a) {
@@ -336,7 +342,13 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     const auth=await oauthHeaders(ctx,list);
     return list.map(m=>({id:m.id,...acpServer(m,auth[m.id])}));
   },
-  async view(ctx,a) {const v=await invoke(ctx,String(a.workspaceId),"view",{id:a.id,before:a.before,limit:a.limit});if(v.session.workspaceId!==a.workspaceId)throw new Error("Agent belongs to another workspace");return v;},
+  async view(ctx,a) {
+    const v=await invoke(ctx,String(a.workspaceId),"view",{id:a.id,before:a.before,limit:a.limit});
+    if(v.session.workspaceId!==a.workspaceId)throw new Error("Agent belongs to another workspace");
+    // A new agent learns its model only after connecting; complete its automatic name then.
+    if(isAutoAgentName(v.session)){const name=autoAgentName(v.session);if(name!==v.session.name){await invoke(ctx,String(a.workspaceId),"update",{id:v.session.id,patch:{name,customName:false}}).catch(()=>{});v.session={...v.session,name};}}
+    return v;
+  },
   async send(ctx,a) {await owned(ctx,a);const images=imageAttachments(a.images);return invoke(ctx,a.workspaceId,"send",{id:a.id,text:a.text,steer:!!a.steer,...(images.length?{images}:{})});},
   /** Replace this machine's agent runtime with the desktop's current build, even while agents run.
    *  Agents that were connected are reconnected afterwards (their provider sessions resume). */
@@ -363,7 +375,12 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     ctx.events.emit("remote-runtime.changed",{machineId:d.machineId});
     return {machineId:d.machineId,pushed,reconnected,failed};
   },
-  async setConfig(ctx,a) {await owned(ctx,a);return invoke(ctx,a.workspaceId,"setConfig",{id:a.id,configId:String(a.configId||""),value:typeof a.value==="boolean"?a.value:String(a.value??"")});},
+  async setConfig(ctx,a) {
+    const v=await owned(ctx,a);
+    const result=await invoke(ctx,a.workspaceId,"setConfig",{id:a.id,configId:String(a.configId||""),value:typeof a.value==="boolean"?a.value:String(a.value??"")});
+    if(v.session.configOptions?.find((o:any)=>o.id===a.configId)?.category==="model")await followName(ctx,a.workspaceId,a.id,isAutoAgentName(v.session));
+    return result;
+  },
   async setPolicy(ctx,a) {await owned(ctx,a);return invoke(ctx,a.workspaceId,"setPolicy",{id:a.id,policy:String(a.policy||"ask")});},
   async cancel(ctx,a) {await owned(ctx,a);return invoke(ctx,a.workspaceId,"cancel",{id:a.id});},
   async stop(ctx,a) {await owned(ctx,a);const result=await invoke(ctx,a.workspaceId,"stop",{id:a.id});
@@ -377,7 +394,12 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     const authorization=await oauthHeaders(ctx,(await mcps(ctx)).filter(m=>used.has(m.id)));
     return invoke(ctx,a.workspaceId,"reconnect",{id:a.id,authorization});
   },
-  async setModel(ctx,a) {await owned(ctx,a);return invoke(ctx,a.workspaceId,"setModel",{id:a.id,model:a.model});},
+  async setModel(ctx,a) {
+    const v=await owned(ctx,a);
+    const result=await invoke(ctx,a.workspaceId,"setModel",{id:a.id,model:a.model});
+    await followName(ctx,a.workspaceId,a.id,isAutoAgentName(v.session));
+    return result;
+  },
   async reviewPermission(ctx,a) {
     const v=await owned(ctx,a),permission=v.permissions.find((p:any)=>p.id===a.permissionId);
     if(!permission)throw new Error("Permission request is no longer active");
@@ -387,6 +409,16 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     return invoke(ctx,a.workspaceId,"permission",{id:a.id,permissionId:a.permissionId,optionId:decision.optionId||deny.id});
   },
 }};
+/** Keep an automatically named agent ("Provider/Model") in step with its provider and model.
+ *  `wasAuto` is decided before the change; names the user typed are never touched. */
+async function followName(ctx:ModuleContext,workspaceId:string,id:string,wasAuto:boolean) {
+  if(!wasAuto)return;
+  try {
+    const v=await invoke(ctx,workspaceId,"view",{id,limit:1});
+    const name=autoAgentName(v.session);
+    if(name&&name!==v.session.name)await invoke(ctx,workspaceId,"update",{id,patch:{name,customName:false}});
+  }catch(e){ctx.log.warn(`agent rename: ${e instanceof Error?e.message:String(e)}`);}
+}
 async function owned(ctx:ModuleContext,a:any) {
   const v=await invoke(ctx,String(a.workspaceId),"view",{id:a.id,limit:1});
   if(v.session.workspaceId!==a.workspaceId)throw new Error("Agent belongs to another workspace");return v;

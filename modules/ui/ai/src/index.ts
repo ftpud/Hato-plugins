@@ -11,7 +11,7 @@ import type { AppModule, ModuleContext, UiNode, ImageAttachment } from "@hato/sd
 import { debounce, errMsg } from "@hato/sdk/runtime";
 import { resolveWorkspaceLink } from "@hato/sdk/links";
 
-import { agentPolicy, agentSettings, modelChoices, type AgentSession, type AgentView } from "@hato/sdk/persistent-agents";
+import { agentPolicy, agentSettings, modelChoices, providerLabel, type AgentSession, type AgentView } from "@hato/sdk/persistent-agents";
 let background:{workspaceId:string;id:string}|null=null;
 let backgroundPage:AgentView|null=null;
 let backgroundTimer:ReturnType<typeof setInterval>|null=null;
@@ -552,9 +552,9 @@ const mod: AppModule = {
         // Name the agent after its provider and model ("Codex/GPT-5.1"), not a generic "Chat".
         const source=background&&backgroundPage?backgroundPage.session:view?.active?.live;
         const modelLabel=config.model?(modelChoices(source||{}).find(m=>m.id===config.model)?.label||config.model):"";
-        const providerName=String(catalog.profiles.find((p:any)=>p.id===profileId)?.name||"Agent").trim();
+        const providerName=providerLabel(catalog.profiles.find((p:any)=>p.id===profileId));
         const name=(modelLabel?`${providerName}/${modelLabel}`:providerName).slice(0,120);
-        const session=await persistent(ctx,"create",{profileId,name,...config});
+        const session=await persistent(ctx,"create",{profileId,name,autoName:true,...config});
         if(ws?.id===workspaceId)await openBackground(ctx,{workspaceId,id:session.id});
       }catch(e){error=errMsg(e);}finally{busy=null;ctx.ui.invalidate();}
       return;
