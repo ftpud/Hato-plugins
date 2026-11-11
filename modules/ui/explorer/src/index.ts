@@ -1,9 +1,11 @@
+import { FilePresentationClient } from "@hato/sdk/file-presentation";
 import { filterInput } from "@hato/sdk/filter-style";
 // Workspace file tree: lazy directory loading, scoped search, and viewer selection.
 import type { AppModule, ModuleContext, UiNode } from "@hato/sdk/types";
 import { debounce, errMsg } from "@hato/sdk/runtime";
 import { directories, matchingFileEntries, treeRows, type Entry } from "./model";
 import { uiIcons } from "@hato/sdk/ui-icons";
+let presentation: FilePresentationClient | null = null;
 let ws: any = null;
 let dirs = new Map<string, Entry[]>();
 let expanded = new Set<string>();
@@ -129,6 +131,8 @@ async function reset(ctx: ModuleContext, saved?: any) {
 const mod: AppModule = {
   id: "explorer", moduleApiVersion: 1,
   async activate(ctx, prev) {
+    presentation?.dispose();
+    presentation = new FilePresentationClient(ctx);
     searchSoon = debounce(() => { void search(ctx); }, 160);
     grepSoon = debounce(() => { void search(ctx); }, 450);
     ws = ctx.state.get("workspace.selected") || null;
@@ -144,6 +148,7 @@ const mod: AppModule = {
     const savedView = ws?.view?.ui?.explorerTree;
     await reset(ctx, prev?.workspaceId === ws?.id ? prev : savedView ? { showIgnored: !!savedView.showIgnored, contentMode: false } : null);
   },
+  deactivate() { presentation?.dispose(); presentation = null; },
   snapshot: () => ({ workspaceId: ws?.id || null, expanded: [...expanded], filterCollapsed: [...filterCollapsed], query, showIgnored, contentMode }),
   render(): UiNode {
     const filtering = !!query.trim();
@@ -179,7 +184,7 @@ const mod: AppModule = {
         expandedIconSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m5 9 7 7 7-7"/></svg>', rows: rows.map(row => {
           const change = gitFiles.find(file => file.path === row.key);
           const below = row.expandable && gitFiles.some(file => file.path.startsWith(row.key + "/"));
-          return { ...row, badge: pending.has(row.key) ? "…" : change ? ({ modified: "M", added: "A", deleted: "D", renamed: "R", untracked: "U", conflicted: "!", copied: "C", typechange: "T" } as Record<string, string>)[change.kind] || "M" : below ? "•" : "" };
+          return { ...row, ...presentation?.get(ws.id, row.key, row.expandable ? "dir" : "file"), badge: pending.has(row.key) ? "…" : change ? ({ modified: "M", added: "A", deleted: "D", renamed: "R", untracked: "U", conflicted: "!", copied: "C", typechange: "T" } as Record<string, string>)[change.kind] || "M" : below ? "•" : "" };
         }), selectAction: "open", expandAction: "expand", style: { fontWeight: 400 }, grow: true });
     }
     return { type: "column", key: "explorer-root", gap: 4, padding: 8, grow: true, children };

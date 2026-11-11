@@ -5,7 +5,9 @@
   "kind": "service",
   "entry": "src/index.ts",
   "moduleApiVersion": 1,
-  "dependencies": [],
+  "dependencies": [
+    "persistence"
+  ],
   "capabilities": [],
   "provides": [
     "language.provider"
@@ -152,13 +154,19 @@
           ]
         }
       }
-    ]
+    ],
+    "filePresentation": {
+      "rules": []
+    }
   },
   "stateVersion": 1,
   "description": "Java syntax highlighting and go to definition through Eclipse JDTLS, locally or over SSH.",
   "author": "Hato contributors",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "pluginPackage": "language-java",
   "pluginType": "Languages",
-  "distribution": "marketplace"
+  "distribution": "marketplace",
+  "calls": [
+    "persistence"
+  ]
 }

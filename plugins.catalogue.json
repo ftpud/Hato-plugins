@@ -8,7 +8,7 @@
       "type": "System",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.20",
+      "version": "0.1.21",
       "coreVersion": "^0.1.0",
       "description": "Hato essentials services and panels.",
       "dependencies": {},
@@ -208,11 +208,12 @@
       "type": "Languages",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.6",
+      "version": "0.1.7",
       "coreVersion": "^0.1.0",
       "description": "Java highlighting and Eclipse JDTLS navigation.",
       "dependencies": {
-        "language-service": "^0.1.6"
+        "language-service": "^0.1.6",
+        "foundation": "^0.1.21"
       },
       "modules": [
         "language-java"

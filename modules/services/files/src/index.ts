@@ -1,3 +1,4 @@
+import { FilePresentations } from "./presentation";
 // files: workspace-scoped listing and reading through scoped FS grants (local fs or SFTP on the
 // workspace's machine). Returns native document handles for the viewer.
 import { fileWatch } from "@hato/sdk/file-watch";
@@ -76,10 +77,13 @@ async function publishSkills(ctx: ModuleContext) {
   }
 }
 
+let presentations: FilePresentations | null = null;
 const mod: AppModule = {
   id: "files",
   moduleApiVersion: 1,
   async activate(ctx) {
+    presentations = new FilePresentations(ctx);
+    await presentations.activate();
     ctx.events.on("git.changed", (event: any) => {
       if (!event.worktreeChanged || event.workspaceId !== selected?.id || !selected) return;
       invalidateSearch(selected); invalidateIgnored(selected);
@@ -110,12 +114,17 @@ const mod: AppModule = {
     await publishSkills(ctx);
   },
   async deactivate() {
+    presentations?.dispose(); presentations = null;
     selection++; skillsVersion++;
     stopSearchIndexes();
     if (changeTimer) clearTimeout(changeTimer);
     await watcher?.stop(); watcher = null;
   },
   methods: {
+    async presentations(ctx, a) {
+      const workspace = await desc(ctx, a.workspaceId);
+      return presentations?.get(workspace, Array.isArray(a.entries) ? a.entries : []) || {};
+    },
     async search(ctx, a) {
       const query = String(a.query || "").slice(0, 300).trim();
       if (!query && a.refresh) { const d = await desc(ctx, a.workspaceId); invalidateSearch(d); invalidateIgnored(d); await searchFiles(ctx, d, "", false, a.hideIgnored !== false); }

@@ -1,3 +1,4 @@
+import { FilePresentationClient } from "@hato/sdk/file-presentation";
 // viewer: a native syntax-highlighted source editor bound to a kernel document handle, with
 // autosave through the files service. Highlighting, editing and selection are native; the module
 // owns save policy (debounce, conflicts, retries). Tabs prefixed by DIFF_TAB_PREFIX show a native
@@ -48,6 +49,7 @@ let diffMode: "split" | "unified" = "split";
 let editorWrap = false;
 let viewerWrap = true;
 let publishSettings: () => void = () => {};
+let presentation: FilePresentationClient | null = null;
 let ws: any = null;
 let current: any = null;
 let error: string | null = null;
@@ -334,6 +336,7 @@ const mod: AppModule = {
   id: "viewer",
   moduleApiVersion: 1,
   async activate(ctx, prev) {
+    presentation = new FilePresentationClient(ctx);
     ctx.events.on("terminal-panel.runCodeResult", (result: any) => {
       const pending = shellRequests.get(result?.requestId);
       if (!pending) return;
@@ -442,6 +445,7 @@ const mod: AppModule = {
     await load(ctx);
   },
   async deactivate(ctx) {
+    presentation?.dispose(); presentation = null;
     if (languageTimer) clearTimeout(languageTimer);
     for (const pending of shellRequests.values()) { clearTimeout(pending.timer); pending.reject(new Error("Editor reloaded.")); }
     shellRequests.clear();
@@ -486,15 +490,20 @@ const mod: AppModule = {
     const markdown = current && !diff && !current.binary && (current.language === "markdown" || /\.(md|markdown)$/i.test(current.relativePath));
     const title = current ? (diff ? `Changes in ${current.relativePath}` : current.relativePath) : ws?.view?.previewPath || "No file selected";
     const kids: UiNode[] = [
-      { type: "row", key: "tabs", gap: 3, wrap: true, children: tabs.map((path): UiNode => ({ type: "row", key: path, gap: 0, style: fileTabStyle(ws?.view?.previewPath === path), children: [
-        { type: "button", key: "select", iconSvg: fileIcons.file, text: tabLabel(path), tooltip: diffTabPath(path) ? `Changes in ${diffTabPath(path)}` : path, action: `select:${path}`, middleClickAction: `close:${path}`, contextAction: `tabMenu:${path}`, contextMenu: [
+      { type: "row", key: "tabs", gap: 3, wrap: true, children: tabs.map((path): UiNode => {
+        const active = ws?.view?.previewPath === path;
+        const appearance = presentation?.get(ws.id, diffTabPath(path) || path) || {};
+        const tint = appearance.background ? { background: appearance.background } : {};
+        const buttonStyle = { ...tabButtonStyle(active), ...tint };
+        return { type: "row", key: path, gap: 0, style: { ...fileTabStyle(active), ...tint }, children: [
+        { type: "button", key: "select", iconSvg: appearance.iconSvg || fileIcons.file, iconColor: appearance.iconColor, text: tabLabel(path), tooltip: diffTabPath(path) ? `Changes in ${diffTabPath(path)}` : path, action: `select:${path}`, middleClickAction: `close:${path}`, contextAction: `tabMenu:${path}`, contextMenu: [
           { text: "Close", action: `close:${path}` },
           { text: "Close others", action: "closeOthers", value: path, disabled: tabs.length < 2 },
           { text: "Close all to the right", action: "closeRight", value: path, disabled: tabs.indexOf(path) === tabs.length - 1 },
           { text: "Close all", action: "closeAll", value: path },
-        ], small: true, variant: "ghost", style: tabButtonStyle(ws?.view?.previewPath === path) },
-        { type: "button", key: "close", text: "", iconSvg: uiIcons["x"], tooltip: `Close ${path}`, action: `close:${path}`, small: true, variant: "ghost", style: tabButtonStyle(ws?.view?.previewPath === path) },
-      ] })) },
+        ], small: true, variant: "ghost", style: buttonStyle },
+        { type: "button", key: "close", text: "", iconSvg: uiIcons["x"], tooltip: `Close ${path}`, action: `close:${path}`, small: true, variant: "ghost", style: buttonStyle },
+      ] }; }) },
 
     ];
     if (languageError) kids.push({ type: "status", key: "language-error", text: languageError, level: "warn" });
