@@ -42,6 +42,9 @@ test('Java root backgrounds support modules, user paths and toggles',()=>{
  const custom=sdk.filePresentationRules([plugin('language-java',java.javaFilePresentation({...java.defaults,sources:'code\nmodules/*/source',icons:false}))]);
  assert.ok(sdk.presentFile(custom,entry('modules/demo/source/X.java')).background);
  assert.equal(sdk.presentFile(custom,entry('code/X.java')).iconSvg,undefined);
+ const uncolored=sdk.filePresentationRules([plugin('language-java',java.javaFilePresentation({...java.defaults,backgrounds:false}))]);
+ const named=sdk.presentFile(uncolored,entry('src/main/java/Named.java'),'public class Named {}');
+ assert.ok(named.iconSvg);assert.equal(named.background,undefined);
  assert.deepEqual(java.javaFilePresentation({...java.defaults,icons:false,backgrounds:false}),{rules:[]});
 });
 

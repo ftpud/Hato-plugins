@@ -8,7 +8,7 @@
       "type": "System",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.22",
+      "version": "0.1.23",
       "coreVersion": "^0.1.0",
       "description": "Hato essentials services and panels.",
       "dependencies": {},
@@ -208,7 +208,7 @@
       "type": "Languages",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.8",
+      "version": "0.1.9",
       "coreVersion": "^0.1.0",
       "description": "Java highlighting and Eclipse JDTLS navigation.",
       "dependencies": {
@@ -249,6 +249,22 @@
       },
       "modules": [
         "language-sap"
+      ]
+    },
+    {
+      "id": "path-highlights",
+      "name": "Path highlights",
+      "type": "Appearance",
+      "core": false,
+      "author": "Hato contributors",
+      "version": "0.1.0",
+      "coreVersion": "^0.1.0",
+      "description": "Color files and folders by relative path with rules shared across all projects, tasks and workspaces.",
+      "dependencies": {
+        "foundation": "^0.1.23"
+      },
+      "modules": [
+        "path-highlights"
       ]
     }
   ]
