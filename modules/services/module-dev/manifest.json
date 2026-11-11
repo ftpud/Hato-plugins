@@ -16,7 +16,7 @@
   "stateVersion": 1,
   "description": "Module source browse/patch, esbuild builds, staging, activation and rollback.",
   "author": "Hato contributors",
-  "version": "0.1.28",
+  "version": "0.1.29",
   "pluginPackage": "foundation",
   "pluginType": "System"
 }
