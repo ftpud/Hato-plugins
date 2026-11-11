@@ -1,6 +1,6 @@
 // remote-panel: what the workspace machine's daemon is holding, with controls. All decisions are
 // in the remote-runtime service; this module only renders its status.
-import type { AppModule, ModuleContext, UiNode } from "@hato/sdk/types";
+import type { AppModule, ModuleContext, UiColor, UiNode, UiStyle } from "@hato/sdk/types";
 import { errMsg } from "@hato/sdk/runtime";
 import { uiIcons } from "@hato/sdk/ui-icons";
 
@@ -24,8 +24,11 @@ async function refresh(ctx: ModuleContext) {
 
 async function run(ctx: ModuleContext, label: string, fn: () => Promise<unknown>) {
   busy = label; error = null; ctx.ui.invalidate();
-  try { await fn(); } catch (e) { error = errMsg(e); }
+  let failure: string | null = null;
+  try { await fn(); } catch (e) { failure = errMsg(e); }
   busy = null; await refresh(ctx);
+  // refresh() clears status errors on success; keep the action's failure visible.
+  if (failure) { error = failure; ctx.ui.invalidate(); }
 }
 
 const row = (key: string, label: string, detail: string, actions: UiNode[]): UiNode => ({ type: "row", key, gap: 6, align: "center", padding: 2, children: [
@@ -35,6 +38,82 @@ const row = (key: string, label: string, detail: string, actions: UiNode[]): UiN
   ] },
   ...actions,
 ] });
+
+// ---- port forwarding ----------------------------------------------------------------------------
+const card: UiStyle = { background: "raised", borderColor: "border", borderWidth: 1, radius: 8, paddingX: 10, paddingY: 8 };
+const chip = (key: string, text: string, color: UiColor, bg: UiColor): UiNode =>
+  ({ type: "label", key, text, size: "xs", weight: "medium", color, style: { background: bg, radius: 9, paddingX: 7, paddingY: 1, noShrink: true } });
+const iconBtn = (key: string, icon: string, tooltip: string, action: string, extra: Partial<UiNode & { value: any; copyText: string; iconColor: UiColor }> = {}): UiNode =>
+  ({ type: "button", key, text: "", iconSvg: icon, iconSize: 14, action, small: true, variant: "ghost", tooltip, ...extra } as UiNode);
+/** Common dev-server ports offered as one-click forwards. */
+const PRESETS = [3000, 5000, 5173, 8000, 8080];
+
+const portError = (s: string, optional: boolean): string | null => {
+  const v = s.trim();
+  if (!v) return optional ? null : "";
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 1 && n <= 65535 ? null : "Ports are whole numbers from 1 to 65535.";
+};
+
+function tunnelCard(t: any): UiNode {
+  const url = `http://localhost:${t.localPort}`;
+  const target = `${t.remoteHost}:${t.remotePort}`;
+  return { type: "row", key: `tunnel:${t.id}`, gap: 8, align: "center", style: card, children: [
+    { type: "label", key: "dot", text: "●", size: "xs", color: "success", tooltip: "Forwarding" },
+    { type: "column", key: "addr", grow: true, gap: 1, children: [
+      { type: "label", key: "local", text: `localhost:${t.localPort}`, size: "sm", weight: "medium", mono: true, selectable: true },
+      { type: "label", key: "remote", text: t.remoteHost === "localhost" && t.localPort === t.remotePort ? "same port on server" : `server → ${target}`, size: "xs", color: "muted", mono: true },
+    ] },
+    iconBtn("copy", uiIcons.copy, `Copy ${url}`, "", { copyText: url }),
+    iconBtn("stop", uiIcons.x, "Stop forwarding", "stopTunnel", { value: t.id, disabled: !!busy, iconColor: "danger" }),
+  ] };
+}
+
+function forwardingSection(): UiNode {
+  const remoteErr = portError(remotePort, false), localErr = portError(localPort, true);
+  const fieldErr = remoteErr ?? localErr;
+  const canSubmit = !busy && fieldErr === null;
+  const taken = new Set(tunnels.map((t) => Number(t.localPort)));
+  const presets = PRESETS.filter((p) => !taken.has(p));
+  const field = (key: string, label: string, input: UiNode, width?: number): UiNode =>
+    ({ type: "column", key, gap: 3, ...(width ? { width } : { grow: true }), children: [{ type: "label", key: "l", text: label, size: "xs", color: "muted" }, input] });
+  const input = (key: string, value: string, placeholder: string): UiNode =>
+    ({ type: "textInput", key, value, placeholder, changeAction: "tunnelInput", submitAction: "startTunnel", disabled: !!busy });
+  return { type: "column", key: "forwarding", gap: 8, children: [
+    { type: "divider", key: "sep" },
+    { type: "row", key: "heading", align: "center", gap: 6, children: [
+      { type: "label", key: "title", text: "Port forwarding", weight: "semibold", size: "sm", grow: true },
+      ...(tunnels.length ? [chip("count", `${tunnels.length} active`, "success", "#2fa36b1f")] : []),
+    ] },
+    ...(tunnels.length ? tunnels.map(tunnelCard)
+      : [{ type: "label", key: "empty", text: "Reach a service running on the server (a dev server, database, dashboard…) as if it were on this computer.", size: "xs", color: "muted", wrap: true } as UiNode]),
+    // Stacked so it stays readable in a narrow sidebar: ports side by side, host full width,
+    // wrapping quick picks, then a full-width submit.
+    { type: "column", key: "form", gap: 8, style: { ...card, background: "panel" }, children: [
+      { type: "row", key: "ports", gap: 6, children: [
+        field("remote-port", "Server port", input("fwdRemotePort", remotePort, "e.g. 3000")),
+        field("local-port", "Local port", input("fwdLocalPort", localPort, remotePort.trim() || "same")),
+      ] },
+      field("host", "Host on server", input("fwdHost", remoteHost, "localhost")),
+      ...(fieldErr ? [{ type: "label", key: "err", text: fieldErr, size: "xs", color: "danger", wrap: true } as UiNode] : []),
+      { type: "button", key: "start-tunnel", text: "Forward port", iconSvg: uiIcons.plus, action: "startTunnel", variant: "primary", small: true, disabled: !canSubmit, style: { fullWidth: true, justify: "center" } },
+      ...(presets.length ? [{ type: "column", key: "quick", gap: 4, children: [
+        { type: "label", key: "l", text: "Quick forward", size: "xs", color: "muted" },
+        { type: "row", key: "chips", gap: 4, wrap: true, children: presets.map((p): UiNode => ({ type: "button", key: `preset:${p}`, text: String(p), action: "forwardPreset", value: p, small: true, disabled: !!busy, tooltip: `Forward localhost:${p} on the server`, style: { paddingX: 8, noShrink: true } })) },
+      ] } as UiNode] : []),
+    ] },
+  ] };
+}
+
+async function startTunnel(ctx: ModuleContext, workspaceId: string, args: { localPort: string; remoteHost: string; remotePort: string }) {
+  const remote = args.remotePort.trim();
+  if (portError(remote, false) !== null || portError(args.localPort, true) !== null) return;
+  const local = args.localPort.trim() || remote, host = args.remoteHost.trim() || "localhost";
+  await run(ctx, `Forwarding localhost:${local}…`, async () => {
+    await ctx.modules.call("remote-runtime", "startTunnel", { workspaceId, localPort: local, remoteHost: host, remotePort: remote });
+    localPort = ""; remotePort = ""; remoteHost = "localhost";
+  });
+}
 
 const mod: AppModule = {
   id: "remote-panel",
@@ -91,15 +170,7 @@ const mod: AppModule = {
       { type: "button", key: "push", text: "Send", action: "push", value: id, small: true, variant: "primary", disabled: !!busy },
     ]));
     }
-    if (status.location === "ssh") {
-      kids.push({ type: "label", key: "tunnel-heading", text: "SSH tunnels", weight: "semibold", size: "sm" });
-      kids.push({ type: "label", key: "tunnel-help", text: "Forward a local port to a host reachable from this SSH server.", size: "xs", color: "muted", wrap: true });
-      for (const t of tunnels) kids.push(row(`tunnel:${t.id}`, `localhost:${t.localPort} → ${t.remoteHost}:${t.remotePort}`, "Local SSH forward", [{ type: "button", key: "stop", text: "Stop", action: "stopTunnel", value: t.id, small: true, disabled: !!busy }]));
-      kids.push({ type: "textInput", key: "localPort", value: localPort, placeholder: "Local port", changeAction: "tunnelInput" });
-      kids.push({ type: "textInput", key: "remoteHost", value: remoteHost, placeholder: "Remote target host", changeAction: "tunnelInput" });
-      kids.push({ type: "textInput", key: "remotePort", value: remotePort, placeholder: "Remote port", changeAction: "tunnelInput" });
-      kids.push({ type: "button", key: "start-tunnel", text: "Start tunnel", action: "startTunnel", small: true, disabled: !!busy });
-    }
+    if (status.location === "ssh") kids.push(forwardingSection());
     return { type: "column", key: "root", padding: 8, gap: 6, scroll: true, grow: true, children: kids };
   },
   async onEvent(ctx, ev) {
@@ -107,12 +178,15 @@ const mod: AppModule = {
     if (!workspaceId) return;
     switch (ev.action) {
       case "tunnelInput":
-        if (ev.key === "localPort") localPort = String(ev.value ?? ev.inputs?.localPort ?? "");
-        if (ev.key === "remoteHost") remoteHost = String(ev.value ?? ev.inputs?.remoteHost ?? "");
-        if (ev.key === "remotePort") remotePort = String(ev.value ?? ev.inputs?.remotePort ?? "");
+        if (ev.key === "fwdLocalPort") localPort = String(ev.value ?? ev.inputs?.fwdLocalPort ?? "");
+        if (ev.key === "fwdHost") remoteHost = String(ev.value ?? ev.inputs?.fwdHost ?? "");
+        if (ev.key === "fwdRemotePort") remotePort = String(ev.value ?? ev.inputs?.fwdRemotePort ?? "");
         ctx.ui.invalidate(); return;
-      case "startTunnel": return run(ctx, "Starting tunnel…", () => ctx.modules.call("remote-runtime", "startTunnel", { workspaceId, localPort, remoteHost, remotePort }));
-      case "stopTunnel": return run(ctx, "Stopping tunnel…", () => ctx.modules.call("remote-runtime", "stopTunnel", { workspaceId, id: ev.value }));
+      case "startTunnel":
+        localPort = ev.inputs?.fwdLocalPort ?? localPort; remoteHost = ev.inputs?.fwdHost ?? remoteHost; remotePort = ev.inputs?.fwdRemotePort ?? remotePort;
+        return startTunnel(ctx, workspaceId, { localPort, remoteHost, remotePort });
+      case "forwardPreset": return startTunnel(ctx, workspaceId, { localPort: String(ev.value), remoteHost: "localhost", remotePort: String(ev.value) });
+      case "stopTunnel": return run(ctx, "Stopping forward…", () => ctx.modules.call("remote-runtime", "stopTunnel", { workspaceId, id: ev.value }));
       case "refresh": return refresh(ctx);
       case "askForceUpdate": confirmUpdate = true; updateNote = null; ctx.ui.invalidate(); return;
       case "cancelForceUpdate": confirmUpdate = false; ctx.ui.invalidate(); return;
