@@ -27,6 +27,8 @@ let backgroundOpacity = 0.12;
 const HOVER_OPACITIES = [0.25, 0.45, 0.65, 1];
 let hoverOpacity = 0.45;
 let taskFormFor: string | null = null;
+let taskBranches: any[] = [], taskBranch = "", taskQuery = "";
+let taskBranchLoading = false;
 // Pending destructive/branch action awaiting confirmation in a modal.
 type Confirm = { kind: "merge" | "deleteTask" | "removeProject"; id: string; name: string; deleteBranch: boolean; force: boolean; removeAfter: boolean };
 let confirm: Confirm | null = null;
@@ -251,7 +253,16 @@ const mod: AppModule = {
           { type: "label", key: "tf-l", text: `New Git task in ${proj.name}`, size: "sm", weight: "bold" },
           ...(error ? [{ type: "status", key: "task-error", text: error, level: "error" } as UiNode] : []),
           { type: "textInput", key: "task-name", placeholder: "Task name (e.g. Fix login bug)", submitAction: "createTask" },
-          { type: "textInput", key: "task-branch", placeholder: "Branch (optional, e.g. feature/login-fix)", submitAction: "createTask" },
+          { type: "label", key: "branch-label", text: "Branch", weight: "semibold", size: "sm" },
+          { type: "textInput", key: "task-branch-search", value: taskQuery, placeholder: "Find or create a branch…", changeAction: "taskBranchSearch" },
+          { type: "column", key: "branch-options", scroll: true, height: 200, gap: 3, children: [
+            ...(taskBranchLoading ? [{ type: "label", key: "loading", text: "Loading branches…", color: "muted" } as UiNode] : []),
+            { type: "choice", key: "auto", text: "Create a branch from the task name", selected: taskBranch === "", action: "pickTaskBranch", value: "" },
+            ...taskBranches.filter(b => b.name.toLowerCase().includes(taskQuery.toLowerCase())).map((b): UiNode => ({ type: "choice", key: b.ref, text: b.name,
+              description: b.worktree ? "In use by another workspace" : b.remote ? "Remote branch" : "Local branch", disabled: !!b.worktree, selected: taskBranch === (b.remote ? b.ref : b.name), action: "pickTaskBranch", value: b.remote ? b.ref : b.name })),
+            ...(taskQuery.trim() && !taskBranches.some(b => b.name === taskQuery.trim()) ? [{ type: "choice", key: "create-branch", text: `Create “${taskQuery.trim()}”`, description: "New branch from HEAD", selected: taskBranch === taskQuery.trim(), action: "pickTaskBranch", value: taskQuery.trim() } as UiNode] : []),
+          ] },
+          { type: "label", key: "selected-branch", text: taskBranch ? `Selected: ${taskBranch}` : "New branch from task name", size: "xs", color: "muted" },
           { type: "row", key: "tf-b", gap: 4, children: [
             { type: "button", key: "tf-create", text: "Create worktree", action: "createTask", variant: "primary", small: true, disabled: !!busy },
             { type: "button", key: "tf-cancel", text: "Cancel", action: "cancelTask", small: true },
@@ -372,11 +383,21 @@ const mod: AppModule = {
         if (await run("Removing project…", () => ctx.modules.call("projects", "remove", { projectId: c.id }))) confirm = null;
         break;
       }
-      case "newTask": taskFormFor = selectedProject()?.id || null; notice = null; break;
+      case "newTask": {
+        taskFormFor = selectedProject()?.id || null; notice = null; taskBranch = ""; taskQuery = ""; taskBranches = []; taskBranchLoading = true; ctx.ui.invalidate();
+        const id = taskFormFor;
+        try {
+          const r = await ctx.modules.call("git", "branches", { workspaceId: `project:${id}:root` });
+          if (taskFormFor === id) taskBranches = [...r.local, ...r.remote.map((b: any) => ({ ...b, remote: true }))];
+        } catch (e) { error = errMsg(e); }
+        finally { taskBranchLoading = false; } break;
+      }
+      case "taskBranchSearch": taskQuery = String(ev.value ?? ""); break;
+      case "pickTaskBranch": taskBranch = String(ev.value ?? ev.rowKey ?? ""); break;
       case "cancelTask": taskFormFor = null; break;
       case "createTask": {
         const name = (ev.inputs["task-name"] || "").trim();
-        const branch = (ev.inputs["task-branch"] || "").trim();
+        const branch = taskBranch;
         const projectId = taskFormFor;
         if ((!name && !branch) || !projectId) { error = "Enter a task name or a branch"; break; }
         const r = await run("Creating worktree…", () => ctx.modules.call("git-tasks", "create", { projectId, name, branch }, { timeoutMs: 300000 }));

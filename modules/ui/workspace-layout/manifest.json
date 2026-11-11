@@ -17,7 +17,7 @@
     "shell.root"
   ],
   "author": "Hato contributors",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "pluginPackage": "foundation",
   "pluginType": "System"
 }

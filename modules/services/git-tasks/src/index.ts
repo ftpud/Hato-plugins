@@ -179,12 +179,16 @@ const mod: AppModule = {
       if (head.code !== 0) throw new Error("repository has no commits yet; commit once before creating tasks");
       // 2. Stable id + branch: a custom name (new, existing local, or one remote-tracking branch) or a generated task/<slug>-<id>.
       const taskId = crypto.randomUUID();
-      const custom = String(a.branch || "").trim().replace(/^refs\/heads\//, "");
+      const requested = String(a.branch || "").trim();
+      const remoteRef = requested.startsWith("refs/remotes/") ? requested : null;
+      if (remoteRef && !/^refs\/remotes\/[^/]+\/.+/.test(remoteRef)) throw new Error("Invalid remote branch");
+      const custom = remoteRef ? remoteRef.replace(/^refs\/remotes\/[^/]+\//, "") : requested.replace(/^refs\/heads\//, "");
+      if (remoteRef) must(await git(ctx, desc, ["show-ref", "--verify", remoteRef]), "Resolve remote branch");
       if (custom.startsWith("-") || custom.length > 200) throw new Error("invalid branch name");
       const branch = custom || `task/${slugify(name)}-${shortId(taskId)}`;
       must(await git(ctx, desc, ["check-ref-format", "--branch", branch]), "git check-ref-format");
       const local = (await git(ctx, desc, ["-C", root, "show-ref", "--verify", "-q", `refs/heads/${branch}`])).code === 0;
-      const remotes = local ? [] : must(await git(ctx, desc, ["-C", root, "for-each-ref", "--format=%(refname)", `refs/remotes/*/${branch}`]), "git for-each-ref").split("\n").filter(Boolean);
+      const remotes = remoteRef ? [remoteRef] : local ? [] : must(await git(ctx, desc, ["-C", root, "for-each-ref", "--format=%(refname)", `refs/remotes/*/${branch}`]), "git for-each-ref").split("\n").filter(Boolean);
       if (remotes.length > 1) throw new Error(`branch ${branch} exists on several remotes (${remotes.map((r) => r.replace(/^refs\/remotes\//, "")).join(", ")}); create a local branch first`);
       // 3. Worktree outside the original checkout, on the same machine.
       const base = desc.location === "local" ? `${ctx.host.env.info().sharedDir}/worktrees` : `${await remoteStateDir(ctx, desc)}/worktrees`;
@@ -193,13 +197,14 @@ const mod: AppModule = {
       const dirty = await mod.methods!.dirtyCheck(ctx, { projectId: proj.id }, { caller: "git-tasks" });
       // 4. Existing local branch: worktree add <path> <branch> (git refuses one checked out elsewhere).
       //    Remote-only branch: --track -b <branch> <path> <remote ref>. Otherwise a new branch from HEAD.
-      const addArgs = local ? [wtPath, branch] : remotes.length ? ["--track", "-b", branch, wtPath, remotes[0]] : ["-b", branch, wtPath, "HEAD"];
+      const addArgs = local && !remoteRef ? [wtPath, branch] : remotes.length ? ["--track", "-b", branch, wtPath, remotes[0]] : ["-b", branch, wtPath, "HEAD"];
       must(await git(ctx, desc, ["-C", root, "worktree", "add", ...addArgs], 180000), "git worktree add");
       // 5. Verify with porcelain list, then persist.
       const list = must(await git(ctx, desc, ["-C", root, "worktree", "list", "--porcelain"]), "git worktree list");
       const wt = parsePorcelain(list).find((w) => w.branch === branch);
       if (!wt) throw new Error(`worktree for ${branch} not found in 'git worktree list' after creation`);
       try {
+        await ctx.modules.call("persistence", "settings.set", { key: `git.taskBase.task:${taskId}`, value: wt.head });
         await ctx.modules.call("persistence", "tasks.insert", { task: { id: taskId, projectId: proj.id, name, branch, worktreePath: wt.worktree, status: "ready" } });
       } catch (e) {
         // Do NOT delete the created worktree (user work); surface a reconcile action.

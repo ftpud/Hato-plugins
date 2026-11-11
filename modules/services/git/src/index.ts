@@ -8,6 +8,8 @@ import { parseNumstat, parseStatus } from "./status";
 import { unifiedPatch } from "@hato/sdk/text-diff";
 import { listBranches, checkoutBranch, createBranch, renameBranch, deleteBranch, publishBranch, setBranchUpstream } from "./branches";
 
+import { gitOperations } from "./operations";
+
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const MAX_PATCH_BYTES = 4 * 1024 * 1024;
 const docCache = new Map<string, { text: string; document: string }>();
@@ -21,7 +23,7 @@ async function git(ctx: ModuleContext, d: WorkspaceDescriptor, args: string[], l
     const g = await workspaceGrant(ctx, d, "process");
     return ctx.host.process.run(g.grant, {
       target: await targetFor(ctx, d), executable: "git",
-      args: ["--no-optional-locks", "-c", "core.quotepath=false", "-c", "color.ui=false", ...args],
+      args: [...(args[0] === "stash" ? [] : ["--literal-pathspecs"]), "--no-optional-locks", "-c", "core.quotepath=false", "-c", "color.ui=false", ...args],
       cwd: d.rootAbsolutePath, loginShell: d.location === "ssh",
     }, { timeoutMs: 30000, limitBytes });
   });
@@ -29,6 +31,13 @@ async function git(ctx: ModuleContext, d: WorkspaceDescriptor, args: string[], l
 
 function fail(r: RunResult, what: string): never {
   throw new Error(`${what} failed (exit ${r.code}): ${(r.stderr || r.stdout).trim().slice(0, 600)}`);
+}
+
+async function checkedBase(ctx: ModuleContext, d: WorkspaceDescriptor, value: string) {
+  if (!/^[0-9a-f]{40,64}$/.test(value)) throw new Error("Invalid comparison commit");
+  const r = await git(ctx, d, ["rev-parse", "--verify", `${value}^{commit}`]);
+  if (r.code !== 0) fail(r, "Resolve comparison commit");
+  return r.stdout.trim();
 }
 
 async function base(ctx: ModuleContext, d: WorkspaceDescriptor) {
@@ -198,6 +207,7 @@ const mod: AppModule = {
     await Promise.all(watchers.map(w => w.stop())); watchers = [];
   },
   methods: {
+    ...gitOperations({ desc, git, fail, cleanRel }),
     /** Local/remote branches and HEAD, without fetching or changing the repository. */
     async branches(ctx, a) {
       const d = await desc(ctx, a.workspaceId);
@@ -262,7 +272,11 @@ const mod: AppModule = {
         const counts = parseNumstat(ns.stdout);
         for (const f of files) Object.assign(f, counts.get(prefix + f.path) || {});
       }
-      return { workspaceId: d.id, repo: true, branch: branchR.code === 0 ? branchR.stdout.trim() : "(detached)", truncated: st.truncated, files };
+      const upstream = await git(ctx, d, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
+      const distance = upstream.code === 0 ? await git(ctx, d, ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]) : null;
+      const [ahead, behind] = distance?.code === 0 ? distance.stdout.trim().split(/\s+/).map(Number) : [0, 0];
+      return { workspaceId: d.id, repo: true, branch: branchR.code === 0 ? branchR.stdout.trim() : "(detached)", upstream: upstream.code === 0 ? upstream.stdout.trim() : null,
+        ahead, behind, truncated: st.truncated, files };
     },
 
     /** A file's committed (HEAD) text for editor change markers. `tracked: false` for files not in
@@ -293,7 +307,7 @@ const mod: AppModule = {
         r = await git(ctx, d, ["diff", "--no-index", "--no-ext-diff", "--", "/dev/null", path]);
         if (r.code !== 0 && r.code !== 1) fail(r, "git diff --no-index");
       } else {
-        r = await git(ctx, d, ["diff", "--no-ext-diff", "-M", await base(ctx, d), "--", ...(orig ? [orig] : []), path]);
+        r = await git(ctx, d, ["diff", "--no-ext-diff", "-M", (a.base ? await checkedBase(ctx, d, a.base) : await base(ctx, d)), "--", ...(orig ? [orig] : []), path]);
         if (r.code !== 0) fail(r, "git diff");
       }
       const text = r.stdout;

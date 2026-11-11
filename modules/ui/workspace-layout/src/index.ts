@@ -1,3 +1,4 @@
+import { defaultSettings } from "../../../services/persistence/src/default-settings";
 // workspace-layout: main window composition, fully script-controlled.
 // * Panels (projects, files, viewer, ai, terminal) live in column stacks, a bottom dock, floating
 //   panels inside the window, detached OS windows, or are hidden.
@@ -416,18 +417,18 @@ function set(ctx: ModuleContext, next: Layout) {
 // Reset only UI customization; sessions, workflows, credentials and plugin enablement stay intact.
 async function resetCustomization(ctx: ModuleContext) {
   const nextLayout = enforcePanelSharing(defaultLayout(), defaultPanelSharing());
-  const nextTables = normalizeTableStyle(null);
+  const nextTables = normalizeTableStyle(defaultSettings["ui-tables.v1"]);
   const values: Record<string, any> = {
     "layout.v1": nextLayout, "activity-sidebar.v1": defaultSidebarButtons(), "sidebar-order.v1": defaultSidebarOrder(), "panel-sharing.v1": defaultPanelSharing(),
-    "ui-tables.v1": nextTables, "appearance.fontFamily": "JetBrains Mono", "appearance.fontSize": "15",
-    "appearance.fontWeight": "400", "appearance.mode": "system", "appearance.theme": "classic", "appearance.panelOpacity": "balanced", "appearance.projectsBackground": "subtle", "appearance.syntaxScheme": "default",
+    "ui-tables.v1": nextTables, ...Object.fromEntries(Object.entries(defaultSettings).filter(([key]) => key.startsWith("appearance."))),
   };
   for (const [key, value] of Object.entries(values)) await ctx.modules.call("persistence", "settings.set", { key, value });
   sidebarButtons = defaultSidebarButtons(); sidebarOrder = defaultSidebarOrder(); panelSharing = defaultPanelSharing(); tableStyle = nextTables;
   groupBySpace = true; await ctx.modules.call("persistence", "settings.set", { key: "sidebar-grouping.v1", value: true });
   publishSharing(ctx);
-  fontFamily = "JetBrains Mono"; fontSize = "15"; fontWeight = "400"; mode = "system"; appearanceTheme = "classic"; panelOpacity = "balanced";
-  projectsBackground = "subtle"; syntaxScheme = "default";
+  fontFamily = values["appearance.fontFamily"]; fontSize = values["appearance.fontSize"]; fontWeight = values["appearance.fontWeight"];
+  mode = values["appearance.mode"]; appearanceTheme = values["appearance.theme"]; panelOpacity = values["appearance.panelOpacity"];
+  projectsBackground = values["appearance.projectsBackground"]; syntaxScheme = values["appearance.syntaxScheme"];
   ctx.state.set("workspace-layout.projectsBackgroundOpacity", projectsBackgroundOpacity());
   ctx.state.set("workspace-layout.sidebarButtons", sidebarButtons);
   ctx.state.set("workspace-layout.sidebarOrder", sidebarOrder);

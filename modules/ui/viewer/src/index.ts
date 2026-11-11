@@ -400,7 +400,7 @@ const mod: AppModule = {
     if (error) kids.push({ type: "status", key: "err", text: error, level: "error" });
     if (loadingPath) kids.push({ type: "progress", key: "ld", indeterminate: true, label: `Opening ${loadingPath}…` });
     if (current && current.binary) kids.push({ type: "status", key: "bin", text: current.message, level: "info" });
-    if (diff) kids.push({ type: "diff", key: "diff", document: current.document, mode: diffMode, softWrap: viewerWrap, header: false, emptyText: "No changes against HEAD.", grow: true });
+    if (diff) kids.push({ type: "diff", key: "diff", changeNavigation: { previous: "Previous change", next: "Next change" }, document: current.document, mode: diffMode, softWrap: viewerWrap, header: false, emptyText: "No changes against HEAD.", grow: true });
     else if (markdown && renderMarkdown) {
       const markdownText = bufferFor(current.relativePath)?.text ?? current.text;
       const blocks = typeof markdownText === "string" ? shellBlocks(markdownText) : [];

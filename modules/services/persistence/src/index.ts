@@ -1,3 +1,4 @@
+import { defaultSettings } from "./default-settings";
 // persistence: owns the app database (namespace "persistence"), its migrations and typed CRUD.
 // Other services never send SQL; they call these methods. The kernel only provides the generic
 // SQLite primitive.
@@ -79,7 +80,7 @@ const mod: AppModule = {
     schemaVersion: async (ctx) => (await q(ctx, "SELECT max(version) AS v FROM schema_migrations"))[0]?.v ?? 0,
 
     // ---- settings
-    "settings.get": async (ctx, a) => { const r = await q(ctx, "SELECT value_json FROM settings WHERE key = ?", [str(a.key, "key")]); return r.length ? parse(r[0].value_json, null) : null; },
+    "settings.get": async (ctx, a) => { const r = await q(ctx, "SELECT value_json FROM settings WHERE key = ?", [str(a.key, "key")]); return r.length ? parse(r[0].value_json, null) : (Object.prototype.hasOwnProperty.call(defaultSettings, a.key) ? defaultSettings[a.key] : null); },
     "settings.set": async (ctx, a) => { await x(ctx, "INSERT INTO settings(key, value_json) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json", [str(a.key, "key"), JSON.stringify(a.value ?? null)]); return null; },
 
     // ---- scoped settings (user / machine:<id> / workspace:<id>) with revisions

@@ -1,3 +1,4 @@
+import { defaultSettings } from "../../../services/persistence/src/default-settings";
 // Pure layout model for workspace-layout (no host calls, unit-testable).
 // Every panel lives in exactly one place: a column stack, the bottom dock, floating, a detached
 // OS window, or hidden. Bars (top/bottom) hold an ordered list of items.
@@ -83,9 +84,8 @@ export interface Layout {
 }
 
 export function defaultLayout(): Layout {
-  const d = baseLayout();
-  placeNewBarItems(d);
-  return d;
+  const d: Layout = JSON.parse(JSON.stringify(defaultSettings["layout.v1"])) || baseLayout();
+  return repairLayout(d, baseLayout());
 }
 function baseLayout(): Layout {
   const ids = Object.keys(PANELS).filter((id) => !PANELS[id].defaultHidden);
@@ -232,7 +232,10 @@ export function removeBarItem(l: Layout, item: string): Layout {
 
 /** Repair a persisted layout: unknown ids dropped, missing panels docked, sizes normalized. */
 export function repair(raw: any): Layout {
-  const d = defaultLayout();
+  return repairLayout(raw, defaultLayout());
+}
+
+function repairLayout(raw: any, d: Layout): Layout {
   if (!raw || raw.v !== 1) return d;
   const l: Layout = { ...d, ...clone(raw), bars: { top: { ...d.bars.top, ...(raw.bars?.top || {}) }, bottom: { ...d.bars.bottom, ...(raw.bars?.bottom || {}) } } };
   const seen = new Set<string>();

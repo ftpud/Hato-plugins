@@ -6,7 +6,8 @@
   "moduleApiVersion": 1,
   "dependencies": [
     "workspace",
-    "files"
+    "files",
+    "persistence"
   ],
   "capabilities": [
     "process.scope",
@@ -18,7 +19,7 @@
   "stateVersion": 1,
   "description": "Workspace Git status, local/remote branches, safe checkout, branch creation and per-file diffs.",
   "author": "Hato contributors",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "pluginPackage": "git",
   "pluginType": "Development"
 }

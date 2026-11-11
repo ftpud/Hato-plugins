@@ -111,7 +111,7 @@ const mod: AppModule = {
     ] }];
     if (error) children.push({ type: "status", key: "err", text: error, level: "error" });
     if (loading && !current) children.push({ type: "progress", key: "loading", indeterminate: true });
-    if (current?.repo) children.push({ type: "diff", key: "diff", document: current.document, mode, softWrap: true, header: true,
+    if (current?.repo) children.push({ type: "diff", key: "diff", changeNavigation: { previous: "Previous change", next: "Next change" }, document: current.document, mode, softWrap: true, header: true,
       emptyText: scope === "latest" ? "Waiting for the next change." : "No changes against HEAD.",
       placeholder: scope === "latest" ? "Waiting for the next change." : "No changes against HEAD.", grow: true });
     return { type: "column", key: "gc-root", gap: 4, padding: 6, grow: true, children };

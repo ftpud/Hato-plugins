@@ -31,3 +31,24 @@ export function signature(r: { branch?: string | null; files?: Change[] } | null
   if (!r) return "";
   return (r.branch || "") + "\n" + (r.files || []).map((c) => `${c.index}${c.worktree} ${c.path} ${c.additions}/${c.deletions}`).join("\n");
 }
+
+export interface ChangeNode { name: string; path: string; file?: Change; children: ChangeNode[]; paths: string[] }
+/** Directory hierarchy, with folders before files and stable sorting within each level. */
+export function changeTree(changes: Change[]): ChangeNode[] {
+  const root: ChangeNode = { name: "", path: "", children: [], paths: [] };
+  const folders = new Map<string, ChangeNode>([["", root]]);
+  for (const file of changes) {
+    const parts = file.path.split("/");
+    let parent = root;
+    parent.paths.push(file.path);
+    for (let i = 0; i < parts.length - 1; i++) {
+      const path = parts.slice(0, i + 1).join("/");
+      let folder = folders.get(path);
+      if (!folder) { folder = { name: parts[i], path, children: [], paths: [] }; folders.set(path, folder); parent.children.push(folder); }
+      folder.paths.push(file.path); parent = folder;
+    }
+    parent.children.push({ name: parts[parts.length - 1], path: file.path, file, children: [], paths: [file.path] });
+  }
+  const sort = (nodes: ChangeNode[]): ChangeNode[] => nodes.sort((a, b) => Number(!!a.file) - Number(!!b.file) || a.name.localeCompare(b.name)).map(n => ({ ...n, children: sort(n.children) }));
+  return sort(root.children);
+}

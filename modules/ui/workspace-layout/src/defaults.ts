@@ -1,10 +1,6 @@
+import { defaultSettings } from "../../../services/persistence/src/default-settings";
 // First-party workspace defaults. User settings replace these maps, including empty maps.
-//
-// Shared spaces follow screen geography, and sidebar buttons are grouped the same way, so a group
-// of adjacent buttons = one slot on screen (opening one member replaces the others):
-//   Left sidebar, top     Projects │ Navigator: Files · Git · Remote │ Editor: Editor · Latest changes · Workflows
-//   Left sidebar, bottom  Terminal (bottom dock)
-//   Right sidebar, top    Assistant: AI Chat · Background agents · MCP servers
+// Captured presentation settings define the effective sidebar order and shared spaces.
 import type { SidebarButtons, SidebarOrder } from '@hato/sdk/sidebar-placement';
 import type { PanelSharing } from './panel-sharing';
 
@@ -12,29 +8,15 @@ import type { PanelSharing } from './panel-sharing';
 export const SPACE_NAMES: Record<string, string> = { 'space-1': 'Editor area', 'space-2': 'Navigator', 'space-3': 'Assistant' };
 
 export function defaultSidebarButtons(): SidebarButtons {
-  return {
-    projects: 'left-top', files: 'left-top', git: 'left-top', remote: 'left-top',
-    viewer: 'left-top', 'git-changes': 'left-top', workflows: 'left-top',
-    terminal: 'left-bottom',
-    ai: 'right-top', agents: 'right-top', mcps: 'right-top',
-  };
+  return JSON.parse(JSON.stringify(defaultSettings["activity-sidebar.v1"]));
 }
 /** Order within each position. Groups are separated automatically by shared space (see the
  *  "Group sidebar buttons by shared space" setting), so no explicit spacers are needed. */
 export function defaultSidebarOrder(): SidebarOrder {
-  return {
-    'left-top': ['projects', 'files', 'git', 'remote', 'viewer', 'git-changes', 'workflows'],
-    'left-bottom': ['terminal'],
-    'right-top': ['ai', 'agents', 'mcps'],
-    'right-bottom': [],
-  };
+  return JSON.parse(JSON.stringify(defaultSettings["sidebar-order.v1"]));
 }
 export function defaultPanelSharing(): PanelSharing {
-  return {
-    viewer: 'space-1', 'git-changes': 'space-1', workflows: 'space-1',
-    files: 'space-2', git: 'space-2', remote: 'space-2',
-    ai: 'space-3', agents: 'space-3', mcps: 'space-3',
-  };
+  return JSON.parse(JSON.stringify(defaultSettings["panel-sharing.v1"]));
 }
 
 // Previous defaults. A saved value identical to one of these was never customized, so it is
