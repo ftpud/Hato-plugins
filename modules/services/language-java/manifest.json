@@ -162,7 +162,7 @@
   "stateVersion": 1,
   "description": "Java syntax highlighting and go to definition through Eclipse JDTLS, locally or over SSH.",
   "author": "Hato contributors",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "pluginPackage": "language-java",
   "pluginType": "Languages",
   "distribution": "marketplace",

@@ -36,6 +36,7 @@ test('Java root backgrounds support modules, user paths and toggles',()=>{
  const rules=sdk.filePresentationRules([plugin('language-java',java.javaFilePresentation(java.defaults))]);
  const paths=['src/main/java/X.java','mod/src/test/java/X.java','src/main/resources/settings.xml','mod/src/test/resources/data.json'];
  assert.equal(new Set(paths.map(path=>sdk.presentFile(rules,entry(path)).background)).size,4);
+ for(const path of paths)assert.ok(parseInt(sdk.presentFile(rules,entry(path)).background.slice(-2),16)<=0x10);
  assert.ok(sdk.presentFile(rules,entry('mod/src/main/java','dir')).background);
  assert.equal(sdk.presentFile(rules,entry('mod/src/main/javascript/X.java')).background,undefined);
  const custom=sdk.filePresentationRules([plugin('language-java',java.javaFilePresentation({...java.defaults,sources:'code\nmodules/*/source',icons:false}))]);
@@ -95,6 +96,7 @@ test('explorer applies presentation returned through the shared interface withou
  const walk=node=>[node,...(node.children||[]).flatMap(walk)];
  const tree=()=>walk(explorer.render()).find(node=>node.type==='tree');
  tree();await new Promise(resolve=>setTimeout(resolve,65));
+ assert.equal(tree().rowGap,0);
  assert.equal(tree().rows[0].iconSvg,look.iconSvg);
  assert.equal(tree().rows[0].background,look.background);
  explorer.deactivate();

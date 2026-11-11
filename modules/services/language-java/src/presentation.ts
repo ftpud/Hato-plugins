@@ -22,7 +22,7 @@ function rootPattern(root: string): string {
 export function javaFilePresentation(settings: JavaFileStyle): FilePresentationContribution {
   const rules: FilePresentationRule[] = [];
   if (settings.backgrounds) for (const [key, background] of [
-    ["sources", "#3b82f624"], ["tests", "#22c55e24"], ["resources", "#eab30824"], ["testResources", "#f9731624"],
+    ["sources", "#3b82f60d"], ["tests", "#22c55e0d"], ["resources", "#eab3080d"], ["testResources", "#f973160d"],
   ] as const) for (const root of settings[key].split(/[,\r\n]+/).map(s => s.trim()).filter(Boolean)) {
     rules.push({ id: `java-${key}:${root}`, pathPattern: rootPattern(root), background });
   }

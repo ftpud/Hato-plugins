@@ -1,3 +1,4 @@
+import { providerMcpLaunch } from "@hato/sdk/provider-mcp";
 // acp: Agent Client Protocol (agentclientprotocol.com) client implemented in TS over generic
 // process stdio streams. The agent process runs ON the workspace's machine with cwd = the exact
 // project root / worktree: local child process for local workspaces, SSH exec for remote ones.
@@ -193,6 +194,21 @@ async function authSettings(ctx: ModuleContext): Promise<Record<string, boolean>
   return values;
 }
 
+async function sessionMcp(ctx: ModuleContext, a: any, desc: WorkspaceDescriptor) {
+  const servers: any[] = [...(a.mcpServers || [])];
+  let state: Conn["mcp"] = { enabled: !!a.mcp, status: a.mcp ? "pending" : "disabled" };
+  if (a.mcp) {
+    try {
+      const ep = await ctx.modules.call("internal-mcp", "endpoint", { conversationId: a.conversationId, workspaceId: desc.id }, { timeoutMs: 300000 });
+      servers.push(ep.server); state = { enabled: true, status: `internal MCP via ${ep.transport}` };
+    } catch (e) {
+      state = { enabled: true, status: `unavailable: ${errMsg(e)}` };
+      ctx.log.warn("internal MCP unavailable for", a.conversationId, errMsg(e));
+    }
+  }
+  return { servers, state };
+}
+
 async function start(ctx: ModuleContext, a: any) {
   const existing = conns.get(a.conversationId);
   if (existing && (existing.status === "ready" || existing.status === "busy" || existing.status === "starting")) return publicState(existing);
@@ -207,11 +223,25 @@ async function start(ctx: ModuleContext, a: any) {
   if (det.pathEnv) env.PATH = det.pathEnv;
   const envRemove = await environmentPolicy(ctx, profile);
   for (const key of envRemove) delete env[key];
-  const spawned = await ctx.host.process.spawn(g.grant, {
-    target: await targetFor(ctx, desc),
-    executable: desc.location === "ssh" ? profile.executable : det.path,
-    args: profile.args || [], cwd: desc.rootAbsolutePath, env, envRemove, loginShell: desc.location === "ssh",
-  });
+  const preparedMcp = profile.mcpLaunch ? await sessionMcp(ctx, a, desc) : null;
+  let launch = providerMcpLaunch(undefined, desc.location === "ssh" ? profile.executable : det.path, profile.args || [], env, preparedMcp?.servers || []);
+  let spawned;
+  try {
+    launch = providerMcpLaunch(profile.mcpLaunch, launch.executable, profile.args || [], env, preparedMcp?.servers || []);
+    if (launch.wrapped) {
+      const node = await detect(ctx, desc, "node");
+      if (!node.found) throw new Error("Node.js is required on the workspace machine for this provider's MCP launcher");
+      launch = { ...launch, executable: desc.location === "ssh" ? "node" : node.path,
+        env: { ...launch.env, ...(node.pathEnv ? { PATH: [node.pathEnv, launch.env.PATH].filter(Boolean).join(desc.location === "ssh" || ctx.host.env.info().platform !== "windows" ? ":" : ";") } : {}) } };
+    }
+    spawned = await ctx.host.process.spawn(g.grant, {
+      target: await targetFor(ctx, desc), executable: launch.executable,
+      args: launch.args, cwd: desc.rootAbsolutePath, env: launch.env, envRemove, loginShell: desc.location === "ssh",
+    });
+  } catch (e) {
+    if (preparedMcp && a.mcp) await ctx.modules.call("internal-mcp", "revoke", { conversationId: a.conversationId }).catch(() => {});
+    throw e;
+  }
   const c: Conn = {
     conversationId: a.conversationId, workspaceId: desc.id, machineId: desc.machineId, cwd: desc.rootAbsolutePath, profileId: profile.id, providerId: profile.provider, providerModule: profile.providerModule,
     proc: spawned.handle, pid: spawned.pid, peer: null as any, sessionId: null, agentInfo: null, agentCapabilities: null, steering: false, authMethods: [],
@@ -232,19 +262,12 @@ async function start(ctx: ModuleContext, a: any) {
     c.steering = init._meta?.steering?.supported === true;
     c.authMethods = init.authMethods || [];
     if (init.protocolVersion !== PROTOCOL_VERSION) throw new Error(`agent negotiated unsupported ACP protocol version ${init.protocolVersion}`);
-    let mcpServers: any[] = [...(a.mcpServers || [])];
-    if (a.mcp) {
-      try {
-        const ep = await ctx.modules.call("internal-mcp", "endpoint", { conversationId: c.conversationId, workspaceId: desc.id }, { timeoutMs: 300000 });
-        mcpServers.push(ep.server);
-        c.mcp = { enabled: true, status: `internal MCP via ${ep.transport}` };
-      } catch (e) {
-        c.mcp = { enabled: true, status: `unavailable: ${errMsg(e)}` };
-        ctx.log.warn("internal MCP unavailable for", c.conversationId, errMsg(e));
-      }
-    }
+    const configuredMcp = preparedMcp || await sessionMcp(ctx, a, desc);
+    const mcpServers = configuredMcp.servers;
+    c.mcp = configuredMcp.state;
+    const sessionServers = launch.wrapped ? launch.sessionServers : mcpServers;
     const caps = c.agentCapabilities.mcpCapabilities || {};
-    for (const server of mcpServers) {
+    for (const server of sessionServers) {
       if (server.type === "http" && !caps.http) throw new Error(`Agent does not support HTTP MCP server “${server.name}”`);
       if (server.type === "sse" && !caps.sse) throw new Error(`Agent does not support SSE MCP server “${server.name}”`);
     }
@@ -252,7 +275,7 @@ async function start(ctx: ModuleContext, a: any) {
     let res: any;
     if (a.resumeSessionId && c.agentCapabilities.loadSession) {
       try {
-        res = await withTimeout(c.peer.request("session/load", { sessionId: a.resumeSessionId, cwd: c.cwd, mcpServers }), 120000, "session/load");
+        res = await withTimeout(c.peer.request("session/load", { sessionId: a.resumeSessionId, cwd: c.cwd, mcpServers: sessionServers }), 120000, "session/load");
         c.sessionId = a.resumeSessionId;
       } catch (e) {
         ctx.log.warn("session/load failed; starting a new session", errMsg(e));
@@ -260,7 +283,7 @@ async function start(ctx: ModuleContext, a: any) {
       }
     }
     if (!c.sessionId) {
-      res = await withTimeout(c.peer.request("session/new", { cwd: c.cwd, mcpServers }), 120000, "session/new");
+      res = await withTimeout(c.peer.request("session/new", { cwd: c.cwd, mcpServers: sessionServers }), 120000, "session/new");
       c.sessionId = res.sessionId;
     }
     c.configOptions = res && Array.isArray(res.configOptions) ? res.configOptions : null;
@@ -273,6 +296,7 @@ async function start(ctx: ModuleContext, a: any) {
     c.error = auth ? `Agent requires authentication on ${c.machineId} (${c.authMethods.map((m: any) => m.name || m.id).join(", ")}). Authenticate the adapter there then reconnect. Details: ${errMsg(e)}` : errMsg(e);
     emitStatus(ctx, c);
     await ctx.host.process.terminate(c.proc).catch(() => {});
+    if (a.mcp) await ctx.modules.call("internal-mcp", "revoke", { conversationId: a.conversationId }).catch(() => {});
     throw new Error(c.error!);
   }
   emitStatus(ctx, c);

@@ -8,7 +8,7 @@
       "type": "System",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.21",
+      "version": "0.1.22",
       "coreVersion": "^0.1.0",
       "description": "Hato essentials services and panels.",
       "dependencies": {},
@@ -35,7 +35,7 @@
       "type": "AI",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.7",
+      "version": "0.1.8",
       "coreVersion": "^0.1.0",
       "description": "Provider-independent ACP sessions, chat UI and MCP tools. Install AI providers separately.",
       "dependencies": {
@@ -115,12 +115,12 @@
       "type": "AI providers",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "coreVersion": "^0.1.0",
       "description": "GitHub Copilot CLI using its native ACP server. Available in AI Chat and Background Agents; install and authenticate Copilot on the workspace machine.",
       "dependencies": {
         "foundation": "^0.1.0",
-        "core-acp": "^0.1.7"
+        "core-acp": "^0.1.8"
       },
       "modules": [
         "copilot-provider"
@@ -132,7 +132,7 @@
       "type": "Automation",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "coreVersion": "^0.1.0",
       "description": "Persistent agent runtime, background agent panel and workspace tools. Supports local and SSH machines.",
       "dependencies": {
@@ -208,7 +208,7 @@
       "type": "Languages",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.7",
+      "version": "0.1.8",
       "coreVersion": "^0.1.0",
       "description": "Java highlighting and Eclipse JDTLS navigation.",
       "dependencies": {

@@ -29,11 +29,18 @@
         "adapter": {
           "pkg": "@github/copilot",
           "bin": "copilot"
+        },
+        "mcpLaunch": {
+          "flag": "--additional-mcp-config",
+          "stdioType": "local",
+          "tools": [
+            "*"
+          ]
         }
       }
     ]
   },
-  "version": "0.1.0",
+  "version": "0.1.1",
   "pluginPackage": "copilot-acp",
   "pluginType": "AI providers",
   "description": "GitHub Copilot CLI over native ACP stdio, with workspace-scoped launch and explicit CLI installation."

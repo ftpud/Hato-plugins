@@ -1,3 +1,4 @@
+import { providerMcpLaunch } from "@hato/sdk/provider-mcp";
 // Standalone ACP controller. No dependency on desktop workspace/chat services. This plugin runs
 // in hatod, so protocol requests, permissions and history survive desktop disconnection.
 import type { AppModule, ModuleContext, Handle, ChatMessage, StreamSubscription } from "@hato/sdk/types";
@@ -138,6 +139,13 @@ async function start(ctx:ModuleContext,s:AgentSession) {
   let c:Live|undefined;
   try {
     const context=await readContext(ctx,s);
+    let mcpServers:any[]=s.mcps.map(({id,...server})=>server);
+    if(s.workspaceMcp) {
+      await ctx.modules.call("internal-remote-mcp","revoke",{sessionId:s.id});
+      const server=await ctx.modules.call("internal-remote-mcp","endpoint",{sessionId:s.id,workspaceId:s.workspaceId,root:s.root,skills:s.skills,daemon:s.daemon});
+      const {id,...config}=server;mcpServers=[...mcpServers,config];
+    }
+    let sessionServers=mcpServers;
     const grant=await ctx.host.capabilities.request({kind:"process",root:s.root,target:{kind:"local"}});
     let spawned:{handle:string};
     try {
@@ -147,8 +155,15 @@ async function start(ctx:ModuleContext,s:AgentSession) {
       const resolved=await agentExecutable(ctx,grant.grant,s.root,s.profile.executable);
       // Apply the discovered PATH after login initialization, including for node shebangs and
       // child tools. Keep shell startup noise out of the ACP protocol stream.
+      let nodePath = "node", pathEnv = resolved.pathEnv;
+      if (s.profile.mcpLaunch && mcpServers.some(server => !server.type || server.type === "stdio")) {
+        const node = await agentExecutable(ctx, grant.grant, s.root, "node");
+        nodePath = node.path; pathEnv = `${node.pathEnv}:${resolved.pathEnv}`;
+      }
+      const launch = providerMcpLaunch(s.profile.mcpLaunch, resolved.path, s.profile.args, env, mcpServers, nodePath);
+      sessionServers = launch.sessionServers;
       spawned=await ctx.host.process.spawn(grant.grant,{target:{kind:"local"},executable:ctx.host.env.info().platform==="macos"?"/bin/zsh":"/bin/sh",
-        args:["-lc",envRemove.length?'exec /usr/bin/env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN "$@"':'exec /usr/bin/env "$@"',"hato-agent",`PATH=${resolved.pathEnv}`,resolved.path,...s.profile.args],cwd:s.root,env,envRemove});
+        args:["-lc",envRemove.length?'exec /usr/bin/env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN "$@"':'exec /usr/bin/env "$@"',"hato-agent",`PATH=${pathEnv}`,launch.executable,...launch.args],cwd:s.root,env:launch.env,envRemove});
     } finally { await ctx.host.capabilities.release(grant.grant); }
     c={session:s,process:spawned.handle,peer:null as any,subscriptions:[],permissions:new Map(),queued:[],cancelSent:false,stopping:false,context,firstPrompt:!s.contextSent,turn:Date.now(),stderr:"",steering:false};
     const connection=c;
@@ -185,17 +200,11 @@ async function start(ctx:ModuleContext,s:AgentSession) {
     s.promptImages=init.agentCapabilities?.promptCapabilities?.image===true;
     // Remote MCP servers need the provider's matching transport (e.g. Codex has HTTP but not SSE).
     const caps=init.agentCapabilities?.mcpCapabilities||{};
-    for(const m of s.mcps as any[])if((m.type==="http"||m.type==="sse")&&!caps[m.type])throw new Error(`${s.profile.name} cannot connect to ${m.type.toUpperCase()} MCP server “${m.name}”. Use a provider that supports it${m.type==="sse"?" or switch the server to Streamable HTTP":""}.`);
-    let mcpServers=s.mcps.map(({id,...server})=>server);
-    if(s.workspaceMcp) {
-      await ctx.modules.call("internal-remote-mcp","revoke",{sessionId:s.id});
-      const server=await ctx.modules.call("internal-remote-mcp","endpoint",{sessionId:s.id,workspaceId:s.workspaceId,root:s.root,skills:s.skills,daemon:s.daemon});
-      const {id,...config}=server;mcpServers=[...mcpServers,config];
-    }
+    for(const m of sessionServers as any[])if((m.type==="http"||m.type==="sse")&&!caps[m.type])throw new Error(`${s.profile.name} cannot connect to ${m.type.toUpperCase()} MCP server “${m.name}”. Use a provider that supports it${m.type==="sse"?" or switch the server to Streamable HTTP":""}.`);
     let result:any;
     if(s.sessionId) {
       if(!init.agentCapabilities?.loadSession)throw new Error("Provider cannot reload this session; create a new agent to avoid losing its context");
-      try { result=await request(c,"session/load",{sessionId:s.sessionId,cwd:s.root,mcpServers}); }
+      try { result=await request(c,"session/load",{sessionId:s.sessionId,cwd:s.root,mcpServers:sessionServers}); }
       catch(e) {
         // The provider no longer has this session (never prompted, expired or removed): start a
         // new one, as desktop chats do, instead of leaving the agent unable to reconnect.
@@ -206,7 +215,7 @@ async function start(ctx:ModuleContext,s:AgentSession) {
       }
     }
     if(!s.sessionId) {
-      result=await request(c,"session/new",{cwd:s.root,mcpServers});
+      result=await request(c,"session/new",{cwd:s.root,mcpServers:sessionServers});
       if(typeof result.sessionId!=="string"||!result.sessionId)throw new Error("Provider did not return a session id");
       s.sessionId=result.sessionId;
     }
@@ -231,6 +240,7 @@ async function start(ctx:ModuleContext,s:AgentSession) {
     await persist(ctx,s); return c;
   } catch(e) {
     if(c) { await stop(ctx,s.id); }
+    else if(s.workspaceMcp) await ctx.modules.call("internal-remote-mcp","revoke",{sessionId:s.id}).catch(()=>{});
     s.status="error";s.error=errMsg(e);await persist(ctx,s);throw e;
   }
 }

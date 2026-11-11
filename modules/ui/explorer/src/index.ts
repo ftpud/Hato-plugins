@@ -179,7 +179,7 @@ const mod: AppModule = {
       if (pending.size && !dirs.has(".")) children.push({ type: "progress", key: "loading", indeterminate: true });
       if (filtering && !searching && !rows.length && !error && !(grepping && query.trim().length < 2)) children.push({ type: "label", key: "empty", text: grepping ? "No files contain this text." : "No matching files.", color: "muted", padding: 12 });
       if (!filtering && !pending.size && !loaded) children.push({ type: "label", key: "empty", text: "This folder is empty.", color: "muted", padding: 12 });
-      children.push({ type: "tree", key: "files", rowHeight: 28, rowGap: 2, indent: 18, iconSize: 17,
+      children.push({ type: "tree", key: "files", rowHeight: 28, rowGap: 0, indent: 18, iconSize: 17,
         collapsedIconSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m9 5 7 7-7 7"/></svg>',
         expandedIconSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m5 9 7 7 7-7"/></svg>', rows: rows.map(row => {
           const change = gitFiles.find(file => file.path === row.key);
