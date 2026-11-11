@@ -25,6 +25,11 @@ export function commitGraph(commits: { id: string; parents: string[] }[]): Map<s
     maxWidth = Math.max(maxWidth, width);
     result.set(commit.id, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} 58" fill="none" stroke="currentColor" stroke-width="2">${lines.join("")}<circle cx="${x(lane)}" cy="24" r="4" fill="currentColor" stroke="none"/></svg>`);
   }
-  for (const [id, svg] of result) result.set(id, svg.replace(/viewBox="0 0 \d+ 58"/, `viewBox="0 0 ${maxWidth} 58" preserveAspectRatio="none"`));
+  for (const [id, svg] of result) {
+    result.set(id, svg
+      .replace(/viewBox="0 0 \d+ 58"/, 'viewBox="0 0 40 58"')
+      .replace('<path', `<g transform="scale(${40 / maxWidth} 1)"><path`)
+      .replace('</svg>', '</g></svg>'));
+  }
   return result;
 }

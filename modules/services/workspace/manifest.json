@@ -15,7 +15,7 @@
   "stateVersion": 1,
   "description": "Resolves and selects workspaces (project root or task worktree) and per-workspace view state.",
   "author": "Hato contributors",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "pluginPackage": "foundation",
   "pluginType": "System"
 }
