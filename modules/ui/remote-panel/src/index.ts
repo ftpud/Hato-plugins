@@ -9,13 +9,15 @@ let status: any = null;
 let error: string | null = null;
 let busy: string | null = null;
 let timer: any = null;
+let tunnels: any[] = [];
+let localPort = "", remoteHost = "localhost", remotePort = "";
 /** Force update asks for a second click: it replaces running plugins and stops what they hold. */
 let confirmUpdate = false;
 let updateNote: string | null = null;
 
 async function refresh(ctx: ModuleContext) {
   if (!ws) { status = null; ctx.ui.invalidate(); return; }
-  try { status = await ctx.modules.call("remote-runtime", "status", { workspaceId: ws.id }, { timeoutMs: 60000 }); error = null; }
+  try { status = await ctx.modules.call("remote-runtime", "status", { workspaceId: ws.id }, { timeoutMs: 60000 }); error = null; tunnels = await ctx.modules.call("remote-runtime", "tunnels", { workspaceId: ws.id }); }
   catch (e) { error = errMsg(e); }
   ctx.ui.invalidate();
 }
@@ -66,8 +68,8 @@ const mod: AppModule = {
     if (!status.running) {
       kids.push({ type: "label", key: "off", text: "The Hato daemon is not running on this machine. Terminals and plugins stop when the connection drops.", size: "sm", color: "muted", wrap: true });
       kids.push({ type: "button", key: "start", text: "Start daemon", action: "ensure", variant: "primary", small: true, disabled: !!busy });
-      return { type: "column", key: "root", padding: 8, gap: 6, children: kids };
     }
+    if (status.running) {
     kids.push({ type: "label", key: "ver", text: `daemon ${status.version} · pid ${status.pid}${status.stale ? " · older build (restarts when idle)" : ""}`, size: "xs", color: status.stale ? "warning" : "muted" });
     const ptys: any[] = status.resources?.ptys || [], procs: any[] = status.resources?.procs || [];
     kids.push({ type: "label", key: "h-res", text: `Held on the server (${ptys.length + procs.length})`, weight: "semibold", size: "sm" });
@@ -88,12 +90,29 @@ const mod: AppModule = {
     for (const id of candidates.filter((id) => !remote.some((p) => p.id === id))) kids.push(row(`cp:${id}`, id, "enabled here, not on the server yet", [
       { type: "button", key: "push", text: "Send", action: "push", value: id, small: true, variant: "primary", disabled: !!busy },
     ]));
+    }
+    if (status.location === "ssh") {
+      kids.push({ type: "label", key: "tunnel-heading", text: "SSH tunnels", weight: "semibold", size: "sm" });
+      kids.push({ type: "label", key: "tunnel-help", text: "Forward a local port to a host reachable from this SSH server.", size: "xs", color: "muted", wrap: true });
+      for (const t of tunnels) kids.push(row(`tunnel:${t.id}`, `localhost:${t.localPort} → ${t.remoteHost}:${t.remotePort}`, "Local SSH forward", [{ type: "button", key: "stop", text: "Stop", action: "stopTunnel", value: t.id, small: true, disabled: !!busy }]));
+      kids.push({ type: "textInput", key: "localPort", value: localPort, placeholder: "Local port", changeAction: "tunnelInput" });
+      kids.push({ type: "textInput", key: "remoteHost", value: remoteHost, placeholder: "Remote target host", changeAction: "tunnelInput" });
+      kids.push({ type: "textInput", key: "remotePort", value: remotePort, placeholder: "Remote port", changeAction: "tunnelInput" });
+      kids.push({ type: "button", key: "start-tunnel", text: "Start tunnel", action: "startTunnel", small: true, disabled: !!busy });
+    }
     return { type: "column", key: "root", padding: 8, gap: 6, scroll: true, grow: true, children: kids };
   },
   async onEvent(ctx, ev) {
     const workspaceId = ws?.id;
     if (!workspaceId) return;
     switch (ev.action) {
+      case "tunnelInput":
+        if (ev.key === "localPort") localPort = String(ev.value ?? ev.inputs?.localPort ?? "");
+        if (ev.key === "remoteHost") remoteHost = String(ev.value ?? ev.inputs?.remoteHost ?? "");
+        if (ev.key === "remotePort") remotePort = String(ev.value ?? ev.inputs?.remotePort ?? "");
+        ctx.ui.invalidate(); return;
+      case "startTunnel": return run(ctx, "Starting tunnel…", () => ctx.modules.call("remote-runtime", "startTunnel", { workspaceId, localPort, remoteHost, remotePort }));
+      case "stopTunnel": return run(ctx, "Stopping tunnel…", () => ctx.modules.call("remote-runtime", "stopTunnel", { workspaceId, id: ev.value }));
       case "refresh": return refresh(ctx);
       case "askForceUpdate": confirmUpdate = true; updateNote = null; ctx.ui.invalidate(); return;
       case "cancelForceUpdate": confirmUpdate = false; ctx.ui.invalidate(); return;

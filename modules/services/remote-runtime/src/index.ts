@@ -11,6 +11,7 @@ let autoStart = true;
 let autoPush = true;
 const lastError = new Map<string, string>();
 const connected = new Map<string, DaemonTarget>();
+const tunnels = new Map<string, any>();
 const syncing = new Map<string, Promise<any>>();
 function sync(ctx: ModuleContext, machineId: string, target: DaemonTarget) {
   const previous = syncing.get(machineId) || Promise.resolve();
@@ -69,7 +70,8 @@ async function ensure(ctx: ModuleContext, workspaceId: string) {
 const mod: AppModule = {
   id: "remote-runtime",
   moduleApiVersion: 1,
-  async activate(ctx) {
+  async activate(ctx, prev: any) {
+    for (const [id, tunnel] of prev?.tunnels || []) tunnels.set(id, tunnel);
     const saved = await ctx.modules.call("persistence", "settings.get", { key: "remote-runtime.prefs" }).catch(() => null);
     if (saved && typeof saved === "object") { autoStart = saved.autoStart !== false; autoPush = saved.autoPush !== false; }
     exportSettings(ctx, () => [{ key: "remote", title: "Remote runtime", fields: [
@@ -115,7 +117,18 @@ const mod: AppModule = {
       }).catch(() => {});
     });
   },
+  snapshot: () => ({ tunnels: Array.from(tunnels.entries()) }),
   methods: {
+    async tunnels(ctx, a) { const { d } = await resolve(ctx, String(a.workspaceId)); return Array.from(tunnels.entries()).filter(([, t]) => t.machineId === d.machineId).map(([id, t]) => ({ ...t, id, handle: undefined })); },
+    async startTunnel(ctx, a) {
+      const { d, target } = await resolve(ctx, String(a.workspaceId));
+      if (target.kind !== "ssh") throw new Error("Select an SSH workspace.");
+      const localPort = Number(a.localPort), remotePort = Number(a.remotePort), remoteHost = String(a.remoteHost || "").trim();
+      if (!Number.isInteger(localPort) || localPort < 1 || localPort > 65535 || !Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535 || !remoteHost) throw new Error("Enter a host and valid ports (1–65535).");
+      const result = await ctx.host.ssh.localForward(target.connection, { localPort, remoteHost, remotePort });
+      tunnels.set(String(result.handle), { handle: result.handle, machineId: d.machineId, localPort: result.localPort, remoteHost, remotePort });
+    },
+    async stopTunnel(ctx, a) { const { d } = await resolve(ctx, String(a.workspaceId)); const t = tunnels.get(String(a.id)); if (!t || t.machineId !== d.machineId) throw new Error("Tunnel not found."); await ctx.host.ssh.cancelForward(t.handle); tunnels.delete(String(a.id)); },
     async sync(ctx, a) {
       const { d, target } = await resolve(ctx, String(a.workspaceId));
       return sync(ctx, d.machineId, target);
