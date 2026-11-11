@@ -16,6 +16,8 @@ async function applySetting(ctx: ModuleContext, key: string, value: boolean | st
   ctx.ui.invalidate();
 }
 let ws: any, branches: any[] = [], tags: string[] = [], commits: any[] = [], comparison: any = null;
+/** Commit under the pointer: its branch line is highlighted. */
+let hovered: string | null = null;
 let ref = "ALL", query = "", branchQuery = "", chosen = "", error = "", loading = false, more = false, epoch = 0;
 async function refresh(ctx: ModuleContext, append = false) {
   if (!ws || !visible) return;
@@ -61,7 +63,16 @@ const mod: AppModule = {
   render(): UiNode {
     if (!ws) return { type: "label", key: "empty", text: "Select a project or task.", color: "muted" };
     const options = [{ value: "ALL", label: "All branches" }, { value: "HEAD", label: "Current branch" }, ...branches.map(b => ({ value: b.ref, label: b.name })), ...tags.map(t => ({ value: t, label: t.replace("refs/tags/", "Tag · ") }))].filter(b => b.value === ref || b.label.toLowerCase().includes(branchQuery.toLowerCase()));
-    const graph = commitGraph(commits);
+    const layout = commitGraph(commits, 58);
+    const highlight = hovered !== null ? layout.branchOf.get(hovered) ?? null : null;
+    const graph = highlight === null ? layout : commitGraph(commits, 58, highlight);
+    const tooltip = (c: any) => {
+      const branch = graph.branchOf.get(c.id);
+      const name = branch === undefined ? undefined : graph.branchName.get(branch);
+      const all = graph.containedIn.get(c.id) || [];
+      const shown = all.slice(0, 6).join(", ") + (all.length > 6 ? ` +${all.length - 6} more` : "");
+      return [`Branch: ${name || "unnamed (no ref points here)"}`, all.length ? `Contained in: ${shown}` : "Not in any loaded branch or tag"].join("\n");
+    };
     const shown = commits.filter(c => `${c.subject} ${c.author} ${c.id} ${c.refs}`.toLowerCase().includes(query.toLowerCase()));
     return { type: "column", key: "root", padding: 8, gap: 8, grow: true, children: [
       { type: "row", key: "toolbar", gap: 6, wrap: true, children: [
@@ -82,8 +93,8 @@ const mod: AppModule = {
           })) },
         ] },
         { type: "column", key: "log", grow: true, children: [
-          { type: "tree", key: "commits", rowHeight: 58, rowGap: 0, iconSize: 40, grow: true, expandAction: "expand", selectAction: "commit", rows: shown.map(c => ({
-            key: c.id, label: c.subject, iconSvg: graph.get(c.id), detail: `${c.id.slice(0, 8)} · ${c.author} · ${c.date.slice(0, 10)}`, badge: c.refs || undefined,
+          { type: "tree", key: "commits", hoverAction: "hoverCommit", rowHeight: graph.height, rowGap: 0, iconSize: 40, iconWidth: graph.width, iconHeight: graph.height, indent: 0, grow: true, expandAction: "expand", selectAction: "commit", rows: shown.map(c => ({
+            key: c.id, label: c.subject, iconSvg: graph.svgs.get(c.id), tooltip: tooltip(c), detail: `${c.id.slice(0, 8)} · ${c.author} · ${c.date.slice(0, 10)}`, badge: c.refs || undefined,
             depth: 0, expandable: false, expanded: false, selected: chosen === c.id, iconColor: "primary",
           })) },
           ...(more ? [{ type: "button", key: "more", text: "Load older commits", action: "more", small: true, disabled: loading } as UiNode] : []),
@@ -97,6 +108,11 @@ const mod: AppModule = {
   },
   async onEvent(ctx, ev) {
     try {
+      if (ev.action === "hoverCommit") {
+        const next = ev.rowKey || null;
+        if (next !== hovered) { hovered = next; ctx.ui.invalidate(); }
+        return;
+      }
       if (ev.action === "diffMode") { await applySetting(ctx, "diffMode", String(ev.value ?? ev.rowKey)); publishSettings(); }
       else if (ev.action === "branchQuery") branchQuery = String(ev.value ?? "");
       else if (ev.action === "query") query = String(ev.value ?? "");

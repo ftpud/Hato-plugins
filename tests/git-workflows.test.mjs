@@ -51,8 +51,27 @@ test('stash IDs stay stable and history includes branches and merge parentage',a
 }));
 test('graph connects merge parents across lanes',async()=>{
  const {commitGraph}=await load('../modules/ui/git-history/src/graph.ts');
- const graph=commitGraph([{id:'merge',parents:['a','b']},{id:'b',parents:['base']},{id:'a',parents:['base']},{id:'base',parents:[]}]);
- assert.equal(graph.size,4);assert.match(graph.get('merge'),/M8 24C8 40 20 40 20 58/);assert.match(graph.get('b'),/cx="20"/);
+ const {svgs,width,height}=commitGraph([{id:'merge',parents:['a','b']},{id:'b',parents:['base']},{id:'a',parents:['base']},{id:'base',parents:[]}]);
+ assert.equal(svgs.size,4);assert.equal(height,58);assert.equal(width,32);
+ assert.match(svgs.get('merge'),/M9 29C9 43.5 23 43.5 23 58/);assert.match(svgs.get('b'),/cx="23"/);
+ // A branch tip starts at its dot, and a root commit draws nothing below it.
+ assert.doesNotMatch(svgs.get('merge'),/M9 0/);assert.doesNotMatch(svgs.get('base'),/ 58"\/>/);
+ // Both branches converge onto the shared parent's lane.
+ assert.match(svgs.get('a'),/M9 29V58/);assert.match(svgs.get('a'),/M23 0C23 29 9 29 9 58/);
+ // Every row is drawn edge to edge at the row height.
+ for(const svg of svgs.values())assert.match(svg,new RegExp(`viewBox="0 0 ${width} 58"`));
+});
+test('graph names branch lines and highlights one',async()=>{
+ const {commitGraph}=await load('../modules/ui/git-history/src/graph.ts');
+ const commits=[{id:'m',parents:['a','f'],refs:'HEAD -> main, origin/main',subject:"Merge branch 'feature/x'"},{id:'f',parents:['base']},{id:'a',parents:['base'],refs:'tag: v1'},{id:'base',parents:[]}];
+ const g=commitGraph(commits);
+ assert.equal(g.branchName.get(g.branchOf.get('m')),'main, origin/main');
+ assert.equal(g.branchName.get(g.branchOf.get('f')),'feature/x');
+ assert.deepEqual(g.containedIn.get('base').sort(),['main','origin/main','v1']);
+ assert.deepEqual(g.containedIn.get('f').sort(),['main','origin/main']);
+ const lit=commitGraph(commits,58,g.branchOf.get('f'));
+ assert.match(lit.svgs.get('f'),/r="5.5"/);assert.match(lit.svgs.get('a'),/opacity="0.22"/);
+ assert.doesNotMatch(g.svgs.get('a'),/opacity/);
 });
 test('legacy task recovers the original worktree baseline rather than the latest commit',async()=>fixture(async({root,git,ctx,ops,settings})=>{
  const baseline=git('rev-parse','HEAD').trim();
