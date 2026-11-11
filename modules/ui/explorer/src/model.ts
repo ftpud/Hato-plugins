@@ -36,7 +36,7 @@ export function treeRows(dirs: Map<string, Entry[]>, expanded: Set<string>, sele
       if (rows.length >= 5000) return;
       let label = entry.name;
       const seen = new Set<string>();
-      while (entry.kind === "dir" && !seen.has(entry.relativePath)) {
+      while (!filtering && entry.kind === "dir" && !seen.has(entry.relativePath)) {
         seen.add(entry.relativePath);
         const children = dirs.get(entry.relativePath);
         if (children?.length !== 1 || children[0].kind !== "dir") break;

@@ -107,3 +107,28 @@ test('truncated remote Git output falls back to traversal instead of reporting a
   assert.equal(result.matchCount,1);assert.equal(result.partial,false);
  } finally {stopSearchIndexes();}
 });
+
+test('reindex keeps previous matches visible until replacement scan completes', async () => {
+ const {searchFiles,invalidateSearch,stopSearchIndexes}=await load();
+ let rebuilding=false,release;
+ const blocked=new Promise(resolve=>release=resolve);
+ const ctx={events:{emit(){}},host:{capabilities:{request:async()=>({grant:'fs'})},fs:{list:async(_g,path)=>{
+  if(path==='.')return {entries:[entry('src','dir')]};
+  if(rebuilding)await blocked;
+  return {entries:[entry(rebuilding?'new-needle.ts':'old-needle.ts')]};
+ }}}};
+ const d={...desc,id:'stable-reindex'};
+ try {
+  const first=await searchFiles(ctx,d,'needle');
+  assert.ok(first.entries.some(e=>e.relativePath==='src/old-needle.ts'));
+  rebuilding=true;invalidateSearch(d);
+  const during=await searchFiles(ctx,d,'needle');
+  assert.equal(during.indexing,true);
+  assert.deepEqual(during.entries,first.entries);
+  release();await new Promise(resolve=>setTimeout(resolve,0));
+  const complete=await searchFiles(ctx,d,'needle');
+  assert.equal(complete.indexing,false);
+  assert.ok(complete.entries.some(e=>e.relativePath==='src/new-needle.ts'));
+  assert.ok(!complete.entries.some(e=>e.relativePath==='src/old-needle.ts'));
+ } finally {release();stopSearchIndexes();}
+});

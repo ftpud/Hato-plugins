@@ -3,7 +3,7 @@ import type { ModuleContext } from "@hato/sdk/types";
 import { targetFor, workspaceGrant, withWorkspace, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 export interface IndexedEntry { name: string; kind: string; relativePath: string; size: number }
 interface Index {
-  entries: IndexedEntry[]; byPath: Map<string, IndexedEntry>; pending: Promise<void>;
+  entries: IndexedEntry[]; previous?: Map<string, IndexedEntry>; byPath: Map<string, IndexedEntry>; pending: Promise<void>;
   indexing: boolean; cancelled: boolean; dirty: boolean; skipped: number; error?: unknown; notified: number;
 }
 const indexes = new Map<string, Index>();
@@ -101,10 +101,12 @@ async function scan(ctx: ModuleContext, desc: WorkspaceDescriptor, index: Index,
   });
 }
 function start(ctx: ModuleContext, desc: WorkspaceDescriptor, hideIgnored: boolean, key: string): Index {
-  const index: Index = { entries: [], byPath: new Map(), pending: Promise.resolve(), indexing: true, cancelled: false, dirty: false, skipped: 0, notified: Date.now() };
+  const previous = indexes.get(key);
+  const index: Index = { previous: previous?.previous || previous?.byPath, entries: [], byPath: new Map(), pending: Promise.resolve(), indexing: true, cancelled: false, dirty: false, skipped: 0, notified: Date.now() };
   indexes.set(key, index);
   index.pending = scan(ctx, desc, index, hideIgnored).catch(error => { index.error = error; }).finally(() => {
     index.indexing = false;
+    if (!index.error) index.previous = undefined;
     publish(ctx, desc, index, true);
   });
   return index;
@@ -124,18 +126,21 @@ export async function searchFiles(ctx: ModuleContext, desc: WorkspaceDescriptor,
   let timer: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([index.pending, new Promise<void>(resolve => { timer = setTimeout(resolve, 100); })]);
   if (timer) clearTimeout(timer);
-  if (index.error && !index.entries.length) throw index.error;
+  if (index.error && !index.entries.length && !index.previous?.size) throw index.error;
+  // Keep the prior snapshot visible while the replacement index arrives. Add new
+  // paths in place; only a completed scan can establish that old paths disappeared.
+  const entries = index.previous ? new Map([...index.previous, ...index.byPath]) : index.byPath;
   const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
   let matchCount = 0;
   const visible = new Map<string, IndexedEntry>();
-  for (const entry of index.entries) {
+  for (const entry of entries.values()) {
     if (!words.every(word => entry.relativePath.toLowerCase().includes(word))) continue;
     if (++matchCount > 1000) continue;
     visible.set(entry.relativePath, entry);
     let parent = entry.relativePath;
     while (parent.includes("/")) {
       parent = parent.slice(0, parent.lastIndexOf("/"));
-      const ancestor = index.byPath.get(parent); if (ancestor) visible.set(parent, ancestor);
+      const ancestor = entries.get(parent); if (ancestor) visible.set(parent, ancestor);
     }
   }
   return { entries: [...visible.values()], matchCount, indexedCount: index.entries.length, indexing: index.indexing || index.dirty,

@@ -46,6 +46,7 @@ async function loadDir(ctx: ModuleContext, path: string, version = epoch) {
 // Refresh cached listings in place so watch events never blank the visible tree.
 let refreshing = false;
 let refreshAgain = false;
+let treeDirty = false;
 async function refreshTree(ctx: ModuleContext) {
   if (refreshing) { refreshAgain = true; return; }
   refreshing = true;
@@ -54,6 +55,8 @@ async function refreshTree(ctx: ModuleContext) {
       refreshAgain = false;
       const version = epoch, workspaceId = ws?.id;
       if (!workspaceId) return;
+      if (query.trim()) { treeDirty = true; await search(ctx); continue; }
+      treeDirty = false;
       const paths = [...dirs.keys()];
       const listings = await Promise.all(paths.map(async path => {
         try {
@@ -94,7 +97,7 @@ async function search(ctx: ModuleContext, refresh = false) {
       : await ctx.modules.call("files", "search", { workspaceId, query: text, refresh, hideIgnored: !showIgnored }, { timeoutMs: 120000 });
     if (contentMode && version === searchVersion && ws?.id === workspaceId) { grep = next; results = null; error = null; return; }
     if (version === searchVersion && ws?.id === workspaceId) { results = next; error = null; }
-  } catch (e) { if (version === searchVersion && ws?.id === workspaceId) { error = errMsg(e); results = null; } }
+  } catch (e) { if (version === searchVersion && ws?.id === workspaceId) { error = errMsg(e); } }
   finally { if (version === searchVersion) searching = false; ctx.ui.invalidate(); }
 }
 const filteredEntries = (): Entry[] => contentMode ? matchingFileEntries(grep?.files || []) : results?.entries || [];
@@ -109,9 +112,10 @@ async function reveal(ctx: ModuleContext) {
   ctx.ui.invalidate();
 }
 async function reset(ctx: ModuleContext, saved?: any) {
+  treeDirty = false;
   gitFiles = []; gitVersion++;
   void refreshGit(ctx);
-  const version = ++epoch; searchVersion++; ctx.ui.invalidate(); dirs = new Map(); pending = new Set(); filterCollapsed = new Set(); results = null; searching = false; error = null;
+  const version = ++epoch; searchVersion++; ctx.ui.invalidate(); dirs = new Map(); pending = new Set(); filterCollapsed = new Set(saved?.filterCollapsed || []); results = null; searching = false; error = null;
   expanded = new Set(saved?.expanded || ws?.view?.ui?.explorerTree?.expanded || []);
   query = saved?.query || ""; grep = null;
   if (saved && typeof saved.showIgnored === "boolean") showIgnored = saved.showIgnored;
@@ -140,7 +144,7 @@ const mod: AppModule = {
     const savedView = ws?.view?.ui?.explorerTree;
     await reset(ctx, prev?.workspaceId === ws?.id ? prev : savedView ? { showIgnored: !!savedView.showIgnored, contentMode: false } : null);
   },
-  snapshot: () => ({ workspaceId: ws?.id || null, expanded: [...expanded], query, showIgnored, contentMode }),
+  snapshot: () => ({ workspaceId: ws?.id || null, expanded: [...expanded], filterCollapsed: [...filterCollapsed], query, showIgnored, contentMode }),
   render(): UiNode {
     const filtering = !!query.trim();
     const grepping = filtering && contentMode;
@@ -186,13 +190,16 @@ const mod: AppModule = {
     const version = epoch;
     try {
       if (ev.action === "filter") {
-        query = String(ev.value || ""); filterCollapsed.clear(); results = null; grep = null; searchVersion++;
+        const nextQuery = String(ev.value || "");
+        if (nextQuery === query) return;
+        query = nextQuery; filterCollapsed.clear(); results = null; grep = null; searchVersion++;
         const go = contentMode ? query.trim().length >= 2 : !!query.trim();
         searching = go; if (go) (contentMode ? grepSoon : searchSoon)();
+        else if (treeDirty) void refreshTree(ctx);
         ctx.ui.invalidate(); return;
       }
       if (ev.action === "submitFilter") { if (query.trim()) await search(ctx); return; }
-      if (ev.action === "clearFilter") { query = ""; results = null; grep = null; searching = false; searchVersion++; ctx.ui.invalidate(); return; }
+      if (ev.action === "clearFilter") { query = ""; results = null; grep = null; searching = false; searchVersion++; if (treeDirty) void refreshTree(ctx); ctx.ui.invalidate(); return; }
       if (ev.action === "toggleContent") { contentMode = !contentMode; results = null; grep = null; searchVersion++; if (query.trim()) await search(ctx); else ctx.ui.invalidate(); return; }
       if (ev.action === "toggleIgnored") {
         showIgnored = !showIgnored;
