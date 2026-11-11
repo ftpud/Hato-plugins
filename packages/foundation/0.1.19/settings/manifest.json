@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 2,
+  "id": "settings",
+  "kind": "ui",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [],
+  "capabilities": [
+    "modules.read",
+    "plugins.manage",
+    "ui.dialog",
+    "net.fetch",
+    "fs.scope"
+  ],
+  "stateVersion": 1,
+  "description": "Settings menu and module-contributed preferences.",
+  "contributes": {
+    "overlays": [
+      true
+    ]
+  },
+  "author": "Hato contributors",
+  "version": "0.1.19",
+  "pluginPackage": "foundation",
+  "pluginType": "System",
+  "calls": [
+    "persistence"
+  ]
+}
