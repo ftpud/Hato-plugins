@@ -244,3 +244,30 @@ test('language MCP configuration is scoped to the authenticated workspace and re
   assert.ok(c.events.some(e=>e.name==='language-service.configurationChanged'));
  } finally {await mod.deactivate(c.ctx);}
 });
+
+for (const location of ['local','ssh']) test(`JDTLS stays warm across ${location} workspace switches and evicts old servers gracefully`, async()=>{
+ const {default:mod}=await load('modules/services/language-service/src/index.ts');const c=context(location);
+ const workspaces=new Map([['ws',c.workspace],...['b','c','d'].map(id=>[id,{...c.workspace,id,rootAbsolutePath:`/srv/project-${id}`}])]);
+ const original=c.ctx.modules.call;
+ c.ctx.modules.call=async(id,m,a)=>id==='workspace'?workspaces.get(a.workspaceId):original(id,m,a);
+ const lifecycle=[],write=c.ctx.host.process.write,terminate=c.ctx.host.process.terminate;
+ c.ctx.host.process.write=async(handle,frame)=>{lifecycle.push({handle,method:JSON.parse(frame.split('\r\n\r\n')[1]).method});return write(handle,frame);};
+ c.ctx.host.process.terminate=async(handle)=>{lifecycle.push({handle,method:'terminate'});return terminate(handle);};
+ await mod.activate(c.ctx);
+ const open=async id=>{c.watchers['workspace.selected'](workspaces.get(id));await new Promise(setImmediate);return mod.methods.hover(c.ctx,{workspaceId:id,path:'Main.java',text:'class Main {}',position:{line:0,character:6}});};
+ try {
+  await open('ws');await open('b');await open('ws');
+  assert.equal(c.processes.length,2,'returning to a workspace reuses its initialized JDTLS process');
+  assert.ok(c.processes.every(p=>!p.stopped));
+  await open('c');await open('d');await new Promise(setImmediate);
+  const evicted=c.processes[1];assert.equal(evicted.stopped,true,'least recently used server is evicted');assert.equal(c.processes[0].stopped,false,'recently revisited server stays warm');
+  const events=lifecycle.filter(e=>e.handle===evicted.handle).map(e=>e.method);
+  assert.ok(events.indexOf('shutdown')>=0);assert.ok(events.indexOf('exit')>events.indexOf('shutdown'));assert.ok(events.indexOf('terminate')>events.indexOf('exit'));
+  const firstData=c.calls.find(x=>x.run?.args?.includes(workspaces.get('b').rootAbsolutePath)).run.args;
+  await open('b');await new Promise(setImmediate);
+  const secondData=c.calls.filter(x=>x.run?.args?.includes(workspaces.get('b').rootAbsolutePath)).at(-1).run.args;
+  assert.deepEqual(secondData,firstData,'evicted workspaces reuse their durable index generation');
+  assert.ok(!c.calls.some(x=>x.method==='scoped.set'&&x.a?.key?.endsWith('.index')),'workspace switches must not request a fresh index');
+ }finally{await mod.deactivate(c.ctx);}
+ assert.ok(c.processes.every(p=>p.stopped));
+});

@@ -33,7 +33,7 @@ export function signature(r: { branch?: string | null; files?: Change[] } | null
 }
 
 export interface ChangeNode { name: string; path: string; file?: Change; children: ChangeNode[]; paths: string[] }
-/** Directory hierarchy, with folders before files and stable sorting within each level. */
+/** Compact single-child directory chains, retaining the deepest path for selection and expansion. */
 export function changeTree(changes: Change[]): ChangeNode[] {
   const root: ChangeNode = { name: "", path: "", children: [], paths: [] };
   const folders = new Map<string, ChangeNode>([["", root]]);
@@ -49,6 +49,12 @@ export function changeTree(changes: Change[]): ChangeNode[] {
     }
     parent.children.push({ name: parts[parts.length - 1], path: file.path, file, children: [], paths: [file.path] });
   }
-  const sort = (nodes: ChangeNode[]): ChangeNode[] => nodes.sort((a, b) => Number(!!a.file) - Number(!!b.file) || a.name.localeCompare(b.name)).map(n => ({ ...n, children: sort(n.children) }));
+  const sort = (nodes: ChangeNode[]): ChangeNode[] => nodes.sort((a, b) => Number(!!a.file) - Number(!!b.file) || a.name.localeCompare(b.name)).map(n => {
+    let leaf = n, name = n.name;
+    while (!leaf.file && leaf.children.length === 1 && !leaf.children[0].file) {
+      leaf = leaf.children[0]; name += "/" + leaf.name;
+    }
+    return { ...leaf, name, children: sort(leaf.children) };
+  });
   return sort(root.children);
 }

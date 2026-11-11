@@ -5,7 +5,7 @@ const panel=new LanguagePanel();
 let workspace:any=null, servers:any[]=[], serverId="", epoch=0;
 // Per-server state for the selected workspace: whether the project uses it, and its last phase.
 let projects:Record<string,{enabled:boolean;phase:string;message?:string}>={};
-async function refresh(ctx:ModuleContext) {
+async function refresh(ctx:ModuleContext, preferredServer?:string) {
  const version=++epoch;
  try {
   const next=await ctx.modules.call("language-service","servers",{});
@@ -20,7 +20,8 @@ async function refresh(ctx:ModuleContext) {
   projects=states;
   // Prefer a server this project uses; otherwise keep the panel pointed at the first one.
   const enabled=servers.filter(s=>projects[s.id]?.enabled);
-  if(!servers.some(s=>s.id===serverId)||!projects[serverId]?.enabled&&enabled.length)serverId=(enabled[0]||servers[0])?.id || "";
+  if(preferredServer&&servers.some(s=>s.id===preferredServer))serverId=preferredServer;
+  else if(!servers.some(s=>s.id===serverId)||!panel.open&&!projects[serverId]?.enabled&&enabled.length)serverId=(enabled[0]||servers[0])?.id || "";
   if(workspace&&serverId)await panel.attach(ctx,workspace.id,serverId,"");
   else panel.reset();
   publish(ctx);
@@ -62,7 +63,7 @@ export default {
   });
   ctx.events.on("language-status.settings",async(event:any)=>{
    if(typeof event?.serverId==="string"&&servers.some(s=>s.id===event.serverId))serverId=event.serverId;
-   panel.reset();await refresh(ctx);panel.open=true;publish(ctx);
+   panel.reset();await refresh(ctx,serverId);panel.open=true;publish(ctx);
   });
   await refresh(ctx);
  },
@@ -77,7 +78,7 @@ export default {
   return overlay;
  },
  async onEvent(ctx,event){
-  if(event.action==="selectServer"){serverId=String(event.value);panel.reset();await refresh(ctx);panel.open=true;publish(ctx);return;}
+  if(event.action==="selectServer"){serverId=String(event.value);panel.reset();await refresh(ctx,serverId);panel.open=true;publish(ctx);return;}
   const selectedWorkspace=workspace?.id;
   const needsDocument = event.action === "languageSymbols" && panel.scope === "file" || ["languageApply","languageRestart","languageReindex"].includes(event.action);
   const source=needsDocument?await document(ctx).catch(()=>null):null;

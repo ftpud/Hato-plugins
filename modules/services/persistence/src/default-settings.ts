@@ -20,19 +20,19 @@ export const defaultSettings: Record<string, any> = {
           "ai"
         ],
         "sizes": [
-          0.27761676080176945,
-          0.7223832391982306
+          0.24940688908100128,
+          0.7505931258201599
         ],
-        "size": 0.3348941206932068
+        "size": 0.2661226987838745
       },
       {
         "panels": [
-          "viewer"
+          "git-changes"
         ],
         "sizes": [
           1
         ],
-        "size": 0.24116086959838867
+        "size": 0.2965085506439209
       },
       {
         "panels": [
@@ -40,14 +40,14 @@ export const defaultSettings: Record<string, any> = {
           "git"
         ],
         "sizes": [
-          0.5704587697982788,
-          0.4295412302017212
+          0.3997996658056925,
+          0.6002003341943075
         ],
-        "size": 0.17483821511268616
+        "size": 0.1882619857788086
       },
       {
         "panels": [
-          "agents"
+          "mcps"
         ],
         "sizes": [
           1
@@ -65,29 +65,33 @@ export const defaultSettings: Record<string, any> = {
       "collapsed": false
     },
     "mainSizes": [
-      0.7827808027630805,
-      0.2172191972369195
+      0.7367000579833984,
+      0.26329997181892395
     ],
     "collapsed": {
       "ai": false,
       "files": false,
       "viewer": false,
-      "workflows": false,
+      "workflows": true,
       "terminal": true,
       "agents": false,
       "projects": false,
       "git": false,
       "mcps": true,
       "git-changes": false,
-      "remote": false
+      "remote": false,
+      "git-history": false,
+      "git-task-changes": false
     },
     "floating": {},
     "detached": {},
     "hidden": [
       "workflows",
+      "viewer",
+      "git-task-changes",
       "remote",
-      "git-changes",
-      "mcps"
+      "agents",
+      "git-history"
     ],
     "bars": {
       "top": {
@@ -138,12 +142,14 @@ export const defaultSettings: Record<string, any> = {
     "git": "right-top",
     "remote": "right-bottom",
     "viewer": "right-top",
-    "git-changes": "right-bottom",
+    "git-changes": "right-top",
     "workflows": "left-bottom",
     "terminal": "left-bottom",
     "ai": "left-top",
     "agents": "right-bottom",
-    "mcps": "right-bottom"
+    "mcps": "right-bottom",
+    "git-history": "left-bottom",
+    "git-task-changes": "right-top"
   },
   "panel-sharing.v1": {
     "viewer": "space-1",
@@ -153,7 +159,11 @@ export const defaultSettings: Record<string, any> = {
     "remote": "space-11",
     "ai": "space-3",
     "mcps": "space-11",
-    "agents": "space-11"
+    "agents": "space-11",
+    "git": "space-9",
+    "git-task-changes": "space-9",
+    "terminal": "space-13",
+    "git-history": "space-13"
   },
   "sidebar-order.v1": {
     "left-top": [
@@ -163,15 +173,17 @@ export const defaultSettings: Record<string, any> = {
     ],
     "left-bottom": [
       "workflows",
+      "git-history",
       "terminal"
     ],
     "right-top": [
       "files",
       "git",
-      "viewer"
+      "git-task-changes",
+      "viewer",
+      "git-changes"
     ],
     "right-bottom": [
-      "git-changes",
       "mcps",
       "agents",
       "remote"

@@ -9,11 +9,18 @@ export default {
  render(ctx):UiNode {
   const status:any=ctx.state.get("language-tools.status");
   const servers:any[]=Array.isArray(status?.servers)?status.servers:[];
-  const items:UiNode[]=servers.length?servers.map((s:any):UiNode=>({type:"row",key:`server:${s.id}`,gap:4,align:"center",children:[
-   {type:"button",key:"toggle",text:`${s.enabled?"✓":"  "}  ${s.title}`,action:"toggle",value:s.id,variant:"ghost",small:true,grow:true,disabled:!status?.workspace,
-    tooltip:s.enabled?`Stop treating this workspace as a ${s.title} project`:`Treat this workspace as a ${s.title} project`},
-   ...(s.enabled?[{type:"label",key:"phase",text:s.phase,size:"xs",color:"muted"} as UiNode]:[]),
-   {type:"button",key:"settings",text:"Settings…",action:"settings",value:s.id,variant:"ghost",small:true,disabled:!status?.workspace},
+  const items:UiNode[]=servers.length?servers.map((s:any):UiNode=>({type:"column",key:`server:${s.id}`,gap:2,style:{paddingY:4},children:[
+   {type:"row",key:"server-header",gap:4,align:"center",children:[
+    {type:"column",key:"server-name",grow:true,children:[
+     {type:"button",key:"toggle",text:`${s.enabled?"✓":"  "}  ${s.title}`,action:"toggle",value:s.id,variant:"ghost",small:true,disabled:!status?.workspace,
+      tooltip:s.enabled?`Stop treating this workspace as a ${s.title} project`:`Treat this workspace as a ${s.title} project`},
+    ]},
+    ...(s.enabled?[{type:"label",key:"phase",text:s.phase,size:"xs",color:"muted",style:{noShrink:true}} as UiNode]:[]),
+   ]},
+   {type:"row",key:"server-actions",children:[
+    {type:"button",key:"settings",text:"Project settings…",action:"settings",value:s.id,variant:"ghost",small:true,disabled:!status?.workspace,
+     tooltip:`Open ${s.title} settings for the selected project or task`},
+   ]},
   ]})):[{type:"label",key:"none",text:"No language plugins are installed.",size:"sm",color:"muted"}];
   return {type:"row",key:"language-status",gap:4,align:"center",children:[
    {type:"dropdown",key:"languages",text:status?.label?`lng-srv · ${status.label}`:"lng-srv",tooltip:status?.message||"Language servers for this workspace",open,action:"menu",variant:"ghost",menuWidth:320,maxHeight:360,children:[

@@ -18,9 +18,19 @@ const grantWrite = (ctx: ModuleContext) => (srcWrite ??= ctx.host.capabilities.r
 const grantShared = (ctx: ModuleContext) => (shared ??= ctx.host.capabilities.request({ kind: "fs", root: ctx.host.env.info().sharedDir, write: true }).then((g) => g.grant).catch((e) => { shared = null; throw e; }));
 
 async function moduleDir(ctx: ModuleContext, id: string): Promise<string> {
+  if (!/^[a-z0-9][a-z0-9._-]{0,47}$/i.test(id)) throw new Error("Invalid module ID");
   const d: any = await ctx.host.modules.describe(id);
-  // sourceDir is repo-relative, e.g. "modules/ui/projects-panel"
-  return String(d.sourceDir).replace(/\\/g, "/").replace(/^modules\//, "");
+  const source = String(d.sourceDir || "").replace(/\\/g, "/").replace(/^modules\//, "");
+  if (source === `services/${id}` || source === `ui/${id}`) return source;
+  // Installed bundles live outside the source grant. Find their editable checkout counterpart
+  // through the existing modules-scoped filesystem capability, never /src/index.ts.
+  const kind = d.manifest?.kind === "service" ? "services" : d.manifest?.kind === "ui" ? "ui" : null;
+  if (kind) {
+    const dir = `${kind}/${id}`;
+    try { await ctx.host.fs.stat(await grantRead(ctx), `${dir}/manifest.json`); return dir; }
+    catch (e: any) { if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") throw e; }
+  }
+  throw Object.assign(new Error(`Editable source is not available for ${id}. Update this installed plugin through Settings → Plugins.`), { code: "ESOURCEUNAVAILABLE" });
 }
 
 /** Normalize an agent-supplied path to a modules/-relative path inside the module directory. */
@@ -142,11 +152,23 @@ async function readSrc(ctx: ModuleContext, rel: string): Promise<string | null> 
 }
 
 /** Run esbuild for a module (output to stdout). Does not stage anything. */
-async function compile(ctx: ModuleContext, id: string): Promise<{ ok: boolean; code: string; diagnostics: string; ms: number; error?: string }> {
+async function compile(ctx: ModuleContext, id: string): Promise<{ ok: boolean; code: string; diagnostics: string; ms: number; error?: string; unavailable?: boolean }> {
   const info = await ctx.host.modules.sourceInfo();
   if (!info.buildTool) return { ok: false, code: "", diagnostics: "", ms: 0, error: "esbuild is not installed in the repository (run `npm ci`)" };
   const d: any = await ctx.host.modules.describe(id);
-  const entry = `${d.sourceDir}/${d.manifest.entry}`;
+  let dir: string;
+  try { dir = await moduleDir(ctx, id); }
+  catch (e: any) { return { ok: false, code: "", diagnostics: "", ms: 0, error: errMsg(e), unavailable: e?.code === "ESOURCEUNAVAILABLE" }; }
+  let manifest = d.manifest;
+  const reported = String(d.sourceDir || "").replace(/\\/g, "/").replace(/^modules\//, "");
+  if (reported !== dir) {
+    const local = await ctx.host.fs.read(await grantRead(ctx), `${dir}/manifest.json`, 256 * 1024);
+    manifest = JSON.parse(local.text || "{}");
+    if (manifest.id !== id || manifest.kind !== d.manifest.kind) throw new Error("Editable manifest does not match the installed module");
+  }
+  const relative = String(manifest.entry || "").replace(/^\.\//, "");
+  if (!relative || relative.startsWith("/") || relative.includes("\\") || relative.split("/").includes("..")) throw new Error("Module entry must be inside its source directory");
+  const entry = `modules/${dir}/${relative}`;
   const g = await ctx.host.capabilities.request({ kind: "build" });
   const t0 = Date.now();
   try {
@@ -184,7 +206,7 @@ async function build(ctx: ModuleContext, id: string) {
 // A module has an update when building its current source produces a different artifact than the
 // active one (exact: SHA-256 of the esbuild output vs the kernel's recorded artifact hash). Cheap
 // source fingerprints (path/size/mtime) decide when a module needs to be re-checked.
-interface UpdateInfo { id: string; kind: string; active: string | null; status: "current" | "update-available" | "build-error" | "unknown"; builtHash: string | null; activeHash: string | null; diagnostics: string; fingerprint: string; checkedAt: number }
+interface UpdateInfo { id: string; kind: string; active: string | null; status: "current" | "update-available" | "build-error" | "source-unavailable" | "unknown"; builtHash: string | null; activeHash: string | null; diagnostics: string; fingerprint: string; checkedAt: number }
 const updates = new Map<string, UpdateInfo>();
 let scanning: Promise<UpdateInfo[]> | null = null;
 
@@ -205,20 +227,22 @@ async function scan(ctx: ModuleContext, full: boolean): Promise<UpdateInfo[]> {
   scanning = (async () => {
     const mods: any[] = await ctx.host.modules.list();
     let changed = false;
+    const known = new Set(mods.map(m => m.id));
+    for (const id of updates.keys()) if (!known.has(id)) { updates.delete(id); changed = true; }
     for (const m of mods) {
       const prev = updates.get(m.id);
       const activeHash = m.active ? m.active.sha256 : null;
       let fp = "";
       try { fp = await fingerprint(ctx, m.id); } catch { fp = "?"; }
       if (!full && prev && prev.fingerprint === fp && prev.activeHash === activeHash) continue;
-      const c = await compile(ctx, m.id).catch((e) => ({ ok: false, code: "", diagnostics: "", ms: 0, error: errMsg(e) }));
+      const c = await compile(ctx, m.id).catch((e) => ({ unavailable: false, ok: false, code: "", diagnostics: "", ms: 0, error: errMsg(e) }));
       let builtHash: string | null = null;
       let hashError = "";
       if (c.ok) {
         try { builtHash = await sha256HexAsync(c.code); }
         catch (e) { hashError = `Cannot check compiled module: ${errMsg(e)}`; }
       }
-      const status: UpdateInfo["status"] = !c.ok || hashError ? "build-error" : !activeHash ? "update-available" : builtHash === activeHash ? "current" : "update-available";
+      const status: UpdateInfo["status"] = c.unavailable ? "source-unavailable" : !c.ok || hashError ? "build-error" : !activeHash ? "update-available" : builtHash === activeHash ? "current" : "update-available";
       const info: UpdateInfo = { id: m.id, kind: m.kind, active: m.active ? m.active.label : null, status, builtHash, activeHash, diagnostics: hashError || (c.ok ? c.diagnostics : `${c.error || ""}\n${c.diagnostics}`.trim()), fingerprint: fp, checkedAt: Date.now() };
       if (!prev || prev.status !== info.status || prev.builtHash !== info.builtHash || prev.active !== info.active) changed = true;
       updates.set(m.id, info);

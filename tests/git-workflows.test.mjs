@@ -152,3 +152,30 @@ test('history diff settings persist, synchronize with toolbar and retain the sel
  diff=walk(history.render()).find(n=>n.type==='diff');assert.equal(diff.mode,'split');assert.equal(diff.softWrap,false);assert.equal(diff.filesCollapsed,false);assert.equal(diff.document,'preview-handle');
  history.deactivate();
 });
+test('Create Task uses one branch field with compact native rows and resolves local, remote and new branches', async () => {
+ const {taskDialog,taskBranchChoice}=await load('../modules/ui/projects-panel/src/task-dialog.ts');
+ const branches=[{ref:'refs/heads/main',name:'main',worktree:'/project'},{ref:'refs/heads/feature/login',name:'feature/login'},{ref:'refs/remotes/origin/fix',name:'origin/fix',remote:true}];
+ const dialog=taskDialog({branches,query:'',selected:'',loading:false,busy:false,error:null});const nodes=walk(dialog);
+ assert.equal(dialog.title,'Create Task');
+ assert.equal(nodes.filter(n=>n.type==='textInput').length,1);
+ assert.equal(nodes.find(n=>n.key==='tf-create').disabled,true);
+ assert.equal(nodes.some(n=>n.type==='choice'),false);
+ assert.deepEqual(nodes.find(n=>n.key==='task-branches').rows.map(r=>[r.label,r.badge]),[['main','in use'],['feature/login','existing'],['origin/fix','remote']]);
+ const footer=nodes.find(n=>n.key==='task-footer');assert.deepEqual(footer.children.map(n=>n.key),['task-footer-space','tf-cancel','tf-create']);
+ assert.deepEqual(taskBranchChoice(branches,'feature/login',''),{name:'feature/login',branch:'feature/login'});
+ assert.deepEqual(taskBranchChoice(branches,'origin/fix','refs/remotes/origin/fix'),{name:'origin/fix',branch:'refs/remotes/origin/fix'});
+ assert.deepEqual(taskBranchChoice(branches,'feature/new',''),{name:'feature/new',branch:'feature/new'});
+ assert.throws(()=>taskBranchChoice(branches,'main',''),/already open/);
+ assert.throws(()=>taskBranchChoice(branches,'  ',''),/Choose a branch/);
+ const selected=walk(taskDialog({branches,query:'feature/login',selected:'feature/login',loading:false,busy:false,error:null}));
+ assert.equal(selected.find(n=>n.key==='tf-create').disabled,false);
+ assert.equal(selected.find(n=>n.key==='task-branches').rows.length,1);
+});
+test('compact change folders retain real leaf paths and stop at files or branching directories',async()=>{
+ const {changeTree}=await load('../modules/ui/git-panel/src/model.ts');
+ const files=['folder1/folder2/file.ts','src/pkg/a/a.ts','src/pkg/b/b.ts','mixed/direct.ts','mixed/deeper/nested/other.ts'].map(path=>({path,kind:'modified'}));
+ const tree=changeTree(files);
+ const compact=tree.find(n=>n.name==='folder1/folder2');assert.equal(compact.path,'folder1/folder2');assert.deepEqual(compact.paths,['folder1/folder2/file.ts']);assert.equal(compact.children[0].file,files[0]);
+ const branching=tree.find(n=>n.name==='src/pkg');assert.deepEqual(branching.children.map(n=>n.name),['a','b']);
+ const mixed=tree.find(n=>n.name==='mixed');assert.deepEqual(mixed.children.map(n=>n.name),['deeper/nested','direct.ts']);assert.equal(mixed.children[0].path,'mixed/deeper/nested');
+});

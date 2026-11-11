@@ -13,11 +13,15 @@ import { get as scopedGet, set as scopedSet } from "@hato/sdk/scoped-settings";
 interface Session {
   key: string; workspace: WorkspaceDescriptor; server: LanguageServerSpec; handle: string; peer: LspPeer;
   subscriptions: StreamSubscription[]; documents: Map<string, { text: string; version: number }>;
-  capabilities: any; queue: Promise<any>; stderr: string;
+  closing: boolean; initialized: boolean; capabilities: any; queue: Promise<any>; stderr: string;
 }
 let languages: LanguageDefinition[] = [];
 let publishSettings = (_error?: string | null) => {};
 const sessions = new Map<string, Promise<Session>>();
+const sessionUse = new Map<string, number>();
+const retiring = new Map<string, Promise<void>>();
+let access = 0, warmSessions = 3;
+let evictionQueue: Promise<void> = Promise.resolve();
 const paths = new Map<string, string>();
 const statuses = new Map<string, any>();
 function sessionKey(d: WorkspaceDescriptor, server: LanguageServerSpec) { return `${d.machineId}|${d.rootAbsolutePath}|${server.id}`; }
@@ -38,21 +42,50 @@ let dependencies: LanguageDependencies | null = null;
 let mcp: ReturnType<typeof exportMcpTools> | null = null;
 function servers() { return [...new Map(languages.filter(l => l.server).map(l => [l.server!.id, l.server!])).values()]; }
 function sections(): SettingsSection[] {
-  return servers().map(server => ({ key: server.id, title: server.id, group: "Languages", fields: [
+  return [{ key: "language-service", title: "Language server cache", group: "Languages", fields: [
+    { key: "warmSessions", label: "Keep recent servers running", type: "select" as const, value: String(warmSessions),
+      options: [1, 2, 3, 5].map(n => ({ value: String(n), label: `${n} ${n === 1 ? "server" : "servers"}` })),
+      description: "Reuse language servers and their indexes when switching workspaces. Closed servers retain their on-disk cache." },
+  ] }, ...servers().map((server): SettingsSection => ({ key: server.id, title: server.id, group: "Languages", fields: [
     { key: "executable", label: "Language server executable", type: "text", value: paths.get(server.id) || server.executable,
       description: `${selected?.location === "ssh" ? "Remote" : "Local"} executable for this workspace. Press Enter to apply. ${server.installHint}` },
     ...(dependencies?.fields(server) || []),
-  ] }));
+  ] }))];
 }
 async function dispose(ctx: ModuleContext, session: Session) {
+  session.closing = true;
+  // The shutdown response lets the server finish saving its workspace/index before exit.
+  await session.queue.catch(() => {});
+  if (session.initialized && session.peer.alive) {
+    try { await session.peer.request("shutdown", null, 10000); await session.peer.notify("exit"); } catch {}
+  }
   session.peer.fail("Language server stopped");
   await Promise.all(session.subscriptions.map(sub => sub.close().catch(() => {})));
   await ctx.host.process.terminate(session.handle).catch(() => {});
   await ctx.host.resources.release(session.handle).catch(() => {});
 }
 async function stopSessions(ctx: ModuleContext) {
-  const previous = [...sessions.values()]; sessions.clear();
-  await Promise.all(previous.map(p => p.then(s => dispose(ctx, s)).catch(() => {})));
+  const previous = [...sessions.values()]; sessions.clear(); sessionUse.clear();
+  await Promise.all([...previous.map(p => p.then(s => dispose(ctx, s)).catch(() => {})), ...retiring.values()]);
+}
+function trimSessions(ctx: ModuleContext, keep: string) {
+  const trim = evictionQueue.catch(() => {}).then(async () => {
+    while (!stopped && sessions.size > warmSessions) {
+      const victim = [...sessions.keys()].filter(key => key !== keep).sort((a, b) => (sessionUse.get(a) || 0) - (sessionUse.get(b) || 0))[0];
+      if (!victim) return;
+      const pending = sessions.get(victim)!;
+      sessions.delete(victim); sessionUse.delete(victim);
+      const closing = pending.then(async s => {
+        await dispose(ctx, s);
+        report(ctx, s.workspace, s.server, { phase: "idle", message: "Index cached on disk; server will resume on demand" });
+      }).catch(() => {});
+      retiring.set(victim, closing);
+      await closing;
+      if (retiring.get(victim) === closing) retiring.delete(victim);
+    }
+  });
+  evictionQueue = trim;
+  return trim;
 }
 async function refresh(ctx: ModuleContext) {
   const mine = ++refreshVersion;
@@ -89,7 +122,7 @@ async function start(ctx: ModuleContext, d: WorkspaceDescriptor, server: Languag
     handle = (await ctx.host.process.spawn(grant.grant, { target: await targetFor(ctx, d), executable, args, cwd: d.rootAbsolutePath, loginShell: d.location === "ssh" })).handle;
   } catch (error) { throw new Error(`${server.id} on ${d.machineId}: ${errMsg(error)}. ${server.installHint}`); }
   const peer = new LspPeer(frame => ctx.host.process.write(handle, frame));
-  const s: Session = { key, workspace: d, server, handle, peer, subscriptions: [], documents: new Map(), capabilities: {}, queue: Promise.resolve(), stderr: "" };
+  const s: Session = { key, workspace: d, server, handle, peer, subscriptions: [], documents: new Map(), closing: false, initialized: false, capabilities: {}, queue: Promise.resolve(), stderr: "" };
   peer.onRequest = async (method, params) => {
     if (method === "workspace/configuration") return (params?.items || []).map((item: any) => configValue(server.settings || {}, item.section));
     if (method === "workspace/workspaceFolders") return [{ uri: documentUri(d.rootAbsolutePath, ".hato-root").replace(/\/\.hato-root$/, ""), name: d.name }];
@@ -123,7 +156,7 @@ async function start(ctx: ModuleContext, d: WorkspaceDescriptor, server: Languag
   try {
     s.subscriptions.push(await ctx.host.streams.listen(handle, { channel: "stdout", encoding: "base64" }, chunk => {
       try { peer.feed(decodeBase64(chunk)); } catch (error) { peer.fail(error); }
-    }, error => { const message = error ? errMsg(error) : `${server.id} exited. ${s.stderr.slice(-1500)}`; peer.fail(message); report(ctx, d, server, { phase: "error", message }); }));
+    }, error => { if (s.closing) return; const message = error ? errMsg(error) : `${server.id} exited. ${s.stderr.slice(-1500)}`; peer.fail(message); report(ctx, d, server, { phase: "error", message }); }));
     s.subscriptions.push(await ctx.host.streams.listen(handle, { channel: "stderr" }, chunk => { s.stderr = (s.stderr + chunk).slice(-4000); }));
     const rootUri = documentUri(d.rootAbsolutePath, ".hato-root").replace(/\/\.hato-root$/, "");
     const initialized = await peer.request("initialize", {
@@ -139,6 +172,7 @@ async function start(ctx: ModuleContext, d: WorkspaceDescriptor, server: Languag
     }, 120000);
     s.capabilities = initialized?.capabilities || {};
     if (s.capabilities.positionEncoding && s.capabilities.positionEncoding !== "utf-16") throw new Error("Server selected an unsupported position encoding");
+    s.initialized = true;
     await peer.notify("initialized", {});
     await peer.notify("workspace/didChangeConfiguration", { settings: server.settings || {} });
     report(ctx, d, server, { ...(!statuses.get(key)?.importError ? { phase: "ready", message: "Connected; project import may still be running" } : {}), capabilities: s.capabilities });
@@ -147,6 +181,8 @@ async function start(ctx: ModuleContext, d: WorkspaceDescriptor, server: Languag
 }
 async function sessionFor(ctx: ModuleContext, d: WorkspaceDescriptor, server: LanguageServerSpec): Promise<Session> {
   const key = `${d.machineId}|${d.rootAbsolutePath}|${server.id}`;
+  await retiring.get(key);
+  sessionUse.set(key, ++access);
   let pending = sessions.get(key);
   if (pending) {
     const existing = await pending;
@@ -157,7 +193,9 @@ async function sessionFor(ctx: ModuleContext, d: WorkspaceDescriptor, server: La
     pending = start(ctx, d, server, key).catch(error => { if (statuses.get(key)?.phase !== "disabled") report(ctx, d, server, { phase: "error", message: errMsg(error) }); throw error; }); sessions.set(key, pending);
     pending.catch(() => { if (sessions.get(key) === pending) sessions.delete(key); });
   }
-  return pending;
+  const session = await pending;
+  void trimSessions(ctx, key).catch(e => ctx.log.warn("language server cache", errMsg(e)));
+  return session;
 }
 async function synchronize(s: Session, path: string, text: string) {
   const language = languageForPath(languages, path);
@@ -207,6 +245,8 @@ const mod: AppModule = {
   id: "language-service", moduleApiVersion: 1,
   async activate(ctx) {
     stopped = false;
+    const cache = await scopedGet(ctx, "language-service.warmSessions", null);
+    warmSessions = [1, 2, 3, 5].includes(Number(cache?.value)) ? Number(cache!.value) : 3;
     selected = ctx.state.get("workspace.selected") as any || null;
     dependencies = new LanguageDependencies(ctx, servers, () => selected, () => publishSettings(), async (workspace, server, executable) => {
       const key = `${workspace.machineId}|${workspace.rootAbsolutePath}|${server.id}`;
@@ -216,6 +256,14 @@ const mod: AppModule = {
       ctx.events.emit("language-service.changed", { workspaceId: workspace.id });
     });
     publishSettings = exportSettings(ctx, sections, async (section, key, value) => {
+      if (section === "language-service" && key === "warmSessions") {
+        const limit = Number(value);
+        if (typeof value !== "string" || ![1, 2, 3, 5].includes(limit)) throw new Error("Choose a valid server cache size");
+        await scopedSet(ctx, "user", "language-service.warmSessions", limit);
+        warmSessions = limit;
+        const recent = [...sessions.keys()].sort((a, b) => (sessionUse.get(b) || 0) - (sessionUse.get(a) || 0))[0] || "";
+        await trimSessions(ctx, recent); return;
+      }
       if (dependencies?.busy) throw new Error("Wait for dependency setup to finish before changing the executable");
       if (key !== "executable" || typeof value !== "string" || !value.trim() || /[\r\n\0]/.test(value)) throw new Error("Enter an executable path or command name");
       if (!servers().some(s => s.id === section)) throw new Error("Language server is no longer available");
@@ -242,7 +290,7 @@ const mod: AppModule = {
     ctx.state.watch("workspace.selected", (value: any) => {
       if (selected?.id === value?.id) return;
       selected = value || null;
-      void stopSessions(ctx).then(() => refresh(ctx)).catch(e => publishSettings(errMsg(e)));
+      void refresh(ctx).catch(e => publishSettings(errMsg(e)));
     });
   },
   canSwap: () => ({ ok: !dependencies?.busy && !(mcp?.pending()), reason: "Language dependency installation/check is running" }),
@@ -263,7 +311,9 @@ const mod: AppModule = {
       if(!server)throw new Error("Unknown server");
       if(!a.query.trim())return [];
       const session=await sessionFor(ctx,d,server);
-      const result=await session.peer.request("workspace/symbol",{query:a.query},60000);
+      const operation = session.queue.catch(() => {}).then(() => session.peer.request("workspace/symbol", {query:a.query}, 60000));
+      session.queue = operation;
+      const result = await operation;
       return (Array.isArray(result)?result:[]).filter((s:any)=>typeof s.name==="string" && s.location?.range && workspacePath(d.rootAbsolutePath,s.location.uri)).slice(0,1000)
         .map((s:any)=>({name:s.name,kind:s.kind,container:s.containerName||"",uri:s.location.uri,range:s.location.range,path:workspacePath(d.rootAbsolutePath,s.location.uri)}));
     },
@@ -355,7 +405,8 @@ const mod: AppModule = {
       if (!pending) return a.item;
       const s = await pending;
       if (!s.capabilities.completionProvider?.resolveProvider) return a.item;
-      return s.queue.catch(() => {}).then(() => s.peer.request("completionItem/resolve", a.item, 30000));
+      const operation = s.queue.catch(() => {}).then(() => s.peer.request("completionItem/resolve", a.item, 30000));
+      s.queue = operation; return operation;
     },
     async definitions(ctx, a) {
       if (typeof a.text !== "string" || !validPosition(a.position)) throw new Error("Definition requires text and a UTF-16 position");
