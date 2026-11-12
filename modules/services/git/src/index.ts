@@ -188,7 +188,8 @@ async function watchSelected(ctx: ModuleContext) {
     for (const root of new Set(roots.stdout.trim().split("\n").filter(Boolean))) {
       const watcher = fileWatch(ctx, workspaceId => changed(ctx, workspaceId));
       watchers.push(watcher);
-      await watcher.select(d, root);
+      // Object storage churns on every fetch/gc; HEAD, index and refs carry the changes that matter.
+      await watcher.select(d, root, { exclude: ["objects/", "lfs/"] });
       if (mine !== selection) { await watcher.stop(); return; }
     }
   } catch (e) { ctx.log.warn(`Git watcher: ${String(e)}`); }

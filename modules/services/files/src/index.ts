@@ -8,6 +8,8 @@ import { grepFiles, ignoredAmong, invalidateIgnored } from "./gitignore";
 import type { AppModule, ModuleContext } from "@hato/sdk/types";
 import { errMsg, langFromPath, targetFor, withWorkspace, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import type { ScopeGrant } from "@hato/sdk/types";
+import { exportSettings } from "@hato/sdk/settings";
+import { DEFAULT_EXCLUDES, loadPreferences, watchExcludes, type WatchPreferences } from "./watch-excludes";
 
 const MAX_VIEW_BYTES = 2 * 1024 * 1024;
 const docCache = new Map<string, { document: string; mtime: number | null; size: number; text?: string; truncated: boolean }>();
@@ -45,6 +47,32 @@ let watcher: ReturnType<typeof fileWatch> | null = null;
 let changeTimer: ReturnType<typeof setTimeout> | null = null;
 let selected: WorkspaceDescriptor | null = null;
 let selection = 0;
+let prefs: WatchPreferences = { defaults: true, gitignored: true, extra: "" };
+/** Exclusions the running watcher uses, and when they were last recomputed. */
+let watching: { key: string; exclude: string[]; at: number } | null = null;
+const RECHECK_MS = 15000;
+let recheckTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** (Re)start the project watcher with current exclusions. `force` restarts even if unchanged. */
+async function startWatcher(ctx: ModuleContext, d: WorkspaceDescriptor | null, force = false) {
+  if (!d) { watching = null; await watcher?.select(null); return; }
+  const key = `${d.id}|${d.machineId}|${d.rootAbsolutePath}`;
+  const exclude = await watchExcludes(ctx, d, prefs).catch(e => { ctx.log.warn(`Watch exclusions: ${errMsg(e)}`); return [] as string[]; });
+  if (selected?.id !== d.id) return;
+  const same = watching?.key === key && watching.exclude.length === exclude.length && watching.exclude.every((x, i) => x === exclude[i]);
+  if (same && !force) { watching!.at = Date.now(); return; }
+  watching = { key, exclude, at: Date.now() };
+  ctx.state.set("files.watch", { workspaceId: d.id, warning: null, excluded: exclude.length });
+  await watcher?.select(d, undefined, { exclude });
+}
+
+/** After changes, pick up newly ignored folders (a first build creating `target/`), at most
+ *  every RECHECK_MS: restarting a watcher re-walks the project. */
+function recheckExclusions(ctx: ModuleContext) {
+  if (!prefs.gitignored || recheckTimer || !selected) return;
+  const wait = Math.max(0, RECHECK_MS - (Date.now() - (watching?.at ?? 0)));
+  recheckTimer = setTimeout(() => { recheckTimer = null; void startWatcher(ctx, selected).catch(e => ctx.log.warn(`File watcher: ${errMsg(e)}`)); }, wait);
+}
 async function watchSelected(ctx: ModuleContext) {
   const mine = ++selection;
   const ws: any = ctx.state.get("workspace.selected");
@@ -53,7 +81,7 @@ async function watchSelected(ctx: ModuleContext) {
     if (mine !== selection) return;
     if (selected?.id === next?.id && selected?.machineId === next?.machineId && selected?.rootAbsolutePath === next?.rootAbsolutePath) return;
     selected = next;
-    await watcher?.select(next);
+    await startWatcher(ctx, next);
     // Warm all paths independently of which folders are expanded.
     if (next) {
       // This root was unwatched while another workspace was selected.
@@ -91,6 +119,21 @@ const mod: AppModule = {
       ctx.events.emit("files.changed", { workspaceId: selected.id });
       void publishSkills(ctx);
     });
+    prefs = await loadPreferences(ctx);
+    exportSettings(ctx, () => [{ key: "files-watch", title: "File watching", fields: [
+      { key: "defaults", label: "Skip dependency and cache folders", type: "toggle", value: prefs.defaults,
+        description: `Changes inside ${DEFAULT_EXCLUDES.filter(n => n !== ".git").slice(0, 5).join(", ")} and similar folders do not refresh the explorer or Git status.` },
+      { key: "gitignored", label: "Skip folders Git ignores", type: "toggle", value: prefs.gitignored,
+        description: "Build output and other ignored folders (from .gitignore) are not watched. Use Refresh to see new files there." },
+      { key: "extra", label: "Also skip", type: "text", value: prefs.extra, placeholder: "out, generated, /tmp",
+        description: "Folder names (any depth, * and ? allowed) or paths from the project root with /, separated by commas." },
+    ] }], async (_section, key, value) => {
+      if (key === "extra" ? typeof value !== "string" : !["defaults", "gitignored"].includes(key) || typeof value !== "boolean") throw new Error("Invalid file watching setting");
+      const next = { ...prefs, [key]: value } as WatchPreferences;
+      await ctx.modules.call("persistence", "settings.set", { key: "files.watch", value: next });
+      prefs = next;
+      if (selected) { invalidateIgnored(selected); await startWatcher(ctx, selected, true); }
+    });
     watcher = fileWatch(ctx, workspaceId => {
       if (changeTimer) clearTimeout(changeTimer);
       changeTimer = setTimeout(() => {
@@ -99,7 +142,13 @@ const mod: AppModule = {
         docCache.clear();
         ctx.events.emit("files.changed", { workspaceId });
         void publishSkills(ctx);
+        recheckExclusions(ctx);
       }, 200);
+    }, {
+      warning: (workspaceId, text) => {
+        ctx.log.warn(`File watcher: ${text}`);
+        if (selected?.id === workspaceId) ctx.state.set("files.watch", { workspaceId, warning: text, excluded: watching?.exclude.length ?? 0 });
+      },
     });
     // View-state updates (tabs, preview) also change `workspace.selected`; skills only depend on
     // which workspace it is.
@@ -118,6 +167,8 @@ const mod: AppModule = {
     selection++; skillsVersion++;
     stopSearchIndexes();
     if (changeTimer) clearTimeout(changeTimer);
+    if (recheckTimer) clearTimeout(recheckTimer);
+    recheckTimer = null; watching = null;
     await watcher?.stop(); watcher = null;
   },
   methods: {

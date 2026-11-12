@@ -22,6 +22,8 @@ let searchSoon: () => void = () => {};
 let contentMode = false;
 /** .gitignored files are hidden unless the user shows them. */
 let showIgnored = false;
+/** The project watcher's warning (e.g. the OS watch limit), from the files service. */
+let watchState: any = null;
 let gitFiles: { path: string; kind: string }[] = [];
 let gitVersion = 0;
 let grep: any = null;
@@ -136,6 +138,8 @@ const mod: AppModule = {
     searchSoon = debounce(() => { void search(ctx); }, 160);
     grepSoon = debounce(() => { void search(ctx); }, 450);
     ws = ctx.state.get("workspace.selected") || null;
+    watchState = ctx.state.get("files.watch") || null;
+    ctx.state.watch("files.watch", (v: any) => { watchState = v; ctx.ui.invalidate(); });
     ctx.state.watch("workspace.selected", (next: any) => { const changed = ws?.id !== next?.id; ws = next; if (changed) void reset(ctx); else ctx.ui.invalidate(); });
     const gitSoon = debounce(() => { void refreshGit(ctx); }, 300);
     ctx.events.on("files.indexed", (event: any) => { if (event.workspaceId === ws?.id && query.trim() && !contentMode) searchSoon(); });
@@ -176,6 +180,8 @@ const mod: AppModule = {
         { type: "button", key: "refresh", text: "", iconSvg: uiIcons["refresh"], action: "refresh", small: true, variant: "ghost", tooltip: "Refresh files" },
       ] });
       if (error) children.push({ type: "status", key: "err", text: error, level: "error" });
+      if (watchState?.warning && watchState.workspaceId === ws.id) children.push({ type: "status", key: "watch", level: "warn",
+        text: `Not every folder is watched (${watchState.warning}). Use Refresh to see changes there, or skip more folders in Settings → File watching.` });
       if (pending.size && !dirs.has(".")) children.push({ type: "progress", key: "loading", indeterminate: true });
       if (filtering && !searching && !rows.length && !error && !(grepping && query.trim().length < 2)) children.push({ type: "label", key: "empty", text: grepping ? "No files contain this text." : "No matching files.", color: "muted", padding: 12 });
       if (!filtering && !pending.size && !loaded) children.push({ type: "label", key: "empty", text: "This folder is empty.", color: "muted", padding: 12 });
