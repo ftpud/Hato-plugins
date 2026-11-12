@@ -5,6 +5,7 @@ import { changeBadge, changeTree, type ChangeNode, type Change } from "./model";
 import { exportSettings } from "@hato/sdk/settings";
 import { fileIcons } from "@hato/sdk/file-icons";
 import { uiIcons } from "@hato/sdk/ui-icons";
+import { loadStashes, loadStashPreferences, resetStashes, stashCount, stashEvent, stashIcon, stashModal, type StashEnv } from "./stashes";
 
 interface Changeset { id: string; name: string; paths: string[]; message: string }
 interface Draft { sets: Changeset[]; active: string }
@@ -15,8 +16,7 @@ let selected = new Set<string>();
 let collapsed = new Set<string>();
 let error = "", notice = "", busy = false, loading = false, dirty = false, visible = false;
 let autoRefresh = true;
-let epoch = 0, query = "", newSet = false, stashOpen = false;
-let stashes: any[] = [], dropStash: any = null;
+let epoch = 0, query = "", newSet = false;
 const draft = (): Draft => drafts[ws.id] ||= { sets: [{ id: "main", name: "Changes", paths: [], message: "" }], active: "main" };
 const active = () => draft().sets.find(s => s.id === draft().active) || draft().sets[0];
 function files(): Change[] {
@@ -32,7 +32,10 @@ async function refresh(ctx: ModuleContext) {
   loading = true; dirty = false;
   const id = ws.id, mine = epoch;
   try {
-    const r = await ctx.modules.call("git", "status", { workspaceId: id }, { timeoutMs: 45000 });
+    const [r] = await Promise.all([
+      ctx.modules.call("git", "status", { workspaceId: id }, { timeoutMs: 45000 }),
+      loadStashes(ctx, id, () => mine === epoch),
+    ]);
     if (mine !== epoch) return;
     if (!draftsLoaded.has(id)) {
       const saved = await ctx.modules.call("persistence", "settings.get", { key: `git-panel.changesets.${id}` });
@@ -47,6 +50,17 @@ async function refresh(ctx: ModuleContext) {
   } catch (e) { if (mine === epoch) error = errMsg(e); }
   finally { if (mine === epoch) { loading = false; if (dirty && autoRefresh) void refresh(ctx); } ctx.ui.invalidate(); }
 }
+function stashEnv(ctx: ModuleContext, id: string): StashEnv {
+  return {
+    workspaceId: id, current: () => ws?.id === id,
+    changes: () => files(), picked: () => files().filter(f => selected.has(f.path)),
+    async mutate(work) {
+      busy = true; error = ""; notice = ""; ctx.ui.invalidate();
+      try { await work(); }
+      finally { busy = false; if (ws?.id === id) { selected = new Set([...selected].filter(p => files().some(f => f.path === p))); await refresh(ctx); } }
+    },
+  };
+}
 function button(key: string, text: string, action = key, extra: any = {}): UiNode {
   return { type: "button", key, text, action, small: true, variant: "ghost", disabled: busy, ...extra };
 }
@@ -58,6 +72,7 @@ const mod: AppModule = {
     const saved = await ctx.modules.call("persistence", "settings.get", { key: "git-panel.autoRefresh" });
     const old = saved == null ? await ctx.modules.call("persistence", "settings.get", { key: "git-panel.pollSeconds" }) : null;
     autoRefresh = typeof saved === "boolean" ? saved : old !== 0;
+    await loadStashPreferences(ctx);
     exportSettings(ctx, () => [{ key: "git-panel", title: "Git changes", fields: [
       { key: "autoRefresh", label: "Automatic refresh", type: "toggle", value: autoRefresh },
     ] }], async (_section, key, value) => {
@@ -67,7 +82,7 @@ const mod: AppModule = {
     });
     visible = !!(ctx.state.get("workspace-layout.panels") as any)?.git;
     ctx.state.watch("workspace.selected", (v: any) => {
-      if (ws?.id !== v?.id) { epoch++; loading = false; status = null; ctx.state.set("git-panel.panelBadge.git", 0); selected.clear(); query = ""; stashOpen = false; error = ""; notice = ""; }
+      if (ws?.id !== v?.id) { epoch++; loading = false; status = null; ctx.state.set("git-panel.panelBadge.git", 0); selected.clear(); query = ""; resetStashes(); error = ""; notice = ""; }
       ws = v; void refresh(ctx);
     });
     ctx.state.watch("workspace-layout.panels", (v: any) => { visible = !!v?.git; if (visible) void refresh(ctx); });
@@ -83,7 +98,9 @@ const mod: AppModule = {
     const children: UiNode[] = [
       { type: "row", key: "tools", gap: 4, wrap: true, align: "center", children: [
         { type: "label", key: "branch", text: `⎇ ${status?.branch || "Git"}${status?.upstream ? ` · ↑${status.ahead} ↓${status.behind}` : ""}`, tooltip: status?.upstream || "No upstream configured", grow: true, weight: "semibold", size: "sm" },
-        button("stashOpen", "Stashes…"), button("fetch", "Fetch"), button("pull", "Pull"), button("push", "Push"),
+        button("stashes", stashCount() ? `Stashes (${stashCount()})` : "Stashes", "stash.open", { iconSvg: stashIcon,
+          tooltip: stashCount() ? `${stashCount()} saved stash${stashCount() === 1 ? "" : "es"}` : "Stash changes to set them aside" }),
+        button("fetch", "Fetch"), button("pull", "Pull"), button("push", "Push"),
         button("refresh", "", "refresh", { iconSvg: uiIcons.refresh, tooltip: "Refresh Git status", disabled: busy || loading }),
       ] },
       { type: "row", key: "sets", gap: 3, wrap: true, children: [
@@ -146,17 +163,8 @@ const mod: AppModule = {
       { type: "label", key: "hint", text: "Selected files will move into this changeset.", color: "muted", size: "sm" },
       button("createSet", "Create", "createSet", { variant: "primary" }),
     ] });
-    if (stashOpen) children.push({ type: "modal", key: "stashes", title: "Stashes", closeAction: "closeStashes", children: [
-      ...(error ? [{ type: "status", key: "stash-error", text: error, level: "error" } as UiNode] : []),
-      { type: "label", key: "hint", text: "Save stashes all working changes, including untracked files. Apply keeps the saved stash.", wrap: true, size: "sm", color: "muted" },
-      { type: "textInput", key: "stash-message", placeholder: "Stash description (optional)" },
-      button("stashSave", "Save all changes", "stashSave", { disabled: busy || !status?.files.length }),
-      { type: "column", key: "stash-list", scroll: true, height: 260, children: stashes.map(s => ({ type: "row", key: s.id, gap: 6, children: [
-        { type: "label", key: "name", text: s.name, grow: true, size: "sm", wrap: true },
-        button(`apply:${s.id}`, "Apply", "stashApply", { value: s.id }), button(`drop:${s.id}`, "Delete…", "askDrop", { value: s.id }),
-      ] })) },
-      ...(dropStash ? [{ type: "label", key: "drop-warning", text: `Permanently delete “${dropStash.name}”?`, wrap: true } as UiNode, button("confirmDrop", "Delete stash", "confirmDrop", { variant: "danger" }), button("cancelDrop", "Keep stash")] : []),
-    ] });
+    const stashes = stashModal(busy, current, picked);
+    if (stashes) children.push(stashes);
     return { type: "column", key: "git-root", gap: 8, padding: 10, grow: true, children };
   },
   async onEvent(ctx, ev) {
@@ -195,9 +203,7 @@ const mod: AppModule = {
       else if (ev.action === "edit") await ctx.modules.call("workspace", "view.patch", { workspaceId: id, patch: { previewPath: String(ev.value) } });
       else if (ev.action === "diff") await ctx.modules.call("workspace", "view.patch", { workspaceId: id, patch: { previewPath: diffTab(String(ev.value)) } });
       else if (ev.action === "refresh") await refresh(ctx);
-      else if (ev.action === "closeStashes") { stashOpen = false; dropStash = null; }
-      else if (ev.action === "askDrop") dropStash = stashes.find(s => s.id === ev.value);
-      else if (ev.action === "cancelDrop") dropStash = null;
+      else if (ev.action.startsWith("stash.")) await stashEvent(ctx, ev, stashEnv(ctx, id));
       else {
         busy = true; error = ""; notice = ""; ctx.ui.invalidate();
         if (ev.action === "commit" || ev.action === "commitPush") {
@@ -210,11 +216,6 @@ const mod: AppModule = {
           }
         } else if (["fetch", "pull", "push"].includes(ev.action)) {
           const r = await ctx.modules.call("git", "network", { workspaceId: id, operation: ev.action }, { timeoutMs: 120000 }); if (ws?.id === id) notice = r.output || "Done";
-        } else if (ev.action === "stashSave" || ev.action === "stashApply" || ev.action === "confirmDrop") {
-          await ctx.modules.call("git", "stash", { workspaceId: id, operation: ev.action === "stashSave" ? "save" : ev.action === "stashApply" ? "apply" : "drop", id: ev.action === "confirmDrop" ? dropStash?.id : ev.value, message: ev.inputs["stash-message"] }, { timeoutMs: 120000 }); dropStash = null;
-        }
-        if (ev.action.startsWith("stash") || ev.action === "confirmDrop") {
-          const list = await ctx.modules.call("git", "stashes", { workspaceId: id }); if (ws?.id === id) { stashes = list; stashOpen = true; }
         }
         if (ws?.id === id) await refresh(ctx);
       }

@@ -20,6 +20,15 @@ export function gitOperations({ desc, git, fail, cleanRel }: Dependencies) {
     if (!/^[0-9a-f]{40,64}$/.test(String(value))) throw new Error("Invalid commit ID");
     return String(value);
   };
+  async function stashRef(ctx: ModuleContext, d: WorkspaceDescriptor, id: string) {
+    const list = await run(ctx, d, ["stash", "list", "--format=%H%x09%gd"]);
+    const ref = list.split("\n").map(x => x.split("\t")).find(x => x[0] === id)?.[1];
+    if (!ref) throw new Error("Stash no longer exists; refresh the list");
+    return ref;
+  }
+  async function hasUntracked(ctx: ModuleContext, d: WorkspaceDescriptor, id: string) {
+    return (await git(ctx, d, ["rev-parse", "--verify", "-q", `${id}^3`])).code === 0;
+  }
   function mutate(ctx: ModuleContext, a: any, work: (d: WorkspaceDescriptor) => Promise<any>) {
     const id = String(a.workspaceId);
     const next = (queues.get(id) || Promise.resolve()).catch(() => {}).then(async () => {
@@ -62,22 +71,73 @@ export function gitOperations({ desc, git, fail, cleanRel }: Dependencies) {
         return { output: await run(ctx, d, a.operation === "pull" ? ["pull", "--ff-only"] : a.operation === "fetch" ? ["fetch", "--all"] : ["push"]) };
       });
     },
+    /** Stashes newest first. `message` is the user's description ("" for git's automatic
+     *  "WIP on <branch>: <base>" entries, whose base commit is in `base`). */
     async stashes(ctx: ModuleContext, a: any) {
       const d = await desc(ctx, a.workspaceId);
-      const text = await run(ctx, d, ["stash", "list", "--format=%H%x09%gs"]);
-      return text.trim().split("\n").filter(Boolean).map(line => { const [id, ...name] = line.split("\t"); return { id, name: name.join("\t") }; });
+      const text = await run(ctx, d, ["stash", "list", "--format=%H%x09%gd%x09%ct%x09%P%x09%gs"]);
+      return text.split("\n").filter(Boolean).map(line => {
+        const [id, ref, time, parents, ...rest] = line.split("\t");
+        const name = rest.join("\t"), m = name.match(/^(WIP on|On) (.+?): ([\s\S]*)$/);
+        const auto = m?.[1] === "WIP on";
+        return { id, ref, name, branch: m?.[2] || "", message: m ? (auto ? "" : m[3]) : name, base: auto ? m![3] : "",
+          date: Number(time) * 1000, untracked: parents.split(" ").filter(Boolean).length > 2 };
+      });
+    },
+    /** Files a stash changes, relative to the workspace, including its untracked part. */
+    async stashFiles(ctx: ModuleContext, a: any) {
+      const d = await desc(ctx, a.workspaceId), id = oid(a.id);
+      const raw = await run(ctx, d, ["diff", "--name-status", "-z", "--no-renames", "--relative", `${id}^1`, id, "--", "."]);
+      const parts = raw.split("\0"), files: { path: string; kind: string }[] = [];
+      for (let i = 0; i + 1 < parts.length; i += 2) files.push({ path: parts[i + 1], kind: ({ A: "added", D: "deleted", M: "modified", T: "typechange" } as any)[parts[i]] || "modified" });
+      if (await hasUntracked(ctx, d, id)) {
+        const extra = await run(ctx, d, ["ls-tree", "-r", "-z", "--name-only", `${id}^3`, "--", "."]);
+        for (const path of extra.split("\0").filter(Boolean)) files.push({ path, kind: "untracked" });
+      }
+      return { workspaceId: d.id, id, files: files.sort((x, y) => x.path.localeCompare(y.path)) };
+    },
+    /** The stash as one patch: tracked changes against its base, then its untracked files. */
+    async stashDiff(ctx: ModuleContext, a: any) {
+      const d = await desc(ctx, a.workspaceId), id = oid(a.id);
+      let text = await run(ctx, d, ["diff", "--no-ext-diff", "--no-textconv", "-M", "--relative", `${id}^1`, id, "--", "."]);
+      if (await hasUntracked(ctx, d, id)) text += await run(ctx, d, ["show", "--format=", "--root", "--no-ext-diff", "--no-textconv", "--relative", `${id}^3`, "--", "."]);
+      return { workspaceId: d.id, id, empty: !text.trim(), document: await ctx.host.ui.documentOpen(d.id, text, "diff", { path: `stash-${id.slice(0, 8)}.diff` }) };
     },
     stash(ctx: ModuleContext, a: any) {
       return mutate(ctx, a, async d => {
-        if (a.operation === "save") return { output: await run(ctx, d, ["stash", "push", "--include-untracked", "-m", String(a.message || "Hato stash")]) };
+        if (a.operation === "save") {
+          const paths = [...new Set<string>((a.paths || []).map(cleanRel))];
+          if (paths.length > 1000) throw new Error("Select at most 1000 files per stash");
+          const untracked = a.includeUntracked !== false;
+          // Stash runs without --literal-pathspecs (see index.ts), so quote each selected path.
+          return { output: await run(ctx, d, ["stash", "push", ...(untracked ? ["--include-untracked"] : []), "-m", String(a.message || "").trim() || "Hato stash",
+            ...(paths.length ? ["--", ...paths.map(p => `:(literal)${p}`)] : [])]) };
+        }
         const id = oid(a.id);
-        if (a.operation === "apply") return { output: await run(ctx, d, ["stash", "apply", id]) };
-        if (a.operation === "drop") {
-          // Resolve the stable object ID at mutation time; never drop a shifted stash@{n}.
-          const list = await run(ctx, d, ["stash", "list", "--format=%H%x09%gd"]);
-          const ref = list.split("\n").map(x => x.split("\t")).find(x => x[0] === id)?.[1];
-          if (!ref) throw new Error("Stash no longer exists; refresh the list");
-          return { output: await run(ctx, d, ["stash", "drop", ref]) };
+        if (a.operation === "apply" || a.operation === "pop") {
+          // Resolve the stable object ID at mutation time; never pop a shifted stash@{n}.
+          const args = a.operation === "pop" ? ["stash", "pop", await stashRef(ctx, d, id)] : ["stash", "apply", id];
+          const r = await git(ctx, d, args);
+          const output = `${r.stdout}${r.stderr}`;
+          // A conflicted apply has still changed the working tree; Git keeps the stash for pop.
+          if (r.code !== 0 && /^CONFLICT /m.test(output)) return { output, conflicts: true, kept: true };
+          if (r.code !== 0) fail(r, `git stash ${a.operation}`);
+          return { output, conflicts: false, kept: a.operation === "apply" };
+        }
+        if (a.operation === "drop") return { output: await run(ctx, d, ["stash", "drop", await stashRef(ctx, d, id)]) };
+        if (a.operation === "branch") {
+          const name = String(a.branch || "").trim();
+          const valid = await git(ctx, d, ["check-ref-format", "--branch", name]);
+          if (!name || valid.code !== 0) throw new Error(`“${name}” is not a valid branch name`);
+          const exists = await git(ctx, d, ["rev-parse", "--verify", "-q", `refs/heads/${name}`]);
+          if (exists.code === 0) throw new Error(`Branch “${name}” already exists`);
+          return { output: await run(ctx, d, ["stash", "branch", name, await stashRef(ctx, d, id)]) };
+        }
+        if (a.operation === "restore") {
+          const path = cleanRel(a.path), source = a.untracked ? `${id}^3` : id;
+          if (a.untracked && !(await hasUntracked(ctx, d, id))) throw new Error("This stash has no untracked files");
+          if (!(await run(ctx, d, ["ls-tree", "--name-only", source, "--", path])).trim()) throw new Error(`${path} is not in this stash`);
+          return { output: await run(ctx, d, ["restore", `--source=${source}`, "--worktree", "--", path]) };
         }
         throw new Error("Invalid stash operation");
       });

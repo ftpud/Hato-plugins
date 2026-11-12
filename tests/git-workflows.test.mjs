@@ -49,6 +49,36 @@ test('stash IDs stay stable and history includes branches and merge parentage',a
  const history=await ops.history(ctx,{workspaceId:'task:test',ref:'ALL'});assert.equal(history.commits[0].parents.length,2);assert.match(history.commits[0].refs,/main/);
  assert.match((await ops.commitDiff(ctx,{workspaceId:'task:test',id:history.commits[0].id})).document,/feature/);
 }));
+test('stash metadata, files, diff, selective save, pop, restore and branch',async()=>fixture(async({root,git,ctx,ops})=>{
+ const w='task:test';
+ await writeFile(join(root,'base'),'edited\n');await writeFile(join(root,'[odd].txt'),'untracked\n');await writeFile(join(root,'keep'),'stay\n');
+ // Only selected paths are stashed, literally, including untracked ones.
+ await ops.stash(ctx,{workspaceId:w,operation:'save',message:'  selected  ',paths:['base','[odd].txt']});
+ assert.equal(git('status','--porcelain').trim(),'?? keep');
+ let [s]=await ops.stashes(ctx,{workspaceId:w});
+ assert.equal(s.message,'selected');assert.equal(s.branch,'main');assert.equal(s.ref,'stash@{0}');assert.equal(s.untracked,true);assert.ok(s.date>0);
+ assert.deepEqual((await ops.stashFiles(ctx,{workspaceId:w,id:s.id})).files,[{path:'[odd].txt',kind:'untracked'},{path:'base',kind:'modified'}]);
+ const diff=(await ops.stashDiff(ctx,{workspaceId:w,id:s.id})).document;assert.match(diff,/\+edited/);assert.match(diff,/\+untracked/);
+ // Restore a single file without touching the stash.
+ await ops.stash(ctx,{workspaceId:w,operation:'restore',id:s.id,path:'[odd].txt',untracked:true});
+ assert.equal(git('show',`${s.id}^3:[odd].txt`),'untracked\n');assert.match(git('status','--porcelain'),/\?\? "?\[odd\]\.txt/);
+ await assert.rejects(ops.stash(ctx,{workspaceId:w,operation:'restore',id:s.id,path:'keep'}),/not in this stash/);
+ await rm(join(root,'[odd].txt'));
+ // Pop removes it; an automatic stash has no description but keeps its base subject.
+ let r=await ops.stash(ctx,{workspaceId:w,operation:'pop',id:s.id});assert.equal(r.conflicts,false);
+ assert.equal((await ops.stashes(ctx,{workspaceId:w})).length,0);
+ git('stash','push','--include-untracked');[s]=await ops.stashes(ctx,{workspaceId:w});
+ assert.equal(s.message,'');assert.match(s.base,/initial/);
+ // A conflicting pop keeps the stash and reports conflicts instead of failing.
+ await writeFile(join(root,'base'),'conflict\n');git('commit','-am','diverge');
+ r=await ops.stash(ctx,{workspaceId:w,operation:'pop',id:s.id});assert.equal(r.conflicts,true);
+ assert.equal((await ops.stashes(ctx,{workspaceId:w})).length,1);
+ git('reset','--hard','-q');git('clean','-fdq');
+ await assert.rejects(ops.stash(ctx,{workspaceId:w,operation:'branch',id:s.id,branch:'main'}),/already exists/);
+ await assert.rejects(ops.stash(ctx,{workspaceId:w,operation:'branch',id:s.id,branch:'bad..name'}),/not a valid/);
+ await ops.stash(ctx,{workspaceId:w,operation:'branch',id:s.id,branch:'from-stash'});
+ assert.equal(git('branch','--show-current').trim(),'from-stash');assert.equal((await ops.stashes(ctx,{workspaceId:w})).length,0);
+}));
 test('graph connects merge parents across lanes',async()=>{
  const {commitGraph}=await load('../modules/ui/git-history/src/graph.ts');
  const {svgs,width,height}=commitGraph([{id:'merge',parents:['a','b']},{id:'b',parents:['base']},{id:'a',parents:['base']},{id:'base',parents:[]}]);
