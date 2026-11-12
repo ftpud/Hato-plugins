@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 2,
+  "id": "git-task-changes",
+  "kind": "ui",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [
+    "git"
+  ],
+  "capabilities": [],
+  "stateVersion": 1,
+  "description": "Task Git Changes",
+  "contributes": {
+    "panels": [
+      {
+        "id": "git-task-changes",
+        "title": "Task Git Changes",
+        "defaultHidden": true,
+        "dockBelow": "git",
+        "activity": {
+          "side": "right",
+          "order": 22,
+          "title": "Task Git Changes",
+          "iconSvg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z\"/><path d=\"M14 2v6h6M8 13h8M8 17h5\"/></svg>"
+        }
+      }
+    ]
+  },
+  "author": "Hato contributors",
+  "version": "0.1.12",
+  "pluginPackage": "git",
+  "pluginType": "Development"
+}

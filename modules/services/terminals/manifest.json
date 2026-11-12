@@ -16,7 +16,7 @@
   "stateVersion": 1,
   "description": "Maps (workspace, key) to persistent native PTY handles, local or over SSH.",
   "author": "Hato contributors",
-  "version": "0.1.30",
+  "version": "0.1.31",
   "pluginPackage": "foundation",
   "pluginType": "System"
 }

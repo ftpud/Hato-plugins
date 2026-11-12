@@ -22,7 +22,7 @@
     ]
   },
   "author": "Hato contributors",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "pluginPackage": "git",
   "pluginType": "Development"
 }
