@@ -3,7 +3,7 @@ import { marketNodes, marketTab, refreshMarket, installPackage, updateAllPackage
 import type { AppModule, ModuleContext, PluginInfo, SettingsExport, SettingsSection, SettingField, UiNode } from "@hato/sdk/types";
 import { parseOrder, SPACER_PREFIX } from "@hato/sdk/settings-order";
 import { uiTable, normalizeTableStyle } from "@hato/sdk/ui-table";
-import { colorControl, rangeControl } from "@hato/sdk/ui-controls";
+import { colorControl, hostRenders, rangeControl } from "@hato/sdk/ui-controls";
 import { errMsg } from "@hato/sdk/runtime";
 import { initSetup, openSetup, setupEvent, setupModal, setupOpen, setupSnapshot } from "./setup";
 
@@ -150,6 +150,7 @@ const mod: AppModule = {
     if (active.key === "plugins") options.push(...pluginsPage());
     if (active.error) options.push({ type: "status", key: "category-error", text: active.error, level: "error" });
     if (active.section?.description) options.push({ type: "label", key: "category-description", text: active.section.description, size: "sm", color: "muted", wrap: true });
+    const env = ctx.host.env?.info?.();
     const tableRows: Parameters<typeof uiTable>[1] = [];
     const cardRows: UiNode[] = [];
     const table = active.section?.layout === "table";
@@ -169,8 +170,8 @@ const mod: AppModule = {
         : field.type === "toggle"
         ? { type: "switch", key: fieldKey, label: "", checked: field.value, action: "change" }
         : field.type === "text" ? { type: "textInput", key: fieldKey, value: field.value, placeholder: field.placeholder, submitAction: "change" }
-        : field.type === "range" ? rangeControl(fieldKey, field, "sliderValue", "fieldValue", { field: fieldKey })
-        : field.type === "color" ? colorControl(fieldKey, field, "colorValue", "fieldValue", { field: fieldKey })
+        : field.type === "range" ? rangeControl(fieldKey, field, "sliderValue", "fieldValue", { field: fieldKey }, false, hostRenders(env, "slider"))
+        : field.type === "color" ? colorControl(fieldKey, field, "colorValue", "fieldValue", { field: fieldKey }, false, hostRenders(env, "colorPicker"))
         : field.type === "select" ? { type: "select", key: fieldKey, value: field.value, options: field.options, action: "change", buttonStyle: { height: 32, fullWidth: true, justify: "between" } }
         : { type: "label", key: fieldKey, text: "Update Settings to edit this option", size: "xs", color: "muted" };
       if (table) { tableRows.push({ key: fieldKey, label: field.label, description: field.description, control, ...(wide ? { controlWidth: 320 } : {}) }); continue; }
@@ -274,7 +275,10 @@ const mod: AppModule = {
       if (!category || !category.section!.fields.some(field => field.key === key)) return;
       const field = category.section!.fields.find(field => field.key === key)!;
       if (field.type === "action") return;
-      ctx.events.emit("settings.change", { module, section, key, value: field.type === "text" ? event.inputs?.[event.key] ?? event.value : event.value });
+      // Text fields (and range/color fallbacks on older hosts) submit the native input's current text.
+      const text = String(event.inputs?.[event.key] ?? event.value ?? "");
+      const value = field.type === "text" ? text : field.type === "range" || field.type === "color" ? text.trim() : event.value;
+      ctx.events.emit("settings.change", { module, section, key, value });
     } catch (e) { error = errMsg(e); ctx.ui.invalidate(); }
   },
 };
