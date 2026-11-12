@@ -22,7 +22,7 @@
   "stateVersion": 1,
   "description": "Starts the Hato daemon on workspace machines, pushes workspace plugins to it and reports what it holds.",
   "author": "Hato contributors",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "pluginPackage": "remote",
   "pluginType": "Connectivity"
 }

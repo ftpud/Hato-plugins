@@ -24,7 +24,7 @@
   },
   "stateVersion": 1,
   "author": "Hato contributors",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "pluginPackage": "path-highlights",
   "pluginType": "Appearance",
   "description": "Color files and folders by relative path, with rules shared across all projects, tasks and workspaces."

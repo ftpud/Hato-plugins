@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 2,
+  "id": "language-status",
+  "name": "Language status",
+  "kind": "ui",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [
+    "language-service"
+  ],
+  "calls": [],
+  "capabilities": [],
+  "stateVersion": 1,
+  "version": "0.1.11",
+  "pluginPackage": "language-service",
+  "pluginType": "Languages",
+  "distribution": "marketplace",
+  "contributes": {
+    "barItems": [
+      {
+        "id": "language-status",
+        "title": "Languages",
+        "bar": "bottom",
+        "order": 30,
+        "width": 220
+      }
+    ]
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 2,
+  "id": "path-highlights",
+  "name": "Path highlights",
+  "kind": "service",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [
+    "persistence"
+  ],
+  "calls": [
+    "persistence"
+  ],
+  "capabilities": [],
+  "provides": [
+    "files.presentation"
+  ],
+  "runsOn": "ui",
+  "distribution": "marketplace",
+  "contributes": {
+    "filePresentation": {
+      "rules": []
+    }
+  },
+  "stateVersion": 1,
+  "author": "Hato contributors",
+  "version": "0.1.1",
+  "pluginPackage": "path-highlights",
+  "pluginType": "Appearance",
+  "description": "Color files and folders by relative path, with rules shared across all projects, tasks and workspaces."
+}

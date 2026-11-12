@@ -1,0 +1,67 @@
+// modules/ui/language-status/src/index.ts
+var open = false;
+var index_default = {
+  id: "language-status",
+  moduleApiVersion: 1,
+  activate(ctx) {
+    ctx.state.watch("language-tools.status", () => ctx.ui.invalidate());
+  },
+  render(ctx) {
+    const status = ctx.state.get("language-tools.status");
+    const servers = Array.isArray(status?.servers) ? status.servers : [];
+    const items = servers.length ? servers.map((s) => ({ type: "column", key: `server:${s.id}`, gap: 2, style: { paddingY: 4 }, children: [
+      { type: "row", key: "server-header", gap: 4, align: "center", children: [
+        { type: "column", key: "server-name", grow: true, children: [
+          {
+            type: "button",
+            key: "toggle",
+            text: `${s.enabled ? "✓" : "  "}  ${s.title}`,
+            action: "toggle",
+            value: s.id,
+            variant: "ghost",
+            small: true,
+            disabled: !status?.workspace,
+            tooltip: s.enabled ? `Stop treating this workspace as a ${s.title} project` : `Treat this workspace as a ${s.title} project`
+          }
+        ] },
+        ...s.enabled ? [{ type: "label", key: "phase", text: s.phase, size: "xs", color: "muted", style: { noShrink: true } }] : []
+      ] },
+      { type: "row", key: "server-actions", children: [
+        {
+          type: "button",
+          key: "settings",
+          text: "Project settings…",
+          action: "settings",
+          value: s.id,
+          variant: "ghost",
+          small: true,
+          disabled: !status?.workspace,
+          tooltip: `Open ${s.title} settings for the selected project or task`
+        }
+      ] }
+    ] })) : [{ type: "label", key: "none", text: "No language plugins are installed.", size: "sm", color: "muted" }];
+    return { type: "row", key: "language-status", gap: 4, align: "center", children: [
+      { type: "dropdown", key: "languages", text: status?.label ? `lng-srv · ${status.label}` : "lng-srv", tooltip: status?.message || "Language servers for this workspace", open, action: "menu", variant: "ghost", menuWidth: 320, maxHeight: 360, children: [
+        { type: "label", key: "title", text: "Languages for this workspace", size: "xs", color: "muted" },
+        ...items,
+        { type: "divider", key: "div" },
+        { type: "button", key: "symbols", text: "Search symbols…", action: "symbols", variant: "ghost", small: true, disabled: !servers.some((s) => s.enabled) }
+      ] }
+    ] };
+  },
+  onEvent(ctx, event) {
+    if (event.action === "menu") {
+      open = event.value === true;
+      ctx.ui.invalidate();
+      return;
+    }
+    open = false;
+    ctx.ui.invalidate();
+    if (event.action === "toggle") ctx.events.emit("language-status.toggle", { serverId: event.value });
+    else if (event.action === "settings") ctx.events.emit("language-status.settings", { serverId: event.value });
+    else if (event.action === "symbols") ctx.events.emit("language-status.open", { symbols: true });
+  }
+};
+export {
+  index_default as default
+};

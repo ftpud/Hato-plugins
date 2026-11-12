@@ -19,7 +19,7 @@
   "stateVersion": 1,
   "description": "Internal MCP server with module tools and skills; local and SSH-bridged endpoints.",
   "author": "Hato contributors",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "pluginPackage": "core-acp",
   "pluginType": "AI"
 }

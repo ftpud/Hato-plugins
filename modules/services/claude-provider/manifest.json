@@ -40,7 +40,7 @@
       }
     ]
   },
-  "version": "0.1.4",
+  "version": "0.1.5",
   "pluginPackage": "claude-acp",
   "pluginType": "AI providers",
   "description": "Claude profile, adapter setup, authentication policy and usage parsing."

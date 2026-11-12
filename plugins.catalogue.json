@@ -8,7 +8,7 @@
       "type": "System",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.32",
+      "version": "0.1.33",
       "coreVersion": "^0.1.0",
       "description": "Hato essentials services and panels.",
       "dependencies": {},
@@ -35,7 +35,7 @@
       "type": "AI",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.8",
+      "version": "0.1.9",
       "coreVersion": "^0.1.0",
       "description": "Provider-independent ACP sessions, chat UI and MCP tools. Install AI providers separately.",
       "dependencies": {
@@ -57,7 +57,7 @@
       "type": "Development",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.13",
+      "version": "0.1.14",
       "coreVersion": "^0.1.0",
       "description": "Git changes, branch controls, worktree tasks and history panels.",
       "dependencies": {
@@ -79,7 +79,7 @@
       "type": "AI providers",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "coreVersion": "^0.1.0",
       "description": "Claude provider, adapter setup and plan usage bar. Install this plugin to use Claude in chats, agents and workflows.",
       "dependencies": {
@@ -97,7 +97,7 @@
       "type": "AI providers",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "coreVersion": "^0.1.0",
       "description": "Codex provider, adapter setup and plan usage bar. Install this plugin to use Codex in chats, agents and workflows.",
       "dependencies": {
@@ -173,7 +173,7 @@
       "type": "Connectivity",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "coreVersion": "^0.1.0",
       "description": "Remote workspaces services and panels.",
       "dependencies": {
@@ -190,7 +190,7 @@
       "type": "Languages",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.10",
+      "version": "0.1.11",
       "coreVersion": "^0.1.0",
       "description": "Shared language support for local and SSH workspaces.",
       "dependencies": {
@@ -208,7 +208,7 @@
       "type": "Languages",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.9",
+      "version": "0.1.10",
       "coreVersion": "^0.1.0",
       "description": "Java highlighting and Eclipse JDTLS navigation.",
       "dependencies": {
@@ -257,11 +257,11 @@
       "type": "Appearance",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "coreVersion": "^0.1.0",
       "description": "Color files and folders by relative path with rules shared across all projects, tasks and workspaces.",
       "dependencies": {
-        "foundation": "^0.1.23"
+        "foundation": "^0.1.33"
       },
       "modules": [
         "path-highlights"
