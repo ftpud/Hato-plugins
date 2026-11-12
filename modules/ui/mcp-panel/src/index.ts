@@ -141,7 +141,8 @@ function serverFromDraft(d: Draft): AgentMcp {
 // ---- views -------------------------------------------------------------------------------------
 
 function serverRows(list: Server[]): UiNode {
-  return { type: "tree", key: "servers", rowHeight: 46, rowGap: 2, iconSize: 20, indent: 0, selectAction: "select", expandAction: "noop", activateAction: "edit",
+  // Trees virtualize their rows and need an explicit viewport inside this scrolling column.
+  return { type: "tree", key: "servers", height: list.length * 48, style: { noShrink: true }, rowHeight: 46, rowGap: 2, iconSize: 20, indent: 0, selectAction: "select", expandAction: "noop", activateAction: "edit",
     rows: list.map(s => { const h = health(s); return {
       key: s.id, label: s.name, detail: summary(s) || h.detail, badge: h.text, depth: 0, expanded: false, expandable: false, selected: s.id === selected,
       iconSvg: iconFor(s), iconColor: toneColor[h.tone], busy: h.text === "Signing in…", weight: "medium",
