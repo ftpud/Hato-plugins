@@ -9,6 +9,8 @@ import { unifiedPatch } from "@hato/sdk/text-diff";
 import { listBranches, checkoutBranch, createBranch, renameBranch, deleteBranch, publishBranch, setBranchUpstream } from "./branches";
 
 import { gitOperations } from "./operations";
+import { fileHistory } from "./file-history";
+import { blame } from "./blame";
 
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const MAX_PATCH_BYTES = 4 * 1024 * 1024;
@@ -18,14 +20,14 @@ async function desc(ctx: ModuleContext, workspaceId: string): Promise<WorkspaceD
   return ctx.modules.call("workspace", "resolve", { workspaceId });
 }
 
-async function git(ctx: ModuleContext, d: WorkspaceDescriptor, args: string[], limitBytes = MAX_PATCH_BYTES): Promise<RunResult> {
+async function git(ctx: ModuleContext, d: WorkspaceDescriptor, args: string[], limitBytes = MAX_PATCH_BYTES, stdin?: string): Promise<RunResult> {
   return withWorkspace(ctx, d, async () => {
     const g = await workspaceGrant(ctx, d, "process");
     return ctx.host.process.run(g.grant, {
       target: await targetFor(ctx, d), executable: "git",
       args: [...(args[0] === "stash" ? [] : ["--literal-pathspecs"]), "--no-optional-locks", "-c", "core.quotepath=false", "-c", "color.ui=false", ...args],
       cwd: d.rootAbsolutePath, loginShell: d.location === "ssh",
-    }, { timeoutMs: 30000, limitBytes });
+    }, { timeoutMs: 30000, limitBytes, ...(stdin !== undefined ? { stdin } : {}) });
   });
 }
 
@@ -208,6 +210,8 @@ const mod: AppModule = {
   },
   methods: {
     ...gitOperations({ desc, git, fail, cleanRel }),
+    ...fileHistory({ desc, git, fail, cleanRel }),
+    ...blame({ desc, git, fail, cleanRel }),
     /** Local/remote branches and HEAD, without fetching or changing the repository. */
     async branches(ctx, a) {
       const d = await desc(ctx, a.workspaceId);

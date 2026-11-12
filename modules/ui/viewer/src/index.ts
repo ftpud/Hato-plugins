@@ -18,6 +18,9 @@ import { languageDefinitions, languageForPath, workspacePath, relativeFile, vali
 import { shellBlocks } from "./markdown";
 import { enclosingType, hoverType, receiverAt, shapeCompletions, shapeHover } from "./assist";
 import { diffLines } from "@hato/sdk/text-diff";
+import { declarationAnnotations, forgetBlames, refreshBlame } from "./authorship";
+import { hasDeclarations } from "./declarations";
+import { historyEvent, historySnapshot, historyWindow, mapToCommitted, openHistory, restoreHistory } from "./history";
 
 // ---- Git change markers -------------------------------------------------------------------
 // HEAD text per open file; hunks are recomputed locally as the buffer changes.
@@ -26,6 +29,7 @@ const heads = new Map<string, { text: string | null; tracked: boolean }>();
 let hunks: Hunk[] = [];
 let hunkView: { index: number; hunk: Hunk } | null = null;
 let gitMarkers = true;
+let declarationAuthors = true;
 const headKey = (workspaceId: string, path: string) => `${workspaceId}|${path}`;
 function computeHunks(head: string | null, text: string | null | undefined): Hunk[] {
   if (head === null || typeof text !== "string") return [];
@@ -111,6 +115,7 @@ async function save(ctx: ModuleContext, b: Buffer, force = false) {
     if (current?.workspaceId === b.workspaceId && current.relativePath === b.path) current.text = text;
     if (b.text === text) { b.state = "clean"; b.text = null; } else b.state = "dirty";
     b.error = undefined;
+    if (current?.workspaceId === b.workspaceId && current.relativePath === b.path) refreshAuthorship(ctx);
     if (languageService) void ctx.modules.call("language-service", "saved", { workspaceId: b.workspaceId, path: b.path, text }, { timeoutMs: 175000 }).catch(e => ctx.log.warn(errMsg(e)));
   } catch (e: any) {
     const msg = errMsg(e);
@@ -276,6 +281,7 @@ async function load(ctx: ModuleContext, force = false) {
       loadingPath = null;
       if (!known || current?.document !== known.document) void synchronizeLanguage(ctx);
       void refreshHead(ctx);
+      refreshAuthorship(ctx);
     }
     ctx.ui.invalidate();
   }
@@ -303,6 +309,14 @@ async function refreshHead(ctx: ModuleContext) {
     heads.set(headKey(workspaceId, path), { text: r?.text ?? null, tracked: !!r?.tracked });
   } catch { heads.delete(headKey(workspaceId, path)); }
   updateHunks(); ctx.ui.invalidate();
+}
+/** Re-blame the open file (when its language has declaration annotations). */
+function refreshAuthorship(ctx: ModuleContext) {
+  if (!declarationAuthors || !ws || !current || current.diff || current.binary || current.truncated || !current.document) return;
+  if (!hasDeclarations(languageForPath(languages, current.relativePath)?.grammar)) return;
+  const text = buffers.get(current.document)?.text ?? current.text;
+  if (typeof text !== "string") return;
+  void refreshBlame(ctx, ws.id, current.relativePath, text).then(changed => { if (changed) ctx.ui.invalidate(); });
 }
 
 function tabLabel(tab: string) {
@@ -357,6 +371,8 @@ const mod: AppModule = {
     viewerWrap = typeof savedViewerWrap === "boolean" ? savedViewerWrap : true;
     const savedMarkers = await ctx.modules.call("persistence", "settings.get", { key: "viewer.gitMarkers" });
     gitMarkers = typeof savedMarkers === "boolean" ? savedMarkers : true;
+    const savedAuthors = await ctx.modules.call("persistence", "settings.get", { key: "viewer.declarationAuthors" });
+    declarationAuthors = typeof savedAuthors === "boolean" ? savedAuthors : true;
     const savedEditable = await ctx.modules.call("persistence", "settings.get", { key: "viewer.editable" });
     editable = typeof savedEditable === "boolean" ? savedEditable : true;
     const savedAutosave = await ctx.modules.call("persistence", "settings.get", { key: "viewer.autosave" });
@@ -367,6 +383,7 @@ const mod: AppModule = {
     editorFont = { family: editorFontOptions.some(o => o.value === savedFont?.family) ? savedFont.family : GLOBAL_FONT, fontWeight: "", fontSize: "", lineHeight: "" };
     for (const key of Object.keys(FONT_NUMBERS) as FontNumber[]) { try { editorFont[key] = fontNumber(key, savedFont?.[key]); } catch { /* ignore invalid saved value */ } }
     for (const [doc, b] of Object.entries(prev?.buffers || {}) as [string, Buffer][]) buffers.set(doc, { ...b, inflight: false, again: false });
+    await restoreHistory(ctx, prev);
     publishSettings = exportSettings(ctx, () => [{ key: "viewer", title: "Source editor", fields: [
       { key: "editable", label: "Edit files", type: "toggle", value: editable,
         description: "Allow editing in the source panel. The first save in a workspace asks for write access." },
@@ -381,6 +398,8 @@ const mod: AppModule = {
         description: "Soft-wrap long lines in Git diff review. Markdown previews always reflow." },
       { key: "gitMarkers", label: "Show Git change bars", type: "toggle", value: gitMarkers,
         description: "Mark added, changed and deleted lines next to the line numbers. Click a bar to review or roll back the change." },
+      { key: "declarationAuthors", label: "Show authors next to declarations", type: "toggle", value: declarationAuthors,
+        description: "After each class, interface and method (Java), show who changed it last and when." },
       { key: "showMetadata", label: "Show file metadata", type: "toggle", value: showMetadata,
         description: "Display the language and file size in the bottom status bar." },
       { key: "renderMarkdown", label: "Preview Markdown files", type: "toggle", value: renderMarkdown,
@@ -415,7 +434,7 @@ const mod: AppModule = {
         await ctx.modules.call("persistence", "settings.set", { key: "viewer.autosaveDelay", value: ms });
         autosaveDelay = ms; return;
       }
-      if (!["showMetadata", "renderMarkdown", "editable", "autosave", "editorWrap", "viewerWrap", "gitMarkers"].includes(key) || typeof value !== "boolean") throw new Error("Invalid viewer setting");
+      if (!["showMetadata", "renderMarkdown", "editable", "autosave", "editorWrap", "viewerWrap", "gitMarkers", "declarationAuthors"].includes(key) || typeof value !== "boolean") throw new Error("Invalid viewer setting");
       await ctx.modules.call("persistence", "settings.set", { key: `viewer.${key}`, value });
       if (key === "showMetadata") showMetadata = value;
       else if (key === "renderMarkdown") renderMarkdown = value;
@@ -423,6 +442,7 @@ const mod: AppModule = {
       else if (key === "editorWrap") editorWrap = value;
       else if (key === "viewerWrap") viewerWrap = value;
       else if (key === "gitMarkers") { gitMarkers = value; void refreshHead(ctx); }
+      else if (key === "declarationAuthors") { declarationAuthors = value; refreshAuthorship(ctx); }
       else { autosave = value; if (value) scheduleSaves(ctx); }
       ctx.ui.invalidate();
     });
@@ -432,7 +452,7 @@ const mod: AppModule = {
     ctx.events.on("git-panel.statusChanged", (e: any) => {
       if (current?.diff && e?.workspaceId === ws?.id && ws?.view?.previewPath === current.tab) void load(ctx, true);
     });
-    ctx.events.on("git.changed", (e: any) => { if (e?.workspaceId === ws?.id) { heads.clear(); void refreshHead(ctx); } });
+    ctx.events.on("git.changed", (e: any) => { if (e?.workspaceId === ws?.id) { heads.clear(); void refreshHead(ctx); forgetBlames(); refreshAuthorship(ctx); } });
     ctx.events.on("language-service.configurationChanged", () => { void synchronizeLanguage(ctx); });
     ctx.events.on("language-service.changed", () => { void synchronizeLanguage(ctx); });
 
@@ -453,7 +473,7 @@ const mod: AppModule = {
     if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
     if (autosave) await Promise.all([...buffers.values()].filter(b => b.state === "dirty").map(b => save(ctx, b)));
   },
-  snapshot: () => ({ current, buffers: Object.fromEntries([...buffers].filter(([, b]) => b.state !== "clean" || b.mtime != null).map(([d, b]) => [d, { ...b, inflight: false }])) }),
+  snapshot: () => ({ current, history: historySnapshot(), buffers: Object.fromEntries([...buffers].filter(([, b]) => b.state !== "clean" || b.mtime != null).map(([d, b]) => [d, { ...b, inflight: false }])) }),
   methods: {
     "language.document"(_ctx,a) {
       if(a.workspaceId!==ws?.id)throw new Error("The editor is showing a different workspace");
@@ -556,8 +576,17 @@ const mod: AppModule = {
         completionResolveMethod: languageService && language?.server && projectLanguageEnabled && !current?.truncated && canEdit ? "editor.resolveCompletion" : undefined,
         lineMarkers: hunks.map((h, index) => ({ line: h.line, endLine: h.line + h.added, color: !h.added ? "danger" : h.removed.length ? "primary" : "success", value: index })),
         lineMarkerAction: "showHunk",
+        lineAnnotations: declarationAuthors && current && !current.binary && !current.truncated && ws
+          ? declarationAnnotations(ws.id, current.relativePath, language?.grammar, buffers.get(current.document)?.text ?? current.text) : undefined,
         definitionArgs: { workspaceId: ws?.id, path: current?.relativePath }, openLocationAction: "openDefinition",
         search: editorSearch,
+        contextMenu: current && !current.binary && current.document ? (() => {
+          const untracked = heads.get(headKey(ws.id, current.relativePath))?.tracked === false;
+          return [
+            { text: "View file history", action: "viewHistory", value: "file", disabled: untracked },
+            { text: "View selection history", action: "viewHistory", value: "selection", disabled: untracked },
+          ];
+        })() : undefined,
         reveal: navigation && navigation.workspaceId === ws?.id && navigation?.path === current?.relativePath ? navigation : undefined });
     }
     const buf = !diff && current?.document ? buffers.get(current.document) : undefined;
@@ -603,12 +632,40 @@ const mod: AppModule = {
         { type: "button", key: "right", text: "Close all to the right", action: "closeRight", value: tabMenu, variant: "ghost" },
         { type: "button", key: "all", text: "Close all", action: "closeAll", value: tabMenu, variant: "ghost" },
       ] });
+    const history = historyWindow(diffMode, viewerWrap);
+    if (history) kids.push(history);
     return { type: "column", key: "viewer-root", style: { position: "relative" }, gap: 3, padding: 4, grow: true, children: kids };
   },
   async onEvent(ctx, ev) {
+    try {
+      // The history window keeps its own workspace, so it works after switching projects.
+      if (await historyEvent(ctx, ev.action, ev, () => mod.onEvent!(ctx, { action: "toggleDiffMode", key: "history", inputs: {} }) as Promise<void>)) return;
+    } catch (e) { error = errMsg(e); ctx.ui.invalidate(); return; }
     if (!ws) return;
     try {
-      if (ev.action === "openDefinition") {
+      if (ev.action === "viewHistory") {
+        const v: any = ev.value || {};
+        if (!current || current.diff || v.document !== current.document) return;
+        const path = current.relativePath, workspaceId = ws.id;
+        if (v.value !== "selection") { await openHistory(ctx, { workspaceId, path, range: null, shown: null }); return; }
+        const sel = v.selection || {};
+        let start = Number(sel.start?.line) || 0, end = Number(sel.end?.line) || 0;
+        if (end < start) [start, end] = [end, start];
+        // A selection ending at the start of a line does not include that line.
+        if (end > start && Number(sel.end?.character) === 0) end--;
+        // Trace the committed counterparts of the selected lines (edits since HEAD shift them).
+        let head = heads.get(headKey(workspaceId, path));
+        if (!head) {
+          const r = await ctx.modules.call("git", "headText", { workspaceId, path }, { timeoutMs: 30000 });
+          head = { text: r?.text ?? null, tracked: !!r?.tracked };
+          heads.set(headKey(workspaceId, path), head);
+        }
+        if (!head.tracked) throw new Error(`${path} has no committed history yet.`);
+        const text = buffers.get(current.document)?.text ?? current.text;
+        const range = head.text !== null && typeof text === "string" ? mapToCommitted(head.text, text, start, end) : [start, end] as [number, number];
+        if (!range) throw new Error("The selected lines are not committed yet, so they have no history.");
+        await openHistory(ctx, { workspaceId, path, range, shown: [start, end] });
+      } else if (ev.action === "openDefinition") {
         const value: any = ev.value || {};
         if (value.document !== current?.document) return;
         const path = workspacePath(ws.rootAbsolutePath, String(value.uri));
