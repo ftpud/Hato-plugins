@@ -20,13 +20,13 @@ export default {
     publishSettings = exportSettings(ctx, (): SettingsSection[] => [{ key: "shared", title: "Path highlights", group: "Appearance",
       description: "Shared across all projects, tasks and workspaces. Add a rule to choose its relative path and color. Folder rules include their contents; **/src/test also matches nested modules. User rules override language colors; later rules win when they overlap.", fields: [
         { key: "enabled", label: "Enable path coloring", type: "toggle", value: settings.enabled },
-        { key: "opacity", label: "Background opacity (%)", type: "text", value: String(settings.opacity), description: "0–100. Low values keep file names easy to read. Press Enter to save." },
+        { key: "opacity", label: "Background opacity", type: "range", value: String(settings.opacity), min: 0, max: 100, step: 5, unit: "%", description: "Low values keep file names easy to read." },
         { key: "add", label: "Add rule", buttonLabel: "Add highlight rule", type: "action", disabled: settings.rules.length >= MAX_RULES },
       ] }, ...settings.rules.map((rule): SettingsSection => ({ key: `rule:${rule.id}`, title: `Path highlight: ${rule.path}`, group: "Appearance",
-      description: "This rule is shared across all workspaces and tasks. Edit the path or color and press Enter to save.", fields: [
+      description: "This rule is shared across all workspaces and tasks. Press Enter to save a new path.", fields: [
         { key: "enabled", label: "Enable this rule", type: "toggle", value: rule.enabled },
         { key: "path", label: "Relative path", type: "text", value: rule.path, placeholder: "src/test or **/generated" },
-        { key: "color", label: "Color (#RRGGBB)", type: "text", value: rule.color, placeholder: "#22c55e" },
+        { key: "color", label: "Color", type: "color", value: rule.color, description: "Pick a swatch or type a hex value and press Enter." },
         { key: "remove", label: "Remove rule", buttonLabel: "Remove highlight rule", type: "action" },
       ] }))], async (section, key, value) => {
       if (section === "shared") {

@@ -50,7 +50,7 @@ const mod: AppModule = {
     visible = !!(ctx.state.get("workspace-layout.panels") as any)?.["git-history"];
     ctx.state.watch("workspace-layout.panels", (v: any) => { const next = !!v?.["git-history"]; if (next === visible) return; visible = next; if (visible) void refresh(ctx); });
     ws = ctx.state.get("workspace.selected");
-    if (prev?.workspaceId === ws?.id) {
+    if (prev && prev.workspaceId === ws?.id) {
       ref = prev.ref || "ALL"; query = prev.query || ""; branchQuery = prev.branchQuery || ""; chosen = prev.chosen || "";
       branches = prev.branches || []; tags = prev.tags || []; commits = prev.commits || []; comparison = prev.comparison || null; more = !!prev.more;
     }
@@ -61,7 +61,7 @@ const mod: AppModule = {
   deactivate() { epoch++; },
   snapshot: () => ({ workspaceId: ws?.id, ref, query, branchQuery, chosen, branches, tags, commits, comparison, more }),
   render(): UiNode {
-    if (!ws) return { type: "label", key: "empty", text: "Select a project or task.", color: "muted" };
+    if (!ws) return { type: "label", key: "empty", text: "Select a project or task.", color: "muted", padding: 12 };
     const options = [{ value: "ALL", label: "All branches" }, { value: "HEAD", label: "Current branch" }, ...branches.map(b => ({ value: b.ref, label: b.name })), ...tags.map(t => ({ value: t, label: t.replace("refs/tags/", "Tag · ") }))].filter(b => b.value === ref || b.label.toLowerCase().includes(branchQuery.toLowerCase()));
     const layout = commitGraph(commits, 58);
     const highlight = hovered !== null ? layout.branchOf.get(hovered) ?? null : null;

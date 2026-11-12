@@ -50,6 +50,12 @@ async function refresh(ctx: ModuleContext) {
   } catch (e) { if (mine === epoch) error = errMsg(e); }
   finally { if (mine === epoch) { loading = false; if (dirty && autoRefresh) void refresh(ctx); } ctx.ui.invalidate(); }
 }
+const gitIcon = (paths: string) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+const gitIcons = {
+  fetch: gitIcon("<path d='M17.5 19a4.5 4.5 0 1 0-1.4-8.8A6 6 0 0 0 4.5 12a3.5 3.5 0 0 0 1 6.9'/><path d='M12 12v8M9 17l3 3 3-3'/>"),
+  pull: gitIcon("<path d='M12 4v12M7 11l5 5 5-5M5 20h14'/>"),
+  push: gitIcon("<path d='M12 20V8M7 13l5-5 5 5M5 4h14'/>"),
+};
 function stashEnv(ctx: ModuleContext, id: string): StashEnv {
   return {
     workspaceId: id, current: () => ws?.id === id,
@@ -92,16 +98,22 @@ const mod: AppModule = {
   canSwap: () => ({ ok: !busy, reason: "A Git operation is running" }),
   deactivate() { epoch++; }, snapshot: () => ({ drafts, collapsed: [...collapsed] }),
   render(): UiNode {
-    if (!ws) return { type: "label", key: "empty", text: "Select a project or task.", color: "muted" };
+    if (!ws) return { type: "label", key: "empty", text: "Select a project or task.", color: "muted", padding: 12 };
     const d = draft(), a = active(), current = files(), shown = current.filter(f => f.path.toLowerCase().includes(query.toLowerCase()));
     const picked = current.filter(f => selected.has(f.path));
     const children: UiNode[] = [
-      { type: "row", key: "tools", gap: 4, wrap: true, align: "center", children: [
-        { type: "label", key: "branch", text: `⎇ ${status?.branch || "Git"}${status?.upstream ? ` · ↑${status.ahead} ↓${status.behind}` : ""}`, tooltip: status?.upstream || "No upstream configured", grow: true, weight: "semibold", size: "sm" },
-        button("stashes", stashCount() ? `Stashes (${stashCount()})` : "Stashes", "stash.open", { iconSvg: stashIcon,
-          tooltip: stashCount() ? `${stashCount()} saved stash${stashCount() === 1 ? "" : "es"}` : "Stash changes to set them aside" }),
-        button("fetch", "Fetch"), button("pull", "Pull"), button("push", "Push"),
-        button("refresh", "", "refresh", { iconSvg: uiIcons.refresh, tooltip: "Refresh Git status", disabled: busy || loading }),
+      { type: "row", key: "tools", gap: 2, align: "center", children: [
+        { type: "label", key: "branch", text: `⎇ ${status?.branch || "Git"}`, tooltip: status?.upstream ? `${status.branch} → ${status.upstream}` : "No upstream configured",
+          grow: true, weight: "semibold", size: "sm", style: { paddingX: 2 } },
+        ...(status?.upstream && (status.ahead || status.behind) ? [{ type: "label", key: "sync", text: `↑${status.ahead} ↓${status.behind}`, size: "xs", color: "muted",
+          tooltip: `${status.ahead} to push · ${status.behind} to pull`, style: { noShrink: true, paddingX: 4 } } as UiNode] : []),
+        // Count as text beside the icon: an overlay badge hid the small icon.
+        button("stashes", stashCount() ? String(stashCount()) : "", "stash.open", { iconSvg: stashIcon, style: { noShrink: true, gap: 3, paddingX: stashCount() ? 6 : undefined },
+          tooltip: stashCount() ? `Stashes · ${stashCount()} saved` : "Stashes" }),
+        button("fetch", "", "fetch", { iconSvg: gitIcons.fetch, tooltip: "Fetch from all remotes", style: { noShrink: true } }),
+        button("pull", "", "pull", { iconSvg: gitIcons.pull, tooltip: status?.behind ? `Pull ${status.behind} commit${status.behind === 1 ? "" : "s"} (fast-forward only)` : "Pull (fast-forward only)", style: { noShrink: true } }),
+        button("push", "", "push", { iconSvg: gitIcons.push, tooltip: status?.ahead ? `Push ${status.ahead} commit${status.ahead === 1 ? "" : "s"}` : "Push", style: { noShrink: true } }),
+        button("refresh", "", "refresh", { iconSvg: uiIcons.refresh, tooltip: "Refresh Git status", disabled: busy || loading, style: { noShrink: true } }),
       ] },
       { type: "row", key: "sets", gap: 3, wrap: true, children: [
         ...d.sets.map(s => button(`set:${s.id}`, `${s.name} (${s.id === "main" ? (status?.files || []).filter((f: Change) => !d.sets.some(t => t.id !== "main" && t.paths.includes(f.path))).length : (status?.files || []).filter((f: Change) => s.paths.includes(f.path)).length})`, "set", { value: s.id, variant: a.id === s.id ? "primary" : "ghost" })),

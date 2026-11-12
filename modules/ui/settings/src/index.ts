@@ -3,7 +3,9 @@ import { marketNodes, marketTab, refreshMarket, installPackage, updateAllPackage
 import type { AppModule, ModuleContext, PluginInfo, SettingsExport, SettingsSection, SettingField, UiNode } from "@hato/sdk/types";
 import { parseOrder, SPACER_PREFIX } from "@hato/sdk/settings-order";
 import { uiTable, normalizeTableStyle } from "@hato/sdk/ui-table";
+import { colorControl, rangeControl } from "@hato/sdk/ui-controls";
 import { errMsg } from "@hato/sdk/runtime";
+import { initSetup, openSetup, setupEvent, setupModal, setupOpen, setupSnapshot } from "./setup";
 
 let open = false;
 let selectedCategory = "";
@@ -96,9 +98,11 @@ const mod: AppModule = {
     if(ctx.host.plugins.rescan)await ctx.host.plugins.rescan();
     ctx.events.on("kernel.modules.changed", () => { void refresh(ctx); });
     await refresh(ctx);
+    await initSetup(ctx, prev);
+    ctx.events.on("settings.setup", () => { openSetup(); ctx.ui.invalidate(); });
   },
   deactivate() { for (const stop of subscriptions.values()) stop(); subscriptions.clear(); },
-  snapshot: () => ({ open, selectedCategory, query, pluginBrowser: pluginBrowserSnapshot() }),
+  snapshot: () => ({ open, selectedCategory, query, pluginBrowser: pluginBrowserSnapshot(), setup: setupOpen() ? setupSnapshot() : undefined }),
   methods: {
   /** User syntax color schemes: `*.json` in <sharedDir>/syntax-schemes, as raw text for
    *  workspace-layout to validate (it has no file access of its own). Read-only. */
@@ -119,6 +123,8 @@ const mod: AppModule = {
     finally { if (grant) await ctx.host.capabilities.release(grant).catch(() => {}); }
     return { dir, files };
   },
+  /** Reopen the first-run plugin setup (e.g. from a command or another module). */
+  async setup(ctx) { openSetup(); ctx.ui.invalidate(); },
   async open(ctx, args) {
     open = true;
     if (typeof args?.module === "string" && typeof args?.section === "string") selectedCategory = JSON.stringify([args.module, args.section]);
@@ -127,6 +133,7 @@ const mod: AppModule = {
     ctx.ui.invalidate(); await refresh(ctx);
   } },
   render(ctx): UiNode {
+    if (setupOpen()) return setupModal();
     if (!open) return { type: "column", key: "settings-closed", children: [] };
     const all = categories(ctx), needle = query.trim().toLowerCase();
     const list = all.filter(c => !needle || [c.title, c.section?.description, ...(c.section?.fields || []).flatMap(f => [f.label, f.description])].join(" ").toLowerCase().includes(needle));
@@ -144,27 +151,44 @@ const mod: AppModule = {
     if (active.error) options.push({ type: "status", key: "category-error", text: active.error, level: "error" });
     if (active.section?.description) options.push({ type: "label", key: "category-description", text: active.section.description, size: "sm", color: "muted", wrap: true });
     const tableRows: Parameters<typeof uiTable>[1] = [];
+    const cardRows: UiNode[] = [];
+    const table = active.section?.layout === "table";
+    const flushCard = () => {
+      if (!cardRows.length) return;
+      options.push({ type: "column", key: `card:${options.length}`, gap: 0, style: { borderWidth: 1, borderColor: "border", radius: 8 },
+        children: cardRows.flatMap((row, i) => i ? [{ type: "divider", key: `div:${i}` } as UiNode, row] : [row]) });
+      cardRows.length = 0;
+    };
     for (const field of active.section?.fields || []) {
       if (!field || typeof field.key !== "string") continue;
       const fieldKey = JSON.stringify([active.module, active.section!.key, field.key]);
-      if (field.type === "order") { options.push(orderEditor(field, fieldKey)); continue; }
+      if (field.type === "order") { flushCard(); options.push(orderEditor(field, fieldKey)); continue; }
+      const wide = field.type === "range" || field.type === "color";
       const control: UiNode = field.type === "action"
-        ? { type: "button", key: fieldKey, text: field.buttonLabel, disabled: !!field.disabled, action: "settingAction", small: true }
+        ? { type: "button", key: fieldKey, text: field.buttonLabel, disabled: !!field.disabled, action: "settingAction", small: true, style: { fullWidth: table } }
         : field.type === "toggle"
-        ? { type: "toggle", key: fieldKey, label: active.section?.layout === "table" ? "" : field.label, checked: field.value, action: "change" }
+        ? { type: "switch", key: fieldKey, label: "", checked: field.value, action: "change" }
         : field.type === "text" ? { type: "textInput", key: fieldKey, value: field.value, placeholder: field.placeholder, submitAction: "change" }
-        : { type: "select", key: fieldKey, value: field.value, options: field.options, action: "change", buttonStyle: { height: 32, fullWidth: true } };
-      if (active.section?.layout === "table") tableRows.push({ key: fieldKey, label: field.label, description: field.description, control });
-      else options.push({ type: "column", key: `${fieldKey}:field`, gap: 5, padding: 10, border: true, children: [
-        ...(field.type !== "toggle" ? [{ type: "label", key: "label", text: field.label, size: "sm", weight: "medium" } as UiNode] : []), control,
+        : field.type === "range" ? rangeControl(fieldKey, field, "sliderValue", "fieldValue", { field: fieldKey })
+        : field.type === "color" ? colorControl(fieldKey, field, "colorValue", "fieldValue", { field: fieldKey })
+        : field.type === "select" ? { type: "select", key: fieldKey, value: field.value, options: field.options, action: "change", buttonStyle: { height: 32, fullWidth: true, justify: "between" } }
+        : { type: "label", key: fieldKey, text: "Update Settings to edit this option", size: "xs", color: "muted" };
+      if (table) { tableRows.push({ key: fieldKey, label: field.label, description: field.description, control, ...(wide ? { controlWidth: 320 } : {}) }); continue; }
+      const head: UiNode = { type: "column", key: "text", grow: true, gap: 3, children: [
+        { type: "label", key: "label", text: field.label, size: "sm", weight: "medium", wrap: true },
         ...(field.description ? [{ type: "label", key: "description", text: field.description, size: "xs", color: "muted", wrap: true } as UiNode] : []),
-      ] });
+      ] };
+      // Switches, buttons, sliders and color pickers sit beside their label; text inputs and selects take the full row.
+      cardRows.push(field.type === "toggle" || field.type === "action" || wide
+        ? { type: "row", key: `${fieldKey}:field`, gap: 16, padding: 12, align: "center", children: [head, wide ? { type: "column", key: "control", width: 320, style: { noShrink: true }, children: [control] } : control] }
+        : { type: "column", key: `${fieldKey}:field`, gap: 8, padding: 12, children: [head, control] });
     }
+    flushCard();
     if (tableRows.length) options.push(uiTable("preferences-table", tableRows, normalizeTableStyle(ctx.state.get("workspace-layout.tableStyle"))));
     const resetLabel = active.module ? ctx.state.get<SettingsExport>(`${active.module}.settings`)?.resetLabel : null;
-    if (resetLabel) options.push({ type: "column", key: "reset-preferences", gap: 6, padding: 10, border: true, children: [
-      { type: "label", key: "description", text: "Restore default appearance, typography, panel placement, sharing, sidebar buttons, spacers and table styling. Workflows, chats and provider settings are preserved.", size: "sm", color: "muted", wrap: true },
-      { type: "button", key: "reset", text: resetLabel, action: "resetPreferences", value: active.module, variant: "danger", small: true },
+    if (resetLabel) options.push({ type: "row", key: "reset-preferences", gap: 12, align: "center", style: { paddingX: 2, paddingY: 4 }, children: [
+      { type: "label", key: "description", text: "Restore default appearance, typography, panels, sidebar buttons and table styling. Workflows, chats and provider settings are kept.", size: "xs", color: "muted", wrap: true, grow: true },
+      { type: "button", key: "reset", text: resetLabel, action: "resetPreferences", value: active.module, variant: "danger", small: true, style: { noShrink: true } },
     ] });
     const groups = ["Appearance", "Workspace", "Editor & Git", "AI & tools", "Tools & runtime", "Advanced"];
     const navigation: UiNode[] = [
@@ -175,7 +199,7 @@ const mod: AppModule = {
     for (const group of [...groups, ...new Set(list.map(categoryGroup).filter(g => !groups.includes(g)))]) {
       const entries = list.filter(c => categoryGroup(c) === group); if (!entries.length) continue;
       navigation.push({ type: "label", key: `group:${group}`, text: group.toUpperCase(), size: "xs", color: "muted", weight: "semibold", style: { paddingX: 10, paddingY: 10 } });
-      navigation.push(...entries.map((category): UiNode => ({ type: "choice", key: category.key, text: category.title, selected: active.key === category.key, style: { paddingX: 10, paddingY: 5, radius: 5 },
+      navigation.push(...entries.map((category): UiNode => ({ type: "choice", key: category.key, text: category.title, selected: active.key === category.key, mark: "", style: { paddingX: 10, paddingY: 5, radius: 5 },
         description: category.error ? "Needs attention" : undefined, action: "selectCategory", value: category.key })));
     }
     return { type: "modal", key: "settings-modal", title: "Settings", width: 1080, closeAction: "close", style: { padding: 20, gap: 16, radius: 12 }, children: [
@@ -192,6 +216,8 @@ const mod: AppModule = {
       if (providers.includes(module) && ctx.state.get<SettingsExport>(`${module}.settings`)?.resetLabel) ctx.events.emit("settings.reset", { module });
       return;
     }
+    if (event.action.startsWith("setup.")) { await setupEvent(ctx, event.action, event.value, () => refresh(ctx)); return; }
+    if (event.action === "openSetup") { open = false; openSetup(); ctx.ui.invalidate(); return; }
     if (event.action === "search") { query = String(event.value || ""); ctx.ui.invalidate(); return; }
     if (event.action.startsWith("order:")) {
       try {
@@ -225,6 +251,19 @@ const mod: AppModule = {
         const field = category?.section?.fields.find(f => f.key === key);
         if (!field || field.type !== "action" || field.disabled) return;
         ctx.events.emit("settings.action", { module, section, key });
+      } catch (e) { error = errMsg(e); ctx.ui.invalidate(); }
+      return;
+    }
+    if (event.action === "fieldValue" || event.action === "sliderValue" || event.action === "colorValue") {
+      // Native slider/picker events carry the field key as the node key; reset buttons carry it in value.
+      const field = event.action === "fieldValue" ? String((event.value as any)?.field ?? "") : event.key;
+      const raw = event.action === "fieldValue" ? (event.value as any)?.value : event.value;
+      // Settings colors are opaque #RRGGBB; drop an alpha channel the picker may add.
+      const value = event.action === "colorValue" ? (typeof raw === "string" ? raw.slice(0, 7) : "") : raw == null ? "" : String(raw);
+      try {
+        const [module, section, key] = JSON.parse(field);
+        if (!categories(ctx).some(c => c.module === module && c.section?.key === section && !!c.section?.fields.some(f => f.key === key))) return;
+        ctx.events.emit("settings.change", { module, section, key, value });
       } catch (e) { error = errMsg(e); ctx.ui.invalidate(); }
       return;
     }
@@ -279,6 +318,10 @@ function pluginRow(p: PluginInfo): UiNode {
 
 function pluginsPage(): UiNode[] {
   return [
+    { type: "row", key: "setup-entry", gap: 8, align: "center", children: [
+      { type: "label", key: "text", text: "Start from a preset: empty, recommended or everything.", size: "xs", color: "muted", grow: true },
+      { type: "button", key: "open-setup", text: "Run plugin setup…", action: "openSetup", small: true, disabled: pluginBusy !== null },
+    ] },
     ...marketNodes(plugins, pluginBusy !== null, pluginRow),
     ...(pluginBusy ? [{ type: "progress", key: "plugin-busy", indeterminate: true, label: pluginBusy } as UiNode] : []),
     ...(pluginStatus ? [{ type: "status", key: "plugin-status", text: pluginStatus.text, level: pluginStatus.level } as UiNode] : []),

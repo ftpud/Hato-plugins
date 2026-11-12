@@ -299,7 +299,7 @@ const mod: AppModule = {
         { type: "select", key: "agent", height: 32, buttonStyle: { ...chatStyle.fieldControl, height: 32 }, tooltip: active?.busy || live?.status === "starting" ? "Wait for the agent to finish or stop its turn before switching providers" : "Provider", options: (view?.profiles || []).map((p: any) => ({ value: p.id, label: p.name.replace(/\s*\([^)]*\)$/, "") })), value: conv?.acpProfileId || null, action: "setProfile", disabled: !conv || !!active?.busy || live?.status === "starting" || live?.status === "busy", placeholder: "Choose provider" },
       ] },
       { type: "column", key: "model-field", grow: true, minWidth: 100, gap: 0, children: [
-        { type: "button", key: "cfg-model", style: { ...chatStyle.control, fullWidth: true }, text: modelName + "  ⌄", action: "toggleModels", disabled: model.disabled, tooltip: "Choose model", grow: true },
+        { type: "button", key: "cfg-model", style: { ...chatStyle.control, fullWidth: true }, text: modelName.replace(/\s*\((recommended|default)\)$/i, "") + "  ⌄", action: "toggleModels", disabled: model.disabled, tooltip: `Model: ${modelName}`, grow: true },
       ] },
       { type: "switch", key: "auto", style: { radius: 8, color: "muted" }, label: "Auto", checked: conv?.approvalPolicy === "autopilot", action: "toggleAuto", disabled: !conv, tooltip: "Automatically approve agent tool permissions. Module changes still require native approval." },
       iconButton("settings-toggle", "sliders-horizontal", "toggleSettings", "Agent settings"),
@@ -347,48 +347,80 @@ const mod: AppModule = {
     }
     if (conv) {
       if (settingsOpen) {
+        // Each option is label → control → hint, grouped into titled sections, so a hint can never
+        // read as the next option's label.
+        const field = (key: string, label: string, control: UiNode, hint?: string): UiNode => ({ type: "column", key: key + "-field", gap: 5, children: [
+          { type: "label", key: "label", text: label, size: "sm", weight: "medium" },
+          control,
+          ...(hint ? [{ type: "label", key: "hint", text: hint, size: "xs", color: "muted", wrap: true } as UiNode] : []),
+        ] });
+        const section = (key: string, title: string, children: UiNode[]): UiNode => ({ type: "column", key, gap: 12, children: [
+          { type: "label", key: "title", text: title.toUpperCase(), size: "xs", weight: "semibold", color: "muted" }, ...children,
+        ] });
+        const selectControl = (node: UiNode): UiNode => ({ ...node, label: undefined, buttonStyle: chatStyle.fieldControl } as UiNode);
+        const options: UiNode[] = [];
+        for (const node of config.filter((n) => n.key !== "cfg-model")) {
+          const option = (live?.configOptions || []).find((o: any) => "cfg-" + o.id === node.key);
+          options.push(node.type === "select" ? field(node.key, node.label || option?.name || "Option", selectControl(node), option?.description) : node);
+        }
+        const permissions: UiNode[] = [
+          field("policy", "Approval policy", { type: "select", key: "policy", options: POLICIES, value: conv.approvalPolicy, action: "setPolicy", buttonStyle: chatStyle.fieldControl },
+            "Which tool requests ask you first. Auto in the toolbar switches to autopilot."),
+        ];
+        if (profile?.authOption) permissions.push({ type: "row", key: "provider-auth-row", gap: 12, align: "center", children: [
+          { type: "column", key: "text", grow: true, gap: 3, children: [
+            { type: "label", key: "label", text: profile.authOption.label, size: "sm", weight: "medium", wrap: true },
+            ...(profile.authOption.description ? [{ type: "label", key: "hint", text: profile.authOption.description, size: "xs", color: "muted", wrap: true } as UiNode] : []),
+          ] },
+          { type: "switch", key: "provider-auth", label: "", checked: view.auth?.[profile.authOption.field] !== false, action: "toggleProviderAuth" },
+        ] });
+        const description = modelDetails(model.value || "")?.description;
         const fields: UiNode[] = [
-          { type: "row", key: "heading", gap: 8, children: [
-            { type: "label", key: "title", text: providerName + " settings", weight: "bold", grow: true },
+          { type: "row", key: "heading", gap: 8, align: "center", children: [
+            { type: "column", key: "title", grow: true, gap: 2, children: [
+              { type: "label", key: "name", text: providerName + " settings", weight: "semibold" },
+              { type: "label", key: "model", text: model.value ? modelName : "No model selected", size: "xs", color: "muted" },
+            ] },
             iconButton("close", "x", "toggleSettings", "Close settings"),
           ] },
-          { type: "divider", key: "divider" },
-          ...(modelDetails(model.value || "")?.description ? [{ type: "label", key: "model-description", text: modelDetails(model.value || "").description, wrap: true, color: "muted" } as UiNode] : []),
+          ...(description ? [{ type: "label", key: "model-description", text: description, size: "xs", color: "muted", wrap: true } as UiNode] : []),
+          ...(options.length ? [{ type: "divider", key: "d-options" } as UiNode, section("agent-options", "Agent", options)] : []),
+          { type: "divider", key: "d-permissions" },
+          section("permissions", "Permissions", permissions),
         ];
-        for (const field of config.filter((n) => n.key !== "cfg-model")) {
-          const option = (live?.configOptions || []).find((o: any) => "cfg-" + o.id === field.key);
-          if (field.type === "select") {
-            fields.push({ type: "label", key: field.key + "-label", text: field.label || "Option", color: "muted" });
-            fields.push({ ...field, label: undefined, buttonStyle: chatStyle.fieldControl } as UiNode);
-          } else fields.push(field);
-          if (option?.description) fields.push({ type: "label", key: field.key + "-hint", text: option.description, size: "sm", color: "muted", wrap: true });
-        }
-        fields.push({ type: "select", key: "policy", label: "Approval policy", options: POLICIES, value: conv.approvalPolicy, action: "setPolicy", buttonStyle: chatStyle.fieldControl });
         if (background && backgroundPage) {
           const session = backgroundPage.session, files = backgroundCatalog?.agentFiles || [];
           const idle = !["busy", "waiting", "starting"].includes(session.status);
-          fields.push({ type: "select", key: "agent-file", label: "Instructions", buttonStyle: chatStyle.fieldControl, action: "setAgentFile", disabled: !idle,
-            options: [{ value: "", label: "None" }, ...files.map(f => ({ value: f.path, label: f.path })), ...(session.agentFile && !files.some(f => f.path === session.agentFile) ? [{ value: session.agentFile, label: session.agentFile }] : [])],
-            value: session.agentFile || "", tooltip: "Instruction file sent with the first prompt. Changing it restarts a connected agent." });
-          fields.push({ type: "label", key: "agent-skills", text: "Instruction skills: " + (session.skills.join(", ") || "None") + " · edit in the Agents panel", size: "xs", color: "muted", wrap: true });
+          fields.push({ type: "divider", key: "d-instructions" }, section("instructions", "Instructions", [
+            field("agent-file", "Instruction file", { type: "select", key: "agent-file", buttonStyle: chatStyle.fieldControl, action: "setAgentFile", disabled: !idle,
+              options: [{ value: "", label: "None" }, ...files.map(f => ({ value: f.path, label: f.path })), ...(session.agentFile && !files.some(f => f.path === session.agentFile) ? [{ value: session.agentFile, label: session.agentFile }] : [])],
+              value: session.agentFile || "" }, "Sent with the first prompt. Changing it restarts a connected agent."),
+            { type: "label", key: "agent-skills", text: "Skills: " + (session.skills.join(", ") || "none") + " · edit them in the Agents panel", size: "xs", color: "muted", wrap: true },
+          ]));
         }
-        if (profile?.authOption) fields.push({ type: "toggle", key: "provider-auth", label: profile.authOption.label, checked: view.auth?.[profile.authOption.field] !== false, action: "toggleProviderAuth", tooltip: profile.authOption.description });
-        fields.push({ type: "label", key: "loc", text: `${live?.machineId || view.workspace.machineId} · ${view.workspace.root}`, size: "xs", color: "muted", wrap: true });
-        fields.push({ type: "row", key: "connection", gap: 8, children: [
-          ...(background ? [
-            { type: "button", key: "connect", text: connected ? "Reconnect" : "Connect", action: "reconnect", style: chatStyle.control, disabled: !!active?.busy } as UiNode,
-            { type: "button", key: "stop", text: "Stop agent", action: "stopBackground", style: chatStyle.control, disabled: !live || live.status === "stopped" } as UiNode,
-          ] : [{ type: "button", key: "connect", text: connected ? "Disconnect" : "Connect", action: connected ? "disconnect" : "connect", style: chatStyle.control } as UiNode]),
-          { type: "button", key: "adapters", text: "Manage agents…", action: "openAdapters", style: chatStyle.control },
-        ] });
-        if (background) fields.push({ type: "row", key: "runtime", gap: 8, align: "center", children: [
-          { type: "button", key: "update-runtime", text: confirmRuntimeUpdate ? "Confirm update" : "Update runtime", action: confirmRuntimeUpdate ? "updateRuntime" : "askUpdateRuntime",
-            style: chatStyle.control, variant: confirmRuntimeUpdate ? "danger" : undefined, disabled: busy === "updateRuntime",
-            tooltip: "Install this desktop's agent runtime on the machine now. Running background agents restart and reconnect; a turn in progress is interrupted." },
-          ...(confirmRuntimeUpdate ? [{ type: "button", key: "cancel-update", text: "Cancel", action: "cancelUpdateRuntime", style: chatStyle.control } as UiNode] : []),
-          { type: "label", key: "hint", text: confirmRuntimeUpdate ? "Restarts all background agents on this machine" : "", size: "xs", color: "muted", grow: true, wrap: true },
-        ] });
-        kids.push({ type: "column", key: "settings", style: chatStyle.settings, grow: true, scroll: true, gap: 10, padding: 12, children: fields });
+        const statusText = connected ? "Connected" : live?.status === "starting" ? "Starting…" : live?.status ? live.status[0].toUpperCase() + live.status.slice(1) : "Not connected";
+        fields.push({ type: "divider", key: "d-connection" }, section("connection", "Connection", [
+          { type: "row", key: "where", gap: 6, align: "center", children: [
+            { type: "label", key: "state", text: "●", size: "xs", color: connected ? "success" : live?.error ? "danger" : "muted", style: { noShrink: true } },
+            { type: "label", key: "status", text: statusText, size: "sm", weight: "medium", style: { noShrink: true } },
+            { type: "label", key: "loc", text: `${live?.machineId || view.workspace.machineId} · ${view.workspace.root}`, size: "xs", color: "muted", grow: true, tooltip: view.workspace.root },
+          ] },
+          { type: "row", key: "connection", gap: 8, wrap: true, children: [
+            ...(background ? [
+              { type: "button", key: "connect", text: connected ? "Reconnect" : "Connect", action: "reconnect", style: chatStyle.control, disabled: !!active?.busy } as UiNode,
+              { type: "button", key: "stop", text: "Stop agent", action: "stopBackground", style: chatStyle.control, variant: "danger", disabled: !live || live.status === "stopped" } as UiNode,
+            ] : [{ type: "button", key: "connect", text: connected ? "Disconnect" : "Connect", action: connected ? "disconnect" : "connect", style: chatStyle.control } as UiNode]),
+            { type: "button", key: "adapters", text: "Manage agents…", action: "openAdapters", style: chatStyle.control },
+          ] },
+          ...(background ? [{ type: "row", key: "runtime", gap: 8, align: "center", wrap: true, children: [
+            { type: "button", key: "update-runtime", text: confirmRuntimeUpdate ? "Confirm update" : "Update runtime", action: confirmRuntimeUpdate ? "updateRuntime" : "askUpdateRuntime",
+              style: chatStyle.control, variant: confirmRuntimeUpdate ? "danger" : undefined, disabled: busy === "updateRuntime",
+              tooltip: "Install this desktop's agent runtime on the machine now. Running background agents restart and reconnect; a turn in progress is interrupted." },
+            ...(confirmRuntimeUpdate ? [{ type: "button", key: "cancel-update", text: "Cancel", action: "cancelUpdateRuntime", style: chatStyle.control } as UiNode] : []),
+            { type: "label", key: "hint", text: confirmRuntimeUpdate ? "Restarts all background agents on this machine" : "", size: "xs", color: "muted", grow: true, wrap: true },
+          ] } as UiNode] : []),
+        ]));
+        kids.push({ type: "column", key: "settings", style: chatStyle.settings, grow: true, scroll: true, gap: 16, padding: 14, children: fields });
       } else {
         const history = visibleHistory(active);
         if (history.hasOlder || historyBefore.length || historyLimit > CHAT_MESSAGE_LIMIT) kids.push({ type: "row", key: "message-history", gap: 6, children: [
@@ -411,7 +443,7 @@ const mod: AppModule = {
           { type: "button", key: "remove", text: "× " + image.name, action: "removeImage", value: index, small: true, tooltip: "Remove picture" },
         ] })) });
         composer.push({ type: "textInput", key: "prompt", style: { ...chatStyle.textarea, minHeight: 72 }, changeAction:"draftChanged", pasteImageAction: "attachImages", maxFiles: 4, maxBytes: 5 * 1024 * 1024, placeholder: active.busy ? "Steer " + providerName + "…" : "Ask " + providerName + "…", multiline: true, fillHeight: true, grow: true, rows: 2, submitAction: "send", value: draft });
-        composer.push({ type: "row", key: "act", gap: 6, children: [
+        composer.push({ type: "row", key: "act", gap: 6, align: "center", style: { noShrink: true }, children: [
           { type: "imagePicker", key: "attach", action: "attachImages", iconSvg: uiIcons.paperclip, style: chatStyle.attach, maxFiles: 4, maxBytes: 5 * 1024 * 1024,
             dialogTitle: "Attach pictures", tooltip: "Attach pictures (PNG, JPEG, WebP or GIF)", disabled: busy === "send" },
           { type: "button", key: "mcp-toggle", text: `MCP ${(conv.mcpSelection || []).length}`, iconSvg: uiIcons.plug, action: "toggleMcpPicker", style: mcpOpen ? { ...chatStyle.control, borderColor: "primary" } : chatStyle.control, tooltip: "MCP servers and skills for this chat" },

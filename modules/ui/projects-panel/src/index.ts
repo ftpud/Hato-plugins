@@ -25,7 +25,6 @@ let wslDistro = "";
 let filter = "";
 let backgroundOpacity = 0.12;
 // Row hover fill opacity: a translucent hover keeps the branding background visible.
-const HOVER_OPACITIES = [0.25, 0.45, 0.65, 1];
 let hoverOpacity = 0.45;
 let taskFormFor: string | null = null;
 let taskBranches: any[] = [], taskBranch = "", taskQuery = "";
@@ -216,7 +215,7 @@ const mod: AppModule = {
     };
     updateBackground(ctx.state.get("workspace-layout.projectsBackgroundOpacity"));
     const savedHover = Number(await ctx.modules.call("persistence", "settings.get", { key: "projects-panel.hoverOpacity" }).catch(() => null));
-    if (HOVER_OPACITIES.includes(savedHover)) hoverOpacity = savedHover;
+    if (Number.isFinite(savedHover) && savedHover >= 0.1 && savedHover <= 1) hoverOpacity = savedHover;
     const privacy: any = await ctx.modules.call("persistence", "settings.get", { key: "projects-panel.remoteAddress" }).catch(() => null);
     if (privacy && typeof privacy === "object") {
       hideRemoteAddress = privacy.hide === true;
@@ -224,8 +223,7 @@ const mod: AppModule = {
     }
     const savePrivacy = () => ctx.modules.call("persistence", "settings.set", { key: "projects-panel.remoteAddress", value: { hide: hideRemoteAddress, label: remoteLabel } });
     exportSettings(ctx, () => [{ key: "projects-panel", title: "Projects", fields: [
-      { key: "hoverOpacity", label: "Row hover opacity", type: "select", value: String(hoverOpacity),
-        options: HOVER_OPACITIES.map(v => ({ value: String(v), label: v === 1 ? "Opaque" : `${Math.round(v * 100)}%` })),
+      { key: "hoverOpacity", label: "Row hover opacity", type: "range", value: String(Math.round(hoverOpacity * 100)), min: 10, max: 100, step: 5, unit: "%",
         description: "How solid the highlight is when the pointer is over a project or task." },
       { key: "hideRemoteAddress", label: "Hide SSH user and host", type: "toggle", value: hideRemoteAddress,
         description: "Show a label instead of user@host under SSH projects, for example while screen sharing." },
@@ -234,8 +232,8 @@ const mod: AppModule = {
     ] }], async (_section, key, value) => {
       if (key === "hideRemoteAddress" && typeof value === "boolean") { hideRemoteAddress = value; await savePrivacy(); ctx.ui.invalidate(); return; }
       if (key === "remoteLabel" && typeof value === "string") { remoteLabel = value.trim().slice(0, 40) || "Remote"; await savePrivacy(); ctx.ui.invalidate(); return; }
-      const v = Number(value);
-      if (key !== "hoverOpacity" || !HOVER_OPACITIES.includes(v)) throw new Error("Invalid projects setting");
+      const v = Math.round(Number(value)) / 100;
+      if (key !== "hoverOpacity" || !Number.isFinite(v) || v < 0.1 || v > 1) throw new Error("Invalid projects setting");
       await ctx.modules.call("persistence", "settings.set", { key: "projects-panel.hoverOpacity", value: v });
       hoverOpacity = v; ctx.ui.invalidate();
     });

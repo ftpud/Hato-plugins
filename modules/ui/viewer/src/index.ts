@@ -68,9 +68,9 @@ const AUTOSAVE_DELAYS = [300, 800, 2000, 5000];
 const GLOBAL_FONT = "global";
 const editorFontOptions = [{ value: GLOBAL_FONT, label: "Global default" }, ...fontOptions.filter(o => o.value !== "system")];
 const FONT_NUMBERS = {
-  fontWeight: { min: 100, max: 900, label: "Font weight" },
-  fontSize: { min: 8, max: 40, label: "Size" },
-  lineHeight: { min: 1, max: 3, label: "Line height" },
+  fontWeight: { min: 100, max: 900, step: 100, unit: "", label: "Font weight" },
+  fontSize: { min: 8, max: 40, step: 1, unit: " px", label: "Size" },
+  lineHeight: { min: 1, max: 3, step: 0.05, unit: "×", label: "Line height" },
 } as const;
 type FontNumber = keyof typeof FONT_NUMBERS;
 let editorFont = { family: GLOBAL_FONT, fontWeight: "", fontSize: "", lineHeight: "" };
@@ -409,9 +409,10 @@ const mod: AppModule = {
         description: "How Git diffs are compared. Switch in the viewer status bar." },
     ] }, { key: "viewer-font", title: "Editor font", fields: [
       { key: "fontFamily", label: "Font", type: "select", value: editorFont.family, options: editorFontOptions,
-        description: editorFont.family === GLOBAL_FONT ? "Global default" : "Source editor only" },
-      ...(Object.keys(FONT_NUMBERS) as FontNumber[]).map(key => ({ key, label: FONT_NUMBERS[key].label, type: "text" as const, value: editorFont[key],
-        placeholder: "Default", description: editorFont[key] ? `Source editor only · ${FONT_NUMBERS[key].min}–${FONT_NUMBERS[key].max}` : "Global default" })),
+        description: editorFont.family === GLOBAL_FONT ? "Follows the interface font." : "Source editor only." },
+      ...(Object.keys(FONT_NUMBERS) as FontNumber[]).map(key => ({ key, label: FONT_NUMBERS[key].label, type: "range" as const, value: editorFont[key],
+        min: FONT_NUMBERS[key].min, max: FONT_NUMBERS[key].max, step: FONT_NUMBERS[key].step, unit: FONT_NUMBERS[key].unit, allowDefault: true, defaultLabel: "Global",
+        description: editorFont[key] ? "Source editor only. ↺ returns to the interface default." : "Follows the interface typography." })),
     ] }], async (section, key, value) => {
       if (section === "viewer-font") {
         const next = { ...editorFont };

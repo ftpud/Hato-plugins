@@ -91,6 +91,9 @@ function validateCatalogue(cat: any): Package[] {
 }
 
 function installed(p:Package,plugins:PluginInfo[]){return p.modules.every(id=>plugins.some(m=>m.id===id));}
+/** Current catalogue (bundled until refreshed) and whether a package's modules are all present. */
+export const marketPackages = (): Package[] => packages;
+export const packageInstalled = installed;
 export function packageVersion(p: Package, plugins: PluginInfo[]) {
   const members = p.modules.map(id => plugins.find(m => m.id === id));
   if (members.some(m => !m)) return undefined;

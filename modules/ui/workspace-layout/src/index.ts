@@ -32,7 +32,6 @@ let fontWeight = "400";
 /** Appearance preference; "system" leaves the last mode the window used. */
 let mode: "light" | "dark" | "system" = "system";
 const modeOptions = [{ value: "dark", label: "Dark" }, { value: "light", label: "Light" }, { value: "system", label: "Keep current" }];
-const sizeOptions = [{ value: "14", label: "Small" }, { value: "15", label: "Compact" }, { value: "16", label: "Standard" }, { value: "18", label: "Large" }];
 const weightOptions = [{ value: "400", label: "Regular" }, { value: "500", label: "Medium" }];
 let appearanceTheme = "classic";
 // Syntax color scheme: bundled ones plus user JSON files in <sharedDir>/syntax-schemes.
@@ -59,10 +58,16 @@ async function loadSchemes(ctx: ModuleContext) {
 }
 let panelOpacity = "balanced";
 let projectsBackground = "subtle";
-const projectsBackgroundOptions = [{ value: "off", label: "Off" }, { value: "subtle", label: "Subtle · 12%" }, { value: "visible", label: "Visible · 24%" }];
-const projectsBackgroundOpacity = () => projectsBackground === "off" ? 0 : projectsBackground === "visible" ? 0.24 : 0.12;
+// Opacities are stored as percent strings; older builds stored named presets.
+const percentOf = (value: unknown, legacy: Record<string, number>, min: number, max: number, fallback: number) => {
+  const n = typeof value === "string" && value in legacy ? legacy[value] : Number(value);
+  return value === "" || value == null || !Number.isFinite(n) ? fallback : Math.min(max, Math.max(min, Math.round(n)));
+};
+const panelPercent = () => percentOf(panelOpacity, { airy: 40, balanced: 60, solid: 85 }, 20, 100, 60);
+const backgroundPercent = () => percentOf(projectsBackground, { off: 0, subtle: 12, visible: 24 }, 0, 40, 12);
+const projectsBackgroundOpacity = () => backgroundPercent() / 100;
+const fontSizeOf = (value: unknown) => String(percentOf(value, {}, 12, 20, 15));
 const themeOptions = [{ value: "classic", label: "Classic" }, { value: "anime", label: "Anime · Sakura Twilight" }];
-const opacityOptions = [{ value: "airy", label: "Airy · 40%" }, { value: "balanced", label: "Balanced · 60%" }, { value: "solid", label: "Readable · 85%" }];
 let runtimePaths: { repoRoot: string; dataDir: string; modulesRoot?: string } | null = null;
 let ws: any = null;
 let modules: any[] = [];
@@ -482,16 +487,16 @@ const mod: AppModule = {
     fontFamily = fontOptions.some(option => option.value === savedFont) ? savedFont : "JetBrains Mono";
     const savedSize = await ctx.modules.call("persistence", "settings.get", { key: "appearance.fontSize" });
     const savedWeight = await ctx.modules.call("persistence", "settings.get", { key: "appearance.fontWeight" });
-    fontSize = sizeOptions.some(option => option.value === savedSize) ? savedSize : "15";
+    fontSize = fontSizeOf(savedSize);
     fontWeight = weightOptions.some(option => option.value === savedWeight) ? savedWeight : "400";
     const savedMode = await ctx.modules.call("persistence", "settings.get", { key: "appearance.mode" });
     mode = savedMode === "light" || savedMode === "dark" ? savedMode : "system";
     const savedTheme = await ctx.modules.call("persistence", "settings.get", { key: "appearance.theme" });
     appearanceTheme = themeOptions.some(option => option.value === savedTheme) ? savedTheme : "classic";
     const savedOpacity = await ctx.modules.call("persistence", "settings.get", { key: "appearance.panelOpacity" });
-    panelOpacity = opacityOptions.some(option => option.value === savedOpacity) ? savedOpacity : "balanced";
+    panelOpacity = String(percentOf(savedOpacity, { airy: 40, balanced: 60, solid: 85 }, 20, 100, 60));
     const savedProjectsBackground = await ctx.modules.call("persistence", "settings.get", { key: "appearance.projectsBackground" });
-    projectsBackground = projectsBackgroundOptions.some(option => option.value === savedProjectsBackground) ? savedProjectsBackground : "subtle";
+    projectsBackground = String(percentOf(savedProjectsBackground, { off: 0, subtle: 12, visible: 24 }, 0, 40, 12));
     ctx.state.set("workspace-layout.projectsBackgroundOpacity", projectsBackgroundOpacity());
     const savedScheme = await ctx.modules.call("persistence", "settings.get", { key: "appearance.syntaxScheme" });
     await loadSchemes(ctx);
@@ -499,10 +504,10 @@ const mod: AppModule = {
     publishSettings = exportSettings(ctx, () => [{ key: "appearance", title: "Appearance", group: "Appearance", layout: "table", fields: [
       { key: "theme", label: "Theme", type: "select", value: appearanceTheme, options: themeOptions,
         description: "Sakura Twilight pairs an original anime wallpaper with floating indigo glass and pink accents." },
-      { key: "panelOpacity", label: "Anime panel opacity", type: "select", value: panelOpacity, options: opacityOptions,
-        description: "Keep the scenery visible or increase opacity for easier reading." },
-      { key: "projectsBackground", label: "Projects background", type: "select", value: projectsBackground, options: projectsBackgroundOptions,
-        description: "A faint, oversized dove behind the project list." },
+      { key: "panelOpacity", label: "Panel opacity", type: "range", value: String(panelPercent()), min: 20, max: 100, step: 5, unit: "%",
+        description: appearanceTheme === "anime" ? "Lower keeps the wallpaper visible; higher is easier to read." : "Applies to the Sakura Twilight theme." },
+      { key: "projectsBackground", label: "Projects background", type: "range", value: String(backgroundPercent()), min: 0, max: 40, step: 2, unit: "%",
+        description: "Strength of the faint dove behind the project list. 0% hides it." },
       { key: "mode", label: "Color mode", type: "select", value: mode, options: modeOptions,
         description: "Classic follows this color mode. Sakura Twilight uses its own twilight palette." },
     ] }, { key: "syntax", title: "Syntax colors", group: "Appearance", layout: "table", fields: [
@@ -514,7 +519,7 @@ const mod: AppModule = {
     ] }, { key: "typography", title: "Typography", group: "Appearance", layout: "table", fields: [
       { key: "fontFamily", label: "Interface font", type: "select", value: fontFamily, options: fontOptions,
         description: "Applies to panels, chat, file previews and terminals. JetBrains Mono is bundled." },
-      { key: "fontSize", label: "Text size", type: "select", value: fontSize, options: sizeOptions },
+      { key: "fontSize", label: "Text size", type: "range", value: fontSize, min: 12, max: 20, step: 1, unit: " px" },
       { key: "fontWeight", label: "Text weight", type: "select", value: fontWeight, options: weightOptions },
     ] }, { key: "side-panels", title: "Side panels", group: "Workspace", layout: "table",
       description: "Choose which panel buttons appear and place them at the top or bottom of either sidebar. Panels remain accessible through Layout.",
@@ -596,19 +601,18 @@ const mod: AppModule = {
         return;
       }
       if (section === "appearance") {
-        if (key === "projectsBackground") {
-          if (!projectsBackgroundOptions.some(option => option.value === value)) throw new Error("Invalid background preference");
-          await ctx.modules.call("persistence", "settings.set", { key: "appearance.projectsBackground", value });
-          projectsBackground = String(value);
+        if (key === "projectsBackground" || key === "panelOpacity") {
+          const next = key === "panelOpacity" ? String(percentOf(value, {}, 20, 100, 60)) : String(percentOf(value, {}, 0, 40, 12));
+          await ctx.modules.call("persistence", "settings.set", { key: `appearance.${key}`, value: next });
+          if (key === "panelOpacity") panelOpacity = next; else projectsBackground = next;
+          ctx.ui.invalidate();
           ctx.state.set("workspace-layout.projectsBackgroundOpacity", projectsBackgroundOpacity());
           return;
         }
-        if (key === "theme" || key === "panelOpacity") {
-          const options = key === "theme" ? themeOptions : opacityOptions;
-          if (!options.some(option => option.value === value)) throw new Error("Invalid appearance preference");
-          await ctx.modules.call("persistence", "settings.set", { key: `appearance.${key}`, value });
-          if (key === "theme") appearanceTheme = String(value);
-          else panelOpacity = String(value);
+        if (key === "theme") {
+          if (!themeOptions.some(option => option.value === value)) throw new Error("Invalid appearance preference");
+          await ctx.modules.call("persistence", "settings.set", { key: "appearance.theme", value });
+          appearanceTheme = String(value);
           ctx.ui.invalidate();
           return;
         }
@@ -618,8 +622,9 @@ const mod: AppModule = {
         ctx.ui.invalidate();
         return;
       }
-      const options = key === "fontFamily" ? fontOptions : key === "fontSize" ? sizeOptions : key === "fontWeight" ? weightOptions : [];
-      if (typeof value !== "string" || !options.some(option => option.value === value)) throw new Error("Invalid typography preference");
+      if (key === "fontSize") value = fontSizeOf(value);
+      const options = key === "fontFamily" ? fontOptions : key === "fontWeight" ? weightOptions : [];
+      if (typeof value !== "string" || (key !== "fontSize" && !options.some(option => option.value === value))) throw new Error("Invalid typography preference");
       await ctx.modules.call("persistence", "settings.set", { key: `appearance.${key}`, value });
       if (key === "fontFamily") fontFamily = value;
       else if (key === "fontSize") fontSize = value;

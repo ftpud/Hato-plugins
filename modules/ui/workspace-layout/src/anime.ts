@@ -1,6 +1,9 @@
 // Theme policy stays in the hot-swappable shell. Alpha applies to surfaces, never text.
+/** `opacity` is a percent string (legacy presets airy/balanced/solid still accepted). */
 export function animePalette(opacity: string) {
-  const alpha = opacity === "airy" ? "66" : opacity === "solid" ? "d9" : "99";
+  const legacy: Record<string, number> = { airy: 40, balanced: 60, solid: 85 };
+  const percent = opacity in legacy ? legacy[opacity] : Number(opacity);
+  const alpha = Math.round((Number.isFinite(percent) ? Math.min(100, Math.max(0, percent)) : 60) * 2.55).toString(16).padStart(2, "0");
   const colors = {
     background: "#11152b" + alpha, panel: "#191c38" + alpha,
     raised: "#292647b8", hover: "#68507c88", border: "#d7b6f04d",
