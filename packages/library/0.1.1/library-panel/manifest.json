@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 2,
+  "id": "library-panel",
+  "name": "Library panel",
+  "kind": "ui",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [
+    "library",
+    "workspace"
+  ],
+  "capabilities": [
+    "ui.document"
+  ],
+  "calls": [
+    "library",
+    "workspace",
+    "viewer"
+  ],
+  "stateVersion": 1,
+  "description": "Global and per-project skill and agent library with nested Markdown and shell files.",
+  "author": "Hato contributors",
+  "version": "0.1.1",
+  "pluginPackage": "library",
+  "pluginType": "Automation",
+  "contributes": {
+    "panels": [
+      {
+        "id": "library",
+        "title": "Library",
+        "defaultHidden": true,
+        "dock": {
+          "column": 1
+        },
+        "activity": {
+          "side": "left",
+          "order": 45,
+          "iconSvg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 5v16M3 3h5a4 4 0 0 1 4 2 4 4 0 0 1 4-2h5v16h-5a4 4 0 0 0-4 2 4 4 0 0 0-4-2H3Z\"/></svg>"
+        }
+      }
+    ]
+  },
+  "distribution": "marketplace"
+}

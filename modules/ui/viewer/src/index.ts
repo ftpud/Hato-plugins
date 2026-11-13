@@ -12,6 +12,7 @@ import { errMsg } from "@hato/sdk/runtime";
 import { resolveWorkspaceLink } from "@hato/sdk/links";
 import { diffTabPath } from "@hato/sdk/git";
 import { uiIcons } from "@hato/sdk/ui-icons";
+import { parseVirtualTab, type VirtualShow } from "@hato/sdk/virtual-documents";
 
 import { languageDefinitions, languageForPath, workspacePath, relativeFile, validPosition, type LanguageDefinition } from "@hato/sdk/languages";
 
@@ -104,19 +105,53 @@ function bufferFor(path: string | null | undefined): Buffer | undefined {
 }
 const unsaved = (b?: Buffer) => !!b && b.state !== "clean";
 
+// ---- Virtual documents (see @hato/sdk/virtual-documents) ------------------------------------
+// Tabs whose content belongs to another module (e.g. Library pages). Buffers use the tab id as
+// their path, so autosave, unsaved markers and conflicts work as for workspace files.
+interface Virtual { workspaceId: string; tab: string; title: string; document: string | null; text: string; editable: boolean; error?: string }
+const virtuals = new Map<string, Virtual>();
+const virtualKey = (workspaceId: string, tab: string) => `${workspaceId}|${tab}`;
+interface VirtualSave { tab: string; workspaceId: string; text: string; force: boolean; taken: boolean;
+  resolve: (r: { mtime: number }) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }
+const virtualSaves = new Map<string, VirtualSave>();
+function saveVirtual(ctx: ModuleContext, b: Buffer, text: string, force: boolean) {
+  const requestId = crypto.randomUUID();
+  return new Promise<{ mtime: number }>((resolve, reject) => {
+    const timer = setTimeout(() => { virtualSaves.delete(requestId); reject(new Error(`${parseVirtualTab(b.path)?.provider} did not save the document. Is its plugin enabled?`)); }, 30000);
+    virtualSaves.set(requestId, { tab: b.path, workspaceId: b.workspaceId, text, force, taken: false, resolve, reject, timer });
+    ctx.events.emit("viewer.virtualSave", { requestId, workspaceId: b.workspaceId, tab: b.path });
+  });
+}
+function ownSave(a: any, caller: string | undefined) {
+  const pending = virtualSaves.get(String(a?.requestId || ""));
+  if (!pending || !caller || parseVirtualTab(pending.tab)?.provider !== caller) throw new Error("Unknown save request");
+  return pending;
+}
+function showVirtual(v: Virtual) {
+  current = { virtual: true, workspaceId: v.workspaceId, tab: v.tab, relativePath: v.tab, title: v.title,
+    document: v.error ? null : v.document, text: v.text, editable: v.editable,
+    language: languageForPath(languages, v.tab)?.grammar || (/\.md$/i.test(v.tab) ? "markdown" : "text"), size: new TextEncoder().encode(v.text).length };
+  error = v.error ?? null; languageError = null; hunks = []; hunkView = null;
+}
+const tabTitle = (tab: string) => (ws && virtuals.get(virtualKey(ws.id, tab))?.title) || diffTabPath(tab) || tab;
+
 async function save(ctx: ModuleContext, b: Buffer, force = false) {
   if (b.text === null) return;
   if (b.inflight) { b.again = true; return; }
   b.inflight = true; b.again = false; b.state = "saving"; ctx.ui.invalidate();
   const text = b.text;
   try {
-    const r = await ctx.modules.call("files", "save", { workspaceId: b.workspaceId, relativePath: b.path, text, expectedMtime: b.mtime, force }, { timeoutMs: 600000 });
+    const virtual = !!parseVirtualTab(b.path);
+    const r = virtual ? await saveVirtual(ctx, b, text, force)
+      : await ctx.modules.call("files", "save", { workspaceId: b.workspaceId, relativePath: b.path, text, expectedMtime: b.mtime, force }, { timeoutMs: 600000 });
     b.mtime = r?.mtime ?? b.mtime;
+    const v = virtuals.get(virtualKey(b.workspaceId, b.path));
+    if (v) v.text = text;
     if (current?.workspaceId === b.workspaceId && current.relativePath === b.path) current.text = text;
     if (b.text === text) { b.state = "clean"; b.text = null; } else b.state = "dirty";
     b.error = undefined;
     if (current?.workspaceId === b.workspaceId && current.relativePath === b.path) refreshAuthorship(ctx);
-    if (languageService) void ctx.modules.call("language-service", "saved", { workspaceId: b.workspaceId, path: b.path, text }, { timeoutMs: 175000 }).catch(e => ctx.log.warn(errMsg(e)));
+    if (languageService && !virtual) void ctx.modules.call("language-service", "saved", { workspaceId: b.workspaceId, path: b.path, text }, { timeoutMs: 175000 }).catch(e => ctx.log.warn(errMsg(e)));
   } catch (e: any) {
     const msg = errMsg(e);
     b.state = e?.code === "ECONFLICT" || /changed on disk/.test(msg) ? "conflict" : "error";
@@ -188,7 +223,7 @@ async function refreshSemantic(ctx: ModuleContext, request: ReturnType<typeof la
 async function synchronizeLanguage(ctx: ModuleContext) {
   const request = languageRequest();
   const language = languageForPath(languages, request.path || "");
-  if (!languageService || !language?.server || current?.binary || current?.truncated || current?.diff || typeof request.text !== "string") { projectLanguageEnabled = true; ctx.ui.invalidate(); return; }
+  if (!languageService || !language?.server || current?.virtual || current?.binary || current?.truncated || current?.diff || typeof request.text !== "string") { projectLanguageEnabled = true; ctx.ui.invalidate(); return; }
   const project = await ctx.modules.call("language-service","project.get",{workspaceId:request.workspaceId,serverId:language.server.id}).catch(()=>null);
   projectLanguageEnabled = project?.config.enabled !== false;
   if (request.workspaceId !== ws?.id || request.path !== current?.relativePath || !projectLanguageEnabled) return;
@@ -250,6 +285,21 @@ async function load(ctx: ModuleContext, force = false) {
   if (!tabs.includes(path)) { tabs.push(path); await saveTabs(ctx); }
   if (ws?.id !== workspaceId || ws?.view?.previewPath !== path) return;
   if (!force && current?.workspaceId === workspaceId && current.tab === path || loadingPath === path) return;
+  const virtualTab = parseVirtualTab(path);
+  if (virtualTab) {
+    const known = virtuals.get(virtualKey(workspaceId, path));
+    if (known && !force) { generation++; loadingPath = null; showVirtual(known); ctx.ui.invalidate(); return; }
+    // The provider answers with virtual.show; a forced reload keeps the current view meanwhile.
+    const mine = ++generation;
+    if (!force) current = null;
+    error = null; loadingPath = path; ctx.ui.invalidate();
+    ctx.events.emit("viewer.virtualRequest", { workspaceId, tab: path });
+    setTimeout(() => {
+      if (mine !== generation || loadingPath !== path) return;
+      loadingPath = null; error = `Cannot open ${path.split("/").pop()}: the ${virtualTab.provider} plugin did not respond. Is it enabled?`; ctx.ui.invalidate();
+    }, 10000);
+    return;
+  }
   const mine = ++generation;
   const diffPath = diffTabPath(path);
   // Switching back to a file shows its last opened document at once (remote workspaces pay a
@@ -302,7 +352,7 @@ function updateHunks() {
   if (hunkView && !hunks[hunkView.index]) hunkView = null;
 }
 async function refreshHead(ctx: ModuleContext) {
-  if (!gitMarkers || !ws || !current || current.diff || current.binary) { updateHunks(); ctx.ui.invalidate(); return; }
+  if (!gitMarkers || !ws || !current || current.diff || current.binary || current.virtual) { updateHunks(); ctx.ui.invalidate(); return; }
   const workspaceId = ws.id, path = current.relativePath;
   try {
     const r = await ctx.modules.call("git", "headText", { workspaceId, path }, { timeoutMs: 30000 });
@@ -312,7 +362,7 @@ async function refreshHead(ctx: ModuleContext) {
 }
 /** Re-blame the open file (when its language has declaration annotations). */
 function refreshAuthorship(ctx: ModuleContext) {
-  if (!declarationAuthors || !ws || !current || current.diff || current.binary || current.truncated || !current.document) return;
+  if (!declarationAuthors || !ws || !current || current.diff || current.virtual || current.binary || current.truncated || !current.document) return;
   if (!hasDeclarations(languageForPath(languages, current.relativePath)?.grammar)) return;
   const text = buffers.get(current.document)?.text ?? current.text;
   if (typeof text !== "string") return;
@@ -327,7 +377,7 @@ function tabLabel(tab: string) {
 
 /** Reload the open file when it changed on disk and has no unsaved edits. */
 async function refreshFromDisk(ctx: ModuleContext) {
-  if (!current || current.diff || current.binary || !ws) return;
+  if (!current || current.diff || current.virtual || current.binary || !ws) return;
   const b = buffers.get(current.document);
   if (!b || b.state !== "clean" || b.inflight) return;
   const st = await ctx.modules.call("files", "stat", { workspaceId: ws.id, relativePath: current.relativePath }).catch(() => null);
@@ -341,7 +391,7 @@ function saveStatus(b: Buffer | undefined): { text: string; color: string; toolt
     case "saving": return { text: "Saving…", color: "muted" };
     case "dirty": return { text: autosave ? "Edited" : "Unsaved", color: autosave ? "muted" : "warning" };
     case "error": return { text: "Save failed", color: "danger", tooltip: b.error };
-    case "conflict": return { text: "Changed on disk", color: "warning", tooltip: b.error };
+    case "conflict": return { text: parseVirtualTab(b.path) ? "Changed elsewhere" : "Changed on disk", color: "warning", tooltip: b.error };
     default: return { text: b.mtime != null ? "Saved" : "", color: "muted" };
   }
 }
@@ -383,6 +433,7 @@ const mod: AppModule = {
     editorFont = { family: editorFontOptions.some(o => o.value === savedFont?.family) ? savedFont.family : GLOBAL_FONT, fontWeight: "", fontSize: "", lineHeight: "" };
     for (const key of Object.keys(FONT_NUMBERS) as FontNumber[]) { try { editorFont[key] = fontNumber(key, savedFont?.[key]); } catch { /* ignore invalid saved value */ } }
     for (const [doc, b] of Object.entries(prev?.buffers || {}) as [string, Buffer][]) buffers.set(doc, { ...b, inflight: false, again: false });
+    for (const v of (Array.isArray(prev?.virtuals) ? prev.virtuals : []) as Virtual[]) if (parseVirtualTab(v?.tab) && typeof v.workspaceId === "string") virtuals.set(virtualKey(v.workspaceId, v.tab), v);
     await restoreHistory(ctx, prev);
     publishSettings = exportSettings(ctx, () => [{ key: "viewer", title: "Source editor", fields: [
       { key: "editable", label: "Edit files", type: "toggle", value: editable,
@@ -464,18 +515,63 @@ const mod: AppModule = {
       void load(ctx);
     });
     await load(ctx);
+    // Virtual edits are not flushed on deactivate (their provider may be reloading too).
+    if (autosave && [...buffers.values()].some(b => b.state === "dirty")) scheduleSaves(ctx);
   },
   async deactivate(ctx) {
     presentation?.dispose(); presentation = null;
     if (languageTimer) clearTimeout(languageTimer);
     for (const pending of shellRequests.values()) { clearTimeout(pending.timer); pending.reject(new Error("Editor reloaded.")); }
     shellRequests.clear();
+    for (const pending of virtualSaves.values()) { clearTimeout(pending.timer); pending.reject(new Error("Editor reloaded.")); }
+    virtualSaves.clear();
     // Flush pending edits before a hot swap; unsaved buffers also survive in the snapshot.
     if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
-    if (autosave) await Promise.all([...buffers.values()].filter(b => b.state === "dirty").map(b => save(ctx, b)));
+    if (autosave) await Promise.all([...buffers.values()].filter(b => b.state === "dirty" && !parseVirtualTab(b.path)).map(b => save(ctx, b)));
   },
-  snapshot: () => ({ current, history: historySnapshot(), buffers: Object.fromEntries([...buffers].filter(([, b]) => b.state !== "clean" || b.mtime != null).map(([d, b]) => [d, { ...b, inflight: false }])) }),
+  snapshot: () => ({ current, history: historySnapshot(), virtuals: [...virtuals.values()], buffers: Object.fromEntries([...buffers].filter(([, b]) => b.state !== "clean" || b.mtime != null).map(([d, b]) => [d, { ...b, inflight: false }])) }),
   methods: {
+    /** Open or refresh a provider-owned tab (see @hato/sdk/virtual-documents). */
+    async "virtual.show"(ctx, a: VirtualShow, meta) {
+      const tab = String(a?.tab || ""), parsed = parseVirtualTab(tab);
+      if (!parsed || !meta?.caller || parsed.provider !== meta.caller) throw new Error("Only the module named in a virtual tab can show it");
+      if (typeof a.workspaceId !== "string" || !a.workspaceId) throw new Error("workspaceId is required");
+      if (typeof a.text === "string" && a.text.length > 4 * 1024 * 1024) throw new Error("Document is too large");
+      const workspaceId = a.workspaceId, key = virtualKey(workspaceId, tab), old = virtuals.get(key);
+      const document = typeof a.document === "string" ? a.document : null;
+      // Unsaved edits win over a refreshed copy; saving them reports the conflict.
+      const keep = !!old?.document && old.document !== document && unsaved(buffers.get(old.document));
+      if (keep) old!.title = String(a.title || old!.title);
+      else {
+        if (old?.document && old.document !== document && buffers.get(old.document)?.state === "clean") buffers.delete(old.document);
+        virtuals.set(key, { workspaceId, tab, title: String(a.title || tab.split("/").pop()), document, text: typeof a.text === "string" ? a.text : "",
+          editable: a.editable !== false, error: a.error ? String(a.error) : undefined });
+        if (document && !buffers.has(document)) buffers.set(document, { workspaceId, path: tab, mtime: null, text: null, state: "clean" });
+      }
+      if (workspaceId === ws?.id) {
+        if (a.reveal !== false && ws.view?.previewPath !== tab) {
+          await ctx.modules.call("workspace", "view.patch", { workspaceId, patch: { previewPath: tab } });
+        } else if (ws.view?.previewPath === tab || loadingPath === tab) {
+          generation++; loadingPath = null; showVirtual(virtuals.get(key)!);
+        }
+      }
+      ctx.ui.invalidate();
+      return { replaced: !keep };
+    },
+    "virtual.take"(_ctx, a, meta) {
+      const pending = ownSave(a, meta?.caller);
+      if (pending.taken) throw new Error("Save request already taken");
+      pending.taken = true;
+      return { workspaceId: pending.workspaceId, tab: pending.tab, text: pending.text, force: pending.force };
+    },
+    "virtual.saved"(_ctx, a, meta) {
+      const pending = ownSave(a, meta?.caller);
+      virtualSaves.delete(String(a.requestId)); clearTimeout(pending.timer);
+      if (!a?.error) { pending.resolve({ mtime: Date.now() }); return; }
+      const e: any = new Error(String(a.error));
+      if (a.conflict) e.code = "ECONFLICT";
+      pending.reject(e);
+    },
     "language.document"(_ctx,a) {
       if(a.workspaceId!==ws?.id)throw new Error("The editor is showing a different workspace");
       return languageRequest();
@@ -509,7 +605,7 @@ const mod: AppModule = {
     const search = ws?.view?.ui?.viewerSearch;
     const editorSearch = search?.path === current?.relativePath && typeof search?.query === "string" && typeof search?.key === "string" ? { key: search.key, query: search.query } : undefined;
     const markdown = current && !diff && !current.binary && (current.language === "markdown" || /\.(md|markdown)$/i.test(current.relativePath));
-    const title = current ? (diff ? `Changes in ${current.relativePath}` : current.relativePath) : ws?.view?.previewPath || "No file selected";
+    const title = current ? (diff ? `Changes in ${current.relativePath}` : current.virtual ? current.title : current.relativePath) : ws?.view?.previewPath ? tabTitle(ws.view.previewPath) : "No file selected";
     const kids: UiNode[] = [
       { type: "row", key: "tabs", gap: 3, wrap: true, children: tabs.map((path): UiNode => {
         const active = ws?.view?.previewPath === path;
@@ -517,21 +613,25 @@ const mod: AppModule = {
         const tint = appearance.background ? { background: appearance.background } : {};
         const buttonStyle = { ...tabButtonStyle(active), ...tint };
         return { type: "row", key: path, gap: 0, style: { ...fileTabStyle(active), ...tint }, children: [
-        { type: "button", key: "select", iconSvg: appearance.iconSvg || fileIcons.file, iconColor: appearance.iconColor, text: tabLabel(path), tooltip: diffTabPath(path) ? `Changes in ${diffTabPath(path)}` : path, action: `select:${path}`, middleClickAction: `close:${path}`, contextAction: `tabMenu:${path}`, contextMenu: [
+        { type: "button", key: "select", iconSvg: appearance.iconSvg || fileIcons.file, iconColor: appearance.iconColor, text: tabLabel(path), tooltip: diffTabPath(path) ? `Changes in ${diffTabPath(path)}` : tabTitle(path), action: `select:${path}`, middleClickAction: `close:${path}`, contextAction: `tabMenu:${path}`, contextMenu: [
           { text: "Close", action: `close:${path}` },
           { text: "Close others", action: "closeOthers", value: path, disabled: tabs.length < 2 },
           { text: "Close all to the right", action: "closeRight", value: path, disabled: tabs.indexOf(path) === tabs.length - 1 },
           { text: "Close all", action: "closeAll", value: path },
         ], small: true, variant: "ghost", style: buttonStyle },
-        { type: "button", key: "close", text: "", iconSvg: uiIcons["x"], tooltip: `Close ${path}`, action: `close:${path}`, small: true, variant: "ghost", style: buttonStyle },
+        { type: "button", key: "close", text: "", iconSvg: uiIcons["x"], tooltip: `Close ${tabTitle(path)}`, action: `close:${path}`, small: true, variant: "ghost", style: buttonStyle },
       ] }; }) },
 
     ];
     if (languageError) kids.push({ type: "status", key: "language-error", text: languageError, level: "warn" });
     if (error) kids.push({ type: "status", key: "err", text: error, level: "error" });
-    if (loadingPath && current?.tab !== loadingPath) kids.push({ type: "progress", key: "ld", indeterminate: true, label: `Opening ${loadingPath}…` });
+    if (loadingPath && current?.tab !== loadingPath) kids.push({ type: "progress", key: "ld", indeterminate: true, label: `Opening ${tabTitle(loadingPath)}…` });
     if (current && current.binary) kids.push({ type: "status", key: "bin", text: current.message, level: "info" });
     if (diff) kids.push({ type: "diff", key: "diff", changeNavigation: { previous: "Previous change", next: "Next change" }, document: current.document, mode: diffMode, softWrap: viewerWrap, header: false, emptyText: "No changes against HEAD.", grow: true });
+    else if (markdown && renderMarkdown && current.virtual) {
+      kids.push({ type: "scroll", key: "virtual-preview", padding: 12, grow: true, children: [
+        { type: "markdown", key: "md", text: bufferFor(current.relativePath)?.text ?? current.text, inline: true, linkAction: "openLink" }] });
+    }
     else if (markdown && renderMarkdown && !editorSearch) {
       const markdownText = bufferFor(current.relativePath)?.text ?? current.text;
       const blocks = typeof markdownText === "string" ? shellBlocks(markdownText) : [];
@@ -562,26 +662,28 @@ const mod: AppModule = {
       }
     }
     else {
-      const canEdit = editable && !!current && !current.binary && !current.truncated && !!current.document;
+      const canEdit = editable && !!current && !current.binary && !current.truncated && !!current.document && (!current.virtual || current.editable);
       const language = current ? languageForPath(languages, current.relativePath) : null;
+      // Language servers, Git and history only understand workspace files.
+      const assist = languageService && !!language?.server && projectLanguageEnabled && !current?.truncated && !current?.virtual;
       kids.push({ type: "codeViewer", key: "code", document: current && !current.binary ? current.document : null, placeholder: ws ? "Open a file from the explorer." : "Select a workspace.", grow: true,
         editable: canEdit, changeAction: canEdit ? "edit" : undefined, changeDebounceMs: 250,
         language: language?.grammar, syntaxRules: language?.syntaxRules, softWrap: editorWrap, font: editorFontNode(),
         highlightQuery: Array.isArray(language?.highlightQuery) ? language.highlightQuery.join("\n") : language?.highlightQuery,
-        nameCaptures: languageService && language?.server && projectLanguageEnabled ? nameCaptures(ws?.id, current?.relativePath) : undefined,
-        definitionMethod: languageService && language?.server && projectLanguageEnabled && !current?.truncated ? "editor.definitions" : undefined,
-        hoverMethod: languageService && language?.server && projectLanguageEnabled && !current?.truncated ? "editor.hover" : undefined,
-        completionMethod: languageService && language?.server && projectLanguageEnabled && !current?.truncated ? "editor.completions" : undefined,
+        nameCaptures: assist ? nameCaptures(ws?.id, current?.relativePath) : undefined,
+        definitionMethod: assist ? "editor.definitions" : undefined,
+        hoverMethod: assist ? "editor.hover" : undefined,
+        completionMethod: assist ? "editor.completions" : undefined,
         completionTriggers: ["."], completionMenu: { width: 720, minWidth: 420, maxHeight: 420 },
-        signatureMethod: languageService && language?.server && projectLanguageEnabled && !current?.truncated && canEdit ? "editor.signature" : undefined,
-        completionResolveMethod: languageService && language?.server && projectLanguageEnabled && !current?.truncated && canEdit ? "editor.resolveCompletion" : undefined,
+        signatureMethod: assist && canEdit ? "editor.signature" : undefined,
+        completionResolveMethod: assist && canEdit ? "editor.resolveCompletion" : undefined,
         lineMarkers: hunks.map((h, index) => ({ line: h.line, endLine: h.line + h.added, color: !h.added ? "danger" : h.removed.length ? "primary" : "success", value: index })),
         lineMarkerAction: "showHunk",
-        lineAnnotations: declarationAuthors && current && !current.binary && !current.truncated && ws
+        lineAnnotations: declarationAuthors && current && !current.virtual && !current.binary && !current.truncated && ws
           ? declarationAnnotations(ws.id, current.relativePath, language?.grammar, buffers.get(current.document)?.text ?? current.text) : undefined,
         definitionArgs: { workspaceId: ws?.id, path: current?.relativePath }, openLocationAction: "openDefinition",
         search: editorSearch,
-        contextMenu: current && !current.binary && current.document ? (() => {
+        contextMenu: current && !current.virtual && !current.binary && current.document ? (() => {
           const untracked = heads.get(headKey(ws.id, current.relativePath))?.tracked === false;
           return [
             { text: "View file history", action: "viewHistory", value: "file", disabled: untracked },
@@ -600,10 +702,10 @@ const mod: AppModule = {
           ...(current.kind !== "deleted" ? [{ type: "button", key: "open-file", text: "Open file", action: "openFile", small: true, variant: "ghost", tooltip: `Open ${current.relativePath}` } as UiNode] : []),
         ] : []),
         ...(status.text ? [{ type: "label", key: "save-state", text: status.text, size: "xs", color: status.color, tooltip: status.tooltip } as UiNode] : []),
-        ...(buf && (buf.state === "error" || (buf.state === "dirty" && !autosave)) ? [{ type: "button", key: "save", text: buf.state === "error" ? "Retry" : "Save", action: "save", small: true, variant: "ghost", tooltip: `Save ${current.relativePath}` } as UiNode] : []),
+        ...(buf && (buf.state === "error" || (buf.state === "dirty" && !autosave)) ? [{ type: "button", key: "save", text: buf.state === "error" ? "Retry" : "Save", action: "save", small: true, variant: "ghost", tooltip: `Save ${title}` } as UiNode] : []),
         ...(buf?.state === "conflict" ? [
-          { type: "button", key: "overwrite", text: "Overwrite", action: "overwrite", small: true, variant: "ghost", tooltip: "Replace the file on disk with your edits" } as UiNode,
-          { type: "button", key: "reload", text: "Reload", action: "reload", small: true, variant: "ghost", tooltip: "Discard your edits and load the file from disk" } as UiNode,
+          { type: "button", key: "overwrite", text: "Overwrite", action: "overwrite", small: true, variant: "ghost", tooltip: current.virtual ? "Replace the stored copy with your edits" : "Replace the file on disk with your edits" } as UiNode,
+          { type: "button", key: "reload", text: "Reload", action: "reload", small: true, variant: "ghost", tooltip: current.virtual ? "Discard your edits and load the stored copy" : "Discard your edits and load the file from disk" } as UiNode,
         ] : []),
         ...(markdown ? [{ type: "button", key: "markdown-mode", text: renderMarkdown ? "Source" : "Preview", action: "toggleMarkdown", small: true, variant: "ghost", tooltip: renderMarkdown ? "Show Markdown source" : "Render Markdown preview" } as UiNode] : []),
         { type: "label", key: "lang", text: diff ? (current.truncated ? "diff (truncated)" : "") : current && showMetadata ? `${current.language} · ${current.size} B${current.truncated ? " (truncated)" : ""}` : "", size: "xs", color: "muted" },
@@ -733,6 +835,8 @@ const mod: AppModule = {
         const next = !renderMarkdown;
         await ctx.modules.call("persistence", "settings.set", { key: "viewer.renderMarkdown", value: next });
         renderMarkdown = next; publishSettings();
+      } else if (ev.action === "openLink" && current?.virtual) {
+        ctx.events.emit("viewer.virtualLink", { workspaceId: ws.id, tab: current.tab, href: String(ev.value || "") });
       } else if (ev.action === "openLink") {
         const base = current?.relativePath ? current.relativePath.split("/").slice(0, -1).join("/") : "";
         const path = resolveWorkspaceLink(String(ev.value || ""), ws.rootAbsolutePath, base);
@@ -765,6 +869,12 @@ const mod: AppModule = {
         if (index < 0) return;
         if (unsaved(pending)) throw new Error(`Cannot close ${path}: save or resolve its unsaved changes first.`);
         tabs.splice(index, 1);
+        if (parseVirtualTab(path)) {
+          const v = virtuals.get(virtualKey(workspaceId, path));
+          virtuals.delete(virtualKey(workspaceId, path));
+          if (v?.document && !unsaved(buffers.get(v.document))) buffers.delete(v.document);
+          ctx.events.emit("viewer.virtualClosed", { workspaceId, tab: path });
+        }
         // Move selection before persisting tabs so the watcher cannot reopen the closed file.
         const previewPath = ws.view?.previewPath === path ? tabs[Math.min(index, tabs.length - 1)] || null : ws.view?.previewPath;
         await ctx.modules.call("workspace", "view.patch", { workspaceId: ws.id, patch: { previewPath, ui: { viewerTabs: [...tabs] } } });

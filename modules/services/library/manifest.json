@@ -17,7 +17,7 @@
   "stateVersion": 1,
   "description": "Global and per-project skill and agent library with nested Markdown and shell files.",
   "author": "Hato contributors",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "pluginPackage": "library",
   "pluginType": "Automation",
   "distribution": "marketplace"

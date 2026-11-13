@@ -20,7 +20,7 @@
     ]
   },
   "author": "Hato contributors",
-  "version": "0.1.35",
+  "version": "0.1.36",
   "pluginPackage": "foundation",
   "pluginType": "System",
   "calls": [
