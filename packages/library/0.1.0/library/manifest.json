@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 2,
+  "id": "library",
+  "name": "Library",
+  "kind": "service",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [
+    "workspace"
+  ],
+  "capabilities": [
+    "db:library"
+  ],
+  "calls": [
+    "workspace"
+  ],
+  "stateVersion": 1,
+  "description": "Global and per-project skill and agent library with nested Markdown and shell files.",
+  "author": "Hato contributors",
+  "version": "0.1.0",
+  "pluginPackage": "library",
+  "pluginType": "Automation",
+  "distribution": "marketplace"
+}

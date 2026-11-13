@@ -1,6 +1,8 @@
 // ai-sessions: conversations per workspace, transcript projection of ACP updates, persistence of
 // cached history, and the requested approval policy. Policy here only decides *agent* permission
 // requests; module patch/build/activate approvals are enforced by the kernel regardless.
+import { exportMcpTools } from "@hato/sdk/mcp";
+import { chatHandoff } from "@hato/sdk/chat-handoff";
 import { acpServer, transportOf } from "@hato/sdk/mcp-servers";
 import type { AgentMcp } from "@hato/sdk/persistent-agents";
 import { reasoningMarkdown } from "@hato/sdk/reasoning";
@@ -34,6 +36,7 @@ const HISTORY_PAGE = 80;
 const LOW_RISK_KINDS = new Set(["read", "search", "think", "fetch"]);
 let notify: () => void = () => {};
 let busySignature = "";
+let historyMcp: ReturnType<typeof exportMcpTools>;
 /** Publish `ai-sessions.busy`: workspaceId -> number of conversations with an active turn. */
 function publishBusy(ctx: ModuleContext) {
   const busy: Record<string, number> = {};
@@ -203,7 +206,8 @@ async function connect(ctx: ModuleContext, id: string) {
       mcp: selected.has("internal"), mcpServers, mcpSelection: [...selected].filter(id => id === "internal" || servers.some(m => m.id === id)), resumeSessionId: c.row.providerSessionId,
     }, { timeoutMs: 600000 });
     c.live = st;
-    await update(ctx, id, { status: "online", providerSessionId: st.sessionId });
+    const lostSession = c.row.providerSessionId && st.sessionId !== c.row.providerSessionId;
+    await update(ctx, id, { status: "online", providerSessionId: st.sessionId, ...(lostSession ? { config: { ...c.row.config, __hatoHandoff: true } } : {}) });
     // Re-apply remembered selections (model/mode/reasoning) when the agent advertises them.
     const saved = c.row.config || {};
     for (const [configId, value] of Object.entries(saved)) {
@@ -225,6 +229,26 @@ const mod: AppModule = {
   id: "ai-sessions",
   moduleApiVersion: 1,
   async activate(ctx) {
+    historyMcp = exportMcpTools(ctx, "Chat history", [{
+      name: "history", description: "Read original user and assistant messages from this conversation only. Bounded to 20 messages and 16k characters; use beforeSequence to page earlier. Tool logs, thoughts and image data are excluded.",
+      inputSchema: { type: "object", properties: { beforeSequence: { type: "integer", minimum: 1 } }, additionalProperties: false }, annotations: { readOnlyHint: true },
+      handler: async (a, scope) => {
+        const c = await load(ctx, scope.conversationId);
+        if (c.row.workspaceId !== scope.workspaceId) throw new Error("Conversation belongs to another workspace");
+        if (a.beforeSequence !== undefined && (!Number.isSafeInteger(a.beforeSequence) || a.beforeSequence < 1)) throw new Error("Invalid history cursor");
+        const rows = await ctx.modules.call("persistence", "messages.list", { conversationId: c.row.id, beforeSequence: a.beforeSequence, limit: 21 });
+        let budget = 16000;
+        const messages: any[] = [];
+        for (const m of rows.slice(-20).reverse()) {
+          if (budget <= 0) break;
+          if (m.kind !== "user" && m.kind !== "assistant") continue;
+          const original = String(m.payload?.text || "");
+          const text = original.slice(0, Math.min(4000, budget)); budget -= text.length;
+          messages.unshift({ sequence: m.sequence, role: m.kind, text, truncated: text.length < original.length });
+        }
+        return { messages, beforeSequence: messages[0]?.sequence ?? rows.slice(-20)[0]?.sequence ?? null, hasOlder: rows.length > 20 || budget <= 0 };
+      },
+    }]);
     notify = debounce(() => { publishBusy(ctx); ctx.events.emit("ai-sessions.changed", {}); }, 60);
     ctx.events.on("persistent-agents.mcpsChanged", () => notify());
     publishBusy(ctx);
@@ -267,7 +291,7 @@ const mod: AppModule = {
     });
   },
   canSwap() {
-    return Array.from(convs.values()).some((c) => c.busy || c.submitting || c.steering.length || c.historyLoading)
+    return (historyMcp?.pending() || Array.from(convs.values()).some((c) => c.busy || c.submitting || c.steering.length || c.historyLoading))
       ? { ok: false, reason: "Wait for active chat turns and steering to finish" } : { ok: true };
   },
   async deactivate(ctx) { await flush(ctx); },
@@ -286,6 +310,7 @@ const mod: AppModule = {
       // Configuration belongs to the provider; never carry provider session identity or history.
       const source = previous && previous.acpProfileId === profileId ? previous : null;
       const config = { ...(source?.config || {}) };
+      delete config.__hatoHandoff;
       const live = source && convs.get(source.id)?.live;
       for (const option of live?.configOptions || []) {
         if (option.currentValue != null) config[option.id] = option.currentValue;
@@ -394,6 +419,7 @@ const mod: AppModule = {
           if (!c.live || !["ready", "busy"].includes(c.live.status)) await connect(ctx, c.row.id);
           if (!c.live?.agentCapabilities?.promptCapabilities?.image) throw new Error("This agent does not support image prompts.");
         }
+        const previousMessages = c.messages.slice();
         add(c, "user", { text, images });
         c.current = { assistant: null, thought: null };
         if (c.row.title.startsWith("Chat ") && c.messages.filter((m) => m.kind === "user").length === 1) await update(ctx, c.row.id, { title: text.slice(0, 60) || images[0]?.name || "Picture" });
@@ -402,7 +428,14 @@ const mod: AppModule = {
         if (!c.live || !["ready", "busy"].includes(c.live.status)) await connect(ctx, c.row.id);
         c.busy = true;
         notify();
-        try { await ctx.modules.call("acp", "prompt", { conversationId: c.row.id, text, images }); }
+        try {
+          const transfer = c.row.config?.__hatoHandoff ? chatHandoff(previousMessages.map(m => ({ role: m.kind, text: String(m.payload?.text || "") }))) : "";
+          await ctx.modules.call("acp", "prompt", { conversationId: c.row.id, text: transfer ? `${transfer}\n\nCurrent user request:\n${text}` : text, images });
+          if (c.row.config?.__hatoHandoff) {
+            const config = { ...c.row.config }; delete config.__hatoHandoff;
+            await update(ctx, c.row.id, { config });
+          }
+        }
         catch (e) { c.busy = false; add(c, "error", { text: errMsg(e) }); flushSoon(); notify(); throw e; }
         return { accepted: true };
       } finally { c.submitting = false; }
@@ -456,7 +489,7 @@ const mod: AppModule = {
       c.live = null;
       c.busy = false;
       await ctx.modules.call("workspace", "view.patch", { workspaceId: c.row.workspaceId, patch: { ui: { lastAcpProfileId: a.profileId } } });
-      await update(ctx, a.conversationId, { acpProfileId: a.profileId, providerSessionId: null, status: "offline", config: {} });
+      await update(ctx, a.conversationId, { acpProfileId: a.profileId, providerSessionId: null, status: "offline", config: { __hatoHandoff: true } });
       notify();
       return null;
     },

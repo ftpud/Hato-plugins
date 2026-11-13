@@ -1,3 +1,4 @@
+import { chatHandoff } from "@hato/sdk/chat-handoff";
 import { providerMcpLaunch } from "@hato/sdk/provider-mcp";
 // Standalone ACP controller. No dependency on desktop workspace/chat services. This plugin runs
 // in hatod, so protocol requests, permissions and history survive desktop disconnection.
@@ -108,11 +109,12 @@ async function readContext(ctx:ModuleContext,s:AgentSession):Promise<string> {
   const grant=await ctx.host.capabilities.request({kind:"fs",root:s.root,target:{kind:"local"}});
   try {
     const parts:string[]=[];
-    for(const path of [s.agentFile,...s.skills].filter(Boolean) as string[]) {
+    for(const path of [...new Set([s.agentFile,...s.skills].filter(Boolean))] as string[]) {
       relativeAgentPath(path);
       const file=await ctx.host.fs.read(grant.grant,path,128*1024);
       if(file.binary||file.truncated)throw new Error(`Instruction file is binary or too large: ${path}`);
       parts.push(`Instructions from ${path}:\n${file.text||""}`);
+      if(parts.join("\n\n").length>128*1024)throw new Error("Selected instructions exceed the total 128 KiB budget; select fewer skills");
     }
     return parts.join("\n\n");
   } finally { await ctx.host.capabilities.release(grant.grant); }
@@ -169,7 +171,11 @@ async function start(ctx:ModuleContext,s:AgentSession) {
     const connection=c;
     c.peer=new JsonRpcPeer(line=>ctx.host.process.write(connection.process,line+"\n"));
     live.set(s.id,c);
-    c.peer.onNotification=(method,params)=>{if(method==="session/update" && params?.sessionId===s.sessionId)update(ctx,connection,params.update||{});};
+    c.peer.onNotification=(method,params)=>{
+      if(method!=="session/update" || params?.sessionId!==s.sessionId)return;
+      if(s.status==="starting" && ["user_message_chunk","agent_message_chunk","agent_thought_chunk","tool_call","tool_call_update","plan"].includes(params.update?.sessionUpdate))return;
+      update(ctx,connection,params.update||{});
+    };
     c.peer.onRequest=async(method,params)=>{
       if(method!=="session/request_permission")throw rpcError(-32601,"Unsupported agent request");
       if(params.sessionId!==s.sessionId)throw rpcError(-32602,"Wrong session");
@@ -210,8 +216,8 @@ async function start(ctx:ModuleContext,s:AgentSession) {
         // new one, as desktop chats do, instead of leaving the agent unable to reconnect.
         ctx.log.warn(`session/load failed for ${s.name}; starting a new provider session`,errMsg(e));
         const hadHistory=!!s.contextSent;
-        s.sessionId=null;s.contextSent=false;c.firstPrompt=true;
-        if(hadHistory)await message(ctx,s,"system",`The provider could not resume its previous session (${errMsg(e)}). Started a new one: earlier messages stay here, but the agent does not remember them.`);
+        s.sessionId=null;s.contextSent=false;c.firstPrompt=true;s.handoffPending=true;
+        if(hadHistory)await message(ctx,s,"system",`The provider could not resume its previous session (${errMsg(e)}). Started a new one: a bounded dialogue handoff will accompany the next prompt.`);
       }
     }
     if(!s.sessionId) {
@@ -250,9 +256,10 @@ function promptBlocks(text:string,images:ImageAttachment[]) {
 async function prompt(ctx:ModuleContext,c:Live,text:string,images:ImageAttachment[]=[]) {
   const s=c.session;
   if(s.status!=="ready")throw new Error("Agent is not idle");
+  const handoff = s.handoffPending ? chatHandoff((await ctx.host.db.query<any>(db,"SELECT role,text FROM messages WHERE session_id=? AND role IN ('user','assistant') ORDER BY seq DESC LIMIT 12",[s.id])).reverse()) : "";
   c.turn=Date.now();c.cancelSent=false;s.status="busy";s.error=null;
   await message(ctx,s,"user",text,undefined,undefined,images);await persist(ctx,s);
-  const context=c.firstPrompt?c.context:""; c.firstPrompt=false;s.contextSent=true;await persist(ctx,s);
+  const context=[c.firstPrompt?c.context:"",handoff].filter(Boolean).join("\n\n"); s.handoffPending=false; c.firstPrompt=false;s.contextSent=true;await persist(ctx,s);
   void c.peer.request("session/prompt",{sessionId:s.sessionId,prompt:promptBlocks(context?`${context}\n\nUser request:\n${text}`:text,images)}).then(async r=>{
     await enqueue(()=>ctx.host.db.exec(db,"UPDATE permissions SET resolved=1 WHERE session_id=?",[s.id]));
     for(const pending of c.permissions.values())pending.resolve({outcome:{outcome:"cancelled"}});
@@ -428,11 +435,12 @@ const mod:AppModule={
       const wasLive=live.has(s.id);
       if(configChanged&&wasLive)await stop(ctx,s.id);
       const newProvider=configChanged&&s.profile.id!==p.profile.id;
+      const instructionsChanged=configChanged&&JSON.stringify([s.agentFile,s.skills])!==JSON.stringify([p.agentFile||null,p.skills]);
       s.name=name;
       if(typeof p.customName==="boolean")s.customName=p.customName;
       if(configChanged) {
-        Object.assign(s,{profile:p.profile,model:String(p.model||""),agentFile:p.agentFile||null,skills:p.skills,mcps:p.mcps,workspaceMcp:!!p.workspaceMcp,contextSent:false});
-        if(newProvider){s.sessionId=null;s.configOptions=[];s.models=null;s.modes=null;s.usage=null;s.reasoning="";s.settings={};}
+        Object.assign(s,{profile:p.profile,model:String(p.model||""),agentFile:p.agentFile||null,skills:p.skills,mcps:p.mcps,workspaceMcp:!!p.workspaceMcp,contextSent:newProvider||instructionsChanged?false:s.contextSent});
+        if(newProvider){s.handoffPending=true;s.sessionId=null;s.configOptions=[];s.models=null;s.modes=null;s.usage=null;s.reasoning="";s.settings={};}
       }
       await persist(ctx,s);
       if(configChanged&&wasLive)await start(ctx,s);
@@ -448,7 +456,7 @@ const mod:AppModule={
       await writes;
       await ctx.host.db.exec(db,"DELETE FROM messages WHERE session_id=?",[s.id]);
       await ctx.host.db.exec(db,"DELETE FROM permissions WHERE session_id=?",[s.id]);
-      Object.assign(s,{sessionId:null,contextSent:false,error:null,configOptions:[],models:null});
+      Object.assign(s,{sessionId:null,handoffPending:false,contextSent:false,error:null,configOptions:[],models:null});
       await persist(ctx,s);
       if(wasLive)await start(ctx,s);
       return publicSession(s);

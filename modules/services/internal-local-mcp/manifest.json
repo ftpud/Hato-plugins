@@ -13,7 +13,7 @@
   "stateVersion": 1,
   "description": "Desktop-side MCP endpoint for UI and application module tools. Keeps the legacy internal-mcp transport compatible.",
   "author": "Hato contributors",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "pluginPackage": "core-acp",
   "pluginType": "AI"
 }

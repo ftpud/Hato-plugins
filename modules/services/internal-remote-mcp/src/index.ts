@@ -12,7 +12,7 @@ const tools=[
   {name:"agents_create",description:"Create a background worker inheriting this agent’s provider, workspace, instructions, MCP and skill permissions",inputSchema:object({name:{type:"string"},text:{type:"string"},model:{type:"string"}},["name"])},
   {name:"agents_stop",description:"Stop a background agent process",inputSchema:object({id:{type:"string"}},["id"])},
   {name:"agents_list",description:"List background agents in this workspace",inputSchema:object({})},
-  {name:"agents_history",description:"Read bounded agent history",inputSchema:object({id:{type:"string"},before:{type:"number"}},["id"])},
+  {name:"agents_history",description:"Read agent dialogue, capped at 20 messages and 16k characters. Images and reasoning are excluded. includeTools adds tool summaries; before pages earlier.",inputSchema:object({id:{type:"string"},before:{type:"number"},includeTools:{type:"boolean"}},["id"])},
   {name:"agents_prompt",description:"Prompt or steer a background agent in this workspace",inputSchema:object({id:{type:"string"},text:{type:"string"},steer:{type:"boolean"}},["id","text"])},
   {name:"agents_cancel",description:"Cancel a background agent turn",inputSchema:object({id:{type:"string"}},["id"])},
   {name:"terminals_list",description:"List terminals belonging to this workspace",inputSchema:object({})},
@@ -89,7 +89,18 @@ async function call(ctx:ModuleContext,s:Scope,name:string,a:any) {
       return agentCall(ctx,s,"fork",{parentId:s.sessionId,name:a.name,text:a.text,model:a.model});
     }
     if(!permitted.some((r:any)=>r.id===a.id))throw new Error("Agent is outside this workspace");
-    if(name==="agents_history")return agentCall(ctx,s,"view",{id:a.id,before:a.before,limit:100});
+    if(name==="agents_history") {
+      const view=await agentCall(ctx,s,"view",{id:a.id,before:a.before,limit:20});
+      let budget=16000;const messages:any[]=[];
+      for(const m of [...view.messages].reverse()) {
+        if(budget<=0)break;
+        if(m.role!=="user"&&m.role!=="assistant"&&!(a.includeTools===true&&m.role==="tool"))continue;
+        const text=String(m.text||"").slice(0,Math.min(4000,budget));budget-=text.length;
+        messages.unshift({key:m.key,role:m.role,text,truncated:text.length<String(m.text||"").length});
+      }
+      const first=messages[0]?.key||view.messages[0]?.key;
+      return {id:a.id,messages,before:first?Number(String(first).replace("agent-msg-","")):view.before,hasOlder:view.before!==null||budget<=0};
+    }
     if(name==="agents_prompt")return agentCall(ctx,s,"send",{id:a.id,text:a.text,steer:a.steer});
     if(name==="agents_cancel")return agentCall(ctx,s,"cancel",{id:a.id});
     if(name==="agents_stop")return agentCall(ctx,s,"stop",{id:a.id});

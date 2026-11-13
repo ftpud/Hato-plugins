@@ -1,3 +1,4 @@
+import { referenceUpdates } from "./context";
 // Workflow execution on the daemon. Semantics follow HatoPad's flow runner: follow connections
 // pass output on, converging follows join (all/any), path connections are routes chosen by an AI
 // Agent (or a Yes/No Prompt), and use connections make blocks tools of AI Agents and Chatboxes.
@@ -416,10 +417,9 @@ async function agent(x: Exec, b: WorkflowBlock, s: WorkflowBlockState, input: st
   const limit = x.def.settings?.promptLimitChars ?? 200_000;
   const clipped = preview(input, 20_000);
   let text: string;
+  const references = referenceUpdates(b.prompt, x.outputs, s.referenceContext && s.referenceContext.sessionId === s.sessionId ? s.referenceContext.values : {});
   if (b.type === "chatbox") {
-    const refs = [...new Set([...b.prompt.matchAll(/\{\{\s*blocks\.([A-Za-z0-9_-]+)\.output\s*\}\}/g)].map(m => m[1]))];
-    const updates = refs.length ? `\n\nWorkflow context updates:\n${refs.map(r => `${r}: ${preview(x.outputs.get(r) ?? "", 4000)}`).join("\n")}` : "";
-    text = fresh ? `${instructions(x, b)}\n\nSession guidance:\n${renderPrompt(b.prompt, "", x.outputs)}\n\nUser message:\n${clipped}` : clipped + updates;
+    text = fresh ? `${instructions(x, b)}\n\nSession guidance:\n${renderPrompt(b.prompt, "", x.outputs)}\n\nUser message:\n${clipped}` : clipped + references.text;
     s.chat = [...(s.chat || []), { id: crypto.randomUUID(), role: "user" as const, text: clipped, at: now() }].slice(-200);
   } else {
     const template = /\{\{\s*input\s*\}\}/.test(b.prompt) ? b.prompt : `${b.prompt}\n\nInput:\n{{input}}`;
@@ -431,6 +431,7 @@ async function agent(x: Exec, b: WorkflowBlock, s: WorkflowBlockState, input: st
   log(s, "prompt", text);
   touch(x);
   const out = await turn(x, s, text);
+  if (b.type === "chatbox") s.referenceContext = { sessionId: s.sessionId!, values: references.values };
   if (b.type === "chatbox") s.chat = [...(s.chat || []), { id: crypto.randomUUID(), role: "assistant" as const, text: out, at: now() }].slice(-200);
   const paths = b.type === "chatbox" ? [] : x.def.edges.filter(e => e.from === b.id && edgeType(e) === "path");
   if (paths.length && !s.selectedRoute) throw new Error(`${b.label} finished without choosing a path (workflow_choose_path)`);

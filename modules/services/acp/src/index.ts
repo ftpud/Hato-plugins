@@ -31,6 +31,7 @@ async function environmentPolicy(ctx: ModuleContext, profile: any) {
 }
 
 interface Conn {
+  loadingHistory?: boolean;
   conversationId: string;
   workspaceId: string;
   machineId: string;
@@ -275,12 +276,13 @@ async function start(ctx: ModuleContext, a: any) {
     let res: any;
     if (a.resumeSessionId && c.agentCapabilities.loadSession) {
       try {
+        c.loadingHistory = true;
         res = await withTimeout(c.peer.request("session/load", { sessionId: a.resumeSessionId, cwd: c.cwd, mcpServers: sessionServers }), 120000, "session/load");
         c.sessionId = a.resumeSessionId;
       } catch (e) {
         ctx.log.warn("session/load failed; starting a new session", errMsg(e));
-        ctx.events.emit("acp.update", { conversationId: c.conversationId, update: { sessionUpdate: "_hato_notice", text: `Could not resume the previous agent session (${errMsg(e)}); started a new one. Cached history remains visible.` } });
-      }
+        ctx.events.emit("acp.update", { conversationId: c.conversationId, update: { sessionUpdate: "_hato_notice", text: `Could not resume the previous agent session (${errMsg(e)}); started a new one. A bounded dialogue handoff will accompany the next prompt.` } });
+      } finally { c.loadingHistory = false; }
     }
     if (!c.sessionId) {
       res = await withTimeout(c.peer.request("session/new", { cwd: c.cwd, mcpServers: sessionServers }), 120000, "session/new");
@@ -317,6 +319,7 @@ async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
   c.peer.onNotification = (method, params) => {
     if (method === "session/update" && params && params.update) {
       const u = params.update;
+      if (c.loadingHistory && ["user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan"].includes(u.sessionUpdate)) return;
       if (u.sessionUpdate === "config_option_update" && Array.isArray(u.configOptions)) { c.configOptions = u.configOptions; emitStatus(ctx, c); }
       else if (u.sessionUpdate === "current_mode_update" && c.modes) { c.modes = { ...c.modes, currentModeId: u.currentModeId }; emitStatus(ctx, c); }
       else if (u.sessionUpdate === "usage_update") {
