@@ -180,11 +180,24 @@ async function npmRunner(ctx: ModuleContext, desc: WorkspaceDescriptor) {
   const target = await targetFor(ctx, desc);
   const env: Record<string, string> = {};
   if (det.pathEnv) env.PATH = det.pathEnv;
+  const npm = desc.location === "ssh" ? "npm" : det.path;
   const run = (args: string[], timeoutMs: number) => ctx.host.process.run(g.grant, {
-    target, executable: desc.location === "ssh" ? "npm" : det.path, args, cwd: desc.rootAbsolutePath, env, loginShell: desc.location === "ssh",
+    target, executable: npm, args, cwd: desc.rootAbsolutePath, env, loginShell: desc.location === "ssh",
   }, { timeoutMs, limitBytes: 1 << 20 });
-  return { ok: true as const, error: "", run };
+  /** Where `npm install -g` should go: null for npm's global prefix when this user can write to it,
+   *  otherwise `$HOME/.local` (bin in ~/.local/bin) so installing never needs root or sudo. */
+  const userPrefix = async (): Promise<string | null> => {
+    const script = 'g=$("$1" prefix -g) || exit 1; m="$g/lib/node_modules"; '
+      + 'if [ -w "$m" ] || { [ ! -e "$m" ] && [ -w "$g" ]; }; then printf "\\n__HATO_PREFIX__=\\n"; else printf "\\n__HATO_PREFIX__=%s\\n" "$HOME/.local"; fi';
+    const r = await ctx.host.process.run(g.grant, { target, executable: "sh", args: ["-c", script, "hato-npm-prefix", npm], cwd: desc.rootAbsolutePath, env, loginShell: desc.location === "ssh" }, { timeoutMs: 30000 });
+    const m = /^__HATO_PREFIX__=(.*)$/m.exec(r.stdout);
+    return r.code === 0 && m && m[1].trim() ? m[1].trim() : null;
+  };
+  return { ok: true as const, error: "", run, userPrefix };
 }
+
+const installArgs = (pkg: string, prefix: string | null) => ["install", "-g", ...(prefix ? ["--prefix", prefix] : []), `${pkg}@latest`];
+const installedVersion = (stdout: string, pkg: string) => { try { return JSON.parse(stdout || "{}").dependencies?.[pkg]?.version || null; } catch { return null; } };
 
 async function authSettings(ctx: ModuleContext): Promise<Record<string, boolean>> {
   const values: Record<string, boolean> = {};
@@ -501,14 +514,17 @@ const mod: AppModule = {
       const definitions = await providers(ctx);
       if (!definitions.length) return [];
       const npm = await npmRunner(ctx, desc);
+      const prefix = npm.ok ? await npm.userPrefix().catch(() => null) : null;
       const out: any[] = [];
       for (const definition of definitions) {
         const ad = { id: definition.id, name: definition.profile.name, ...definition.adapter };
-        const row: any = { id: ad.id, name: ad.name, pkg: ad.pkg, bin: ad.bin, machineId: desc.machineId, installed: null, latest: null, path: null, error: null };
+        const row: any = { id: ad.id, name: ad.name, pkg: ad.pkg, bin: ad.bin, machineId: desc.machineId, installed: null, latest: null, path: null, error: null,
+          prefix, installCommand: "npm " + installArgs(ad.pkg, prefix).join(" ") };
         try {
           if (!npm.ok) throw new Error(npm.error);
-          const ls = await npm.run(["ls", "-g", "--depth=0", "--json", ad.pkg], 60000);
-          try { row.installed = JSON.parse(ls.stdout || "{}").dependencies?.[ad.pkg]?.version || null; } catch { row.installed = null; }
+          // A per-user install (see userPrefix) takes precedence over a root-owned global copy.
+          if (prefix) row.installed = installedVersion((await npm.run(["ls", "-g", "--prefix", prefix, "--depth=0", "--json", ad.pkg], 60000)).stdout, ad.pkg);
+          if (!row.installed) row.installed = installedVersion((await npm.run(["ls", "-g", "--depth=0", "--json", ad.pkg], 60000)).stdout, ad.pkg);
           const view = await npm.run(["view", ad.pkg, "version"], 60000);
           row.latest = view.code === 0 ? view.stdout.trim().split("\n").pop() || null : null;
           if (view.code !== 0) row.error = `cannot reach npm registry: ${view.stderr.trim().split("\n").pop()}`;
@@ -529,11 +545,20 @@ const mod: AppModule = {
       const desc: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
       const npm = await npmRunner(ctx, desc);
       if (!npm.ok) throw new Error(npm.error);
-      const r = await npm.run(["install", "-g", `${ad.pkg}@latest`], 15 * 60 * 1000);
+      const prefix = await npm.userPrefix();
+      const args = installArgs(ad.pkg, prefix);
+      const r = await npm.run(args, 15 * 60 * 1000);
       const tail = (r.stderr + "\n" + r.stdout).trim().split("\n").slice(-12).join("\n");
       ctx.events.emit("acp.adaptersChanged", { machineId: desc.machineId, adapterId: ad.id });
-      if (r.code !== 0) throw new Error(`npm install -g ${ad.pkg}@latest failed on ${desc.machineId} (exit ${r.code}):\n${tail}`);
-      return { ok: true, adapterId: ad.id, machineId: desc.machineId, output: tail };
+      if (r.code !== 0) throw new Error(`npm ${args.join(" ")} failed on ${desc.machineId} (exit ${r.code}):\n${tail}`);
+      // A per-user install only works if its bin directory wins on the login PATH.
+      let note: string | null = null;
+      if (prefix) {
+        const d = await detect(ctx, desc, ad.bin);
+        if (!d.found || !d.path.startsWith(prefix + "/bin/")) note = `npm's global folder is not writable, so ${ad.bin} was installed to ${prefix}/bin. `
+          + `Add it to the front of PATH on ${desc.machineId} (e.g. in ~/.profile: export PATH="$HOME/.local/bin:$PATH")${d.found ? `; ${d.path} is used now` : ""}.`;
+      }
+      return { ok: true, adapterId: ad.id, machineId: desc.machineId, output: tail, prefix, note };
     },
   },
 };

@@ -392,7 +392,8 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     const v=await owned(ctx,a);
     const used=new Set((v.session.mcps||[]).map((m:any)=>m.id));
     const authorization=await oauthHeaders(ctx,(await mcps(ctx)).filter(m=>used.has(m.id)));
-    return invoke(ctx,a.workspaceId,"reconnect",{id:a.id,authorization});
+    const subscription=await ctx.modules.call("persistence","settings.get",{key:"acp.claude.useSubscription"});
+    return invoke(ctx,a.workspaceId,"reconnect",{id:a.id,authorization,claudeSubscription:subscription!==false});
   },
   async setModel(ctx,a) {
     const v=await owned(ctx,a);

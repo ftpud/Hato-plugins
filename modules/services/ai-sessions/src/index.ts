@@ -507,7 +507,8 @@ const mod: AppModule = {
         title: `${verb} ${ad.name} on ${desc.machineId}?`,
         operation: "acp-adapter-install",
         detail: [
-          `Command (runs on ${desc.machineId}):`, `  npm install -g ${ad.pkg}@latest`, "",
+          `Command (runs on ${desc.machineId}):`, `  ${ad.installCommand || `npm install -g ${ad.pkg}@latest`}`, "",
+          ...(ad.prefix ? [`npm's global folder is not writable by this user, so the adapter is installed for this user only (${ad.prefix}/bin). No root access is used.`, ""] : []),
           `Installed: ${ad.installed || "not installed"}   Latest: ${ad.latest || "unknown"}`, "",
           "This downloads and installs code from the npm registry. The agent will afterwards still need to be authenticated on that machine.",
         ].join("\n"),

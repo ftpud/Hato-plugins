@@ -7,7 +7,8 @@ import { chatStyle } from "@hato/sdk/chat-style";
 import { followKey, transcriptItems } from "@hato/sdk/chat-transcript";
 import { uiIcons } from "@hato/sdk/ui-icons";
 import { imageAttachments } from "@hato/sdk/images";
-import type { AppModule, ModuleContext, UiNode, ImageAttachment } from "@hato/sdk/types";
+import type { AppModule, ModuleContext, UiNode, ImageAttachment, SettingField, SettingsSection } from "@hato/sdk/types";
+import { exportSettings } from "@hato/sdk/settings";
 import { debounce, errMsg } from "@hato/sdk/runtime";
 import { resolveWorkspaceLink } from "@hato/sdk/links";
 
@@ -105,45 +106,51 @@ let attachments: ImageAttachment[] = [];
 const connectionAttempts = new Set<string>();
 let draft: string | undefined = undefined;
 let refresh: () => void = () => {};
-// ACP adapter install/update window
-let adaptersOpen = false;
-let adapters: any[] | null = null;
+// ACP adapter install/update, shown in Settings → AI & tools → ACP adapters.
+const ADAPTERS_SECTION = "acp-adapters";
+/** Adapter versions for the machine they were read from; reloaded when the workspace machine changes. */
+let adapters: { machineId: string; list: any[] } | null = null;
 let adaptersBusy: string | null = null;
-let adaptersMsg: { level: "success" | "error"; text: string } | null = null;
+let adaptersMsg: string | null = null;
+let publishSettings: (error?: string | null) => void = () => {};
 
 async function loadAdapters(ctx: ModuleContext) {
-  if (!ws) return;
-  adaptersBusy = "check"; ctx.ui.invalidate();
-  try { adapters = await ctx.modules.call("ai-sessions", "adapters", { workspaceId: ws.id }, { timeoutMs: 300000 }); }
-  catch (e) { adaptersMsg = { level: "error", text: errMsg(e) }; }
-  finally { adaptersBusy = null; ctx.ui.invalidate(); }
+  if (!ws || adaptersBusy) return;
+  const machineId = ws.machineId;
+  adaptersBusy = "check"; publishSettings();
+  try { const list = await ctx.modules.call("ai-sessions", "adapters", { workspaceId: ws.id }, { timeoutMs: 300000 }); adapters = { machineId, list: Array.isArray(list) ? list : [] }; }
+  finally { adaptersBusy = null; publishSettings(); }
 }
 
-function adapterWindow(): UiNode {
-  const rows: UiNode[] = (adapters || []).map((a: any) => {
+function adapterSections(): SettingsSection[] {
+  const busy = !!adaptersBusy;
+  const list = adapters && adapters.machineId === ws?.machineId ? adapters.list : null;
+  const fields: SettingField[] = (list || []).map((a: any) => {
     const upToDate = a.installed && a.latest && a.installed === a.latest;
-    const label = !a.installed ? "Install" : upToDate ? "Reinstall" : "Update";
     const status = a.error ? a.error : !a.installed ? `not installed · latest ${a.latest || "?"}` : `installed ${a.installed}${a.latest ? upToDate ? " · up to date" : ` · update available: ${a.latest}` : ""}`;
-    return { type: "row", key: "ad-" + a.id, gap: 8, align: "center", border: true, padding: 6, children: [
-      { type: "column", key: "info", grow: true, gap: 2, children: [
-        { type: "label", key: "n", text: a.name, weight: "bold", size: "sm" },
-        { type: "label", key: "p", text: `${a.pkg}${a.path ? " → " + a.path : ""}`, size: "xs", color: "muted" },
-        { type: "label", key: "s", text: status, size: "xs", color: a.error ? "danger" : upToDate ? "success" : a.installed ? "warning" : "muted", wrap: true },
-      ] },
-      { type: "button", key: "b", text: adaptersBusy === a.id ? "Working…" : label, action: "installAdapter", value: a.id, small: true, variant: upToDate ? "default" : "primary", disabled: !!adaptersBusy },
-    ] } as UiNode;
+    return { key: "install:" + a.id, type: "action", label: a.name, description: `${a.pkg}${a.path ? " → " + a.path : ""} · ${status}`,
+      buttonLabel: adaptersBusy === a.id ? "Installing…" : !a.installed ? "Install" : upToDate ? "Reinstall" : "Update", disabled: busy };
   });
-  return { type: "modal", key: "adapters-modal", title: `ACP adapters on ${ws ? ws.machineId : "?"}`, closeAction: "closeAdapters", children: [
-    { type: "label", key: "hint", text: "Agents run on the workspace's machine. Install or update an adapter there with npm (you will be asked to confirm). Authenticate it afterwards (e.g. `claude` login or `codex login`).", size: "xs", color: "muted", wrap: true },
-    ...(adaptersMsg ? [{ type: "status", key: "msg", text: adaptersMsg.text, level: adaptersMsg.level } as UiNode] : []),
-    ...(adaptersBusy ? [{ type: "progress", key: "busy", indeterminate: true, label: adaptersBusy === "check" ? "Checking installed and latest versions…" : `Installing ${adaptersBusy}… (npm install -g)` } as UiNode] : []),
-    ...(adapters ? rows : []),
-    { type: "row", key: "foot", gap: 6, children: [
-      { type: "spacer", key: "sp" },
-      { type: "button", key: "recheck", text: "Check versions", action: "checkAdapters", small: true, disabled: !!adaptersBusy },
-      { type: "button", key: "close", text: "Close", action: "closeAdapters", small: true },
-    ] },
-  ] };
+  fields.push({ key: "check", type: "action", label: list ? "Versions" : "Adapters", disabled: busy || !ws,
+    description: adaptersBusy === "check" ? "Checking installed and latest versions…" : list ? "Check the installed and latest npm versions again." : ws ? "Check which adapters are installed on this machine." : "Select a project to manage the adapters on its machine.",
+    buttonLabel: adaptersBusy === "check" ? "Checking…" : "Check versions" });
+  return [{ key: ADAPTERS_SECTION, title: "ACP adapters", group: "AI & tools", fields,
+    description: `Agents run on the workspace's machine${ws ? ` (${ws.machineId})` : ""}. Install or update an adapter there with npm (you will be asked to confirm), then authenticate it (e.g. \`claude\` login or \`codex login\`).`
+      + (adaptersBusy && adaptersBusy !== "check" ? ` Installing ${adaptersBusy}… (npm install -g)` : adaptersMsg ? " " + adaptersMsg : "") }];
+}
+
+async function adapterAction(ctx: ModuleContext, key: string) {
+  if (!ws) throw new Error("Select a project first");
+  adaptersMsg = null;
+  if (key === "check") return loadAdapters(ctx);
+  if (!key.startsWith("install:") || adaptersBusy) return;
+  const adapterId = key.slice(8);
+  adaptersBusy = adapterId; publishSettings();
+  try {
+    const r = await ctx.modules.call("ai-sessions", "installAdapter", { workspaceId: ws.id, adapterId }, { timeoutMs: 17 * 60 * 1000 });
+    adaptersMsg = `✓ ${r.adapterId} installed/updated on ${r.machineId}${r.prefix ? ` in ${r.prefix}` : ""}.${r.note ? " ⚠ " + r.note : ""}`;
+  } finally { adaptersBusy = null; }
+  await loadAdapters(ctx);
 }
 
 async function load(ctx: ModuleContext) {
@@ -152,12 +159,13 @@ async function load(ctx: ModuleContext) {
     const selection=background;
     try {
       const page:AgentView=await persistent(ctx,"view",{limit:Math.min(historyLimit,200),before:Number(historyBefore[historyBefore.length-1])||undefined});
+      const auth=await ctx.modules.call("acp","authSettings",{});
       if(background!==selection||ws?.id!==selection.workspaceId)return;
       backgroundPage=page;
       const session=page.session;
       const catalog=backgroundCatalog?.workspaceId===ws.id?backgroundCatalog:null;
       const profiles=catalog?.profiles.some((p:any)=>p.id===session.profile.id)?catalog.profiles:[session.profile,...(catalog?.profiles||[])];
-      view={workspace:{name:ws.name,machineId:session.machineId,root:session.root},profiles,
+      view={auth,workspace:{name:ws.name,machineId:session.machineId,root:session.root},profiles,
         mcpServers:(catalog?.mcps||[]).map((m:any)=>({id:m.id,name:m.name,description:m.description})),conversations:backgroundSessions.map(s=>({id:s.id,title:s.name,acpProfileId:s.profile.id,status:s.status})),activeId:session.id,active:{
         conversation:{id:session.id,title:session.name,acpProfileId:session.profile.id,status:session.status,approvalPolicy:agentPolicy(session),mcpSelection:sessionMcpIds(session)},
         live:{...session,profileId:session.profile.id},messages:page.messages,windowed:true,hasOlder:page.before!==null,hasLoadedOlder:false,hasNewer:historyBefore.length>0,
@@ -249,7 +257,7 @@ const mod: AppModule = {
     void restoreComposer(ctx);
     workspaceSkillState = ctx.state.get("files.skills") || null;
     ctx.state.watch("files.skills", (value: any) => { workspaceSkillState = value; ctx.ui.invalidate(); });
-    ctx.state.watch("workspace.selected", (v: any) => { const changed = ws?.id !== v?.id; ws = v; if(changed){void restoreComposer(ctx);if(background)leaveBackground(ctx);const saved=v?.view?.ui?.aiBackgroundSession;if(saved)void openBackground(ctx,{workspaceId:v.id,id:saved});else void load(ctx);} });
+    ctx.state.watch("workspace.selected", (v: any) => { const changed = ws?.id !== v?.id; ws = v; if(changed){void restoreComposer(ctx);publishSettings();if(background)leaveBackground(ctx);const saved=v?.view?.ui?.aiBackgroundSession;if(saved)void openBackground(ctx,{workspaceId:v.id,id:saved});else void load(ctx);} });
     ctx.events.on("persistent-agents.chatResponse",(response:any)=>{
       const pending=requests.get(response?.requestId);if(!pending)return;
       requests.delete(response.requestId);clearTimeout(pending.timer);
@@ -262,7 +270,11 @@ const mod: AppModule = {
     ctx.events.on("agents-panel.agentCleared",(e:any)=>{if(background?.id===e?.id){resetChatWindows();void load(ctx);}});
     ctx.events.on("ai-sessions.changed", () => refresh());
     ctx.events.on("acp.status", () => refresh());
-    ctx.events.on("acp.adaptersChanged", () => { if (adaptersOpen) loadAdapters(ctx); });
+    ctx.events.on("acp.adaptersChanged", () => { if (adapters) void loadAdapters(ctx).catch(e => publishSettings(errMsg(e))); });
+    publishSettings = exportSettings(ctx, adapterSections, () => { throw new Error("ACP adapters have no editable values"); },
+      { action: (_section, key) => adapterAction(ctx, key) });
+    // Read versions when Settings opens and this machine has not been checked yet (npm queries are slow).
+    ctx.events.on("settings.open", () => { if (ws && adapters?.machineId !== ws.machineId) void loadAdapters(ctx).catch(e => publishSettings(errMsg(e))); });
     ctx.events.on("acp.authChanged", () => refresh());
     if(prev?.background&&prev.background.workspaceId===ws?.id) {
       normalDraft=prev.normalDraft;normalAttachments=prev.normalAttachments||[];
@@ -325,7 +337,6 @@ const mod: AppModule = {
       ...(confirmRuntimeUpdate ? [{ type: "button", key: "cancel-update", text: "Cancel", action: "cancelUpdateRuntime", small: true, variant: "ghost" } as UiNode] : []),
     ] });
     if (live?.error && !connected) kids.push({ type: "status", key: "liveerr", text: live.error, level: "error" });
-    if (adaptersOpen && ws) kids.push(adapterWindow());
     if (historyOpen && view) {
       const sessions = view.conversations.filter((c: any) => `${c.title} ${view.profiles.find((p: any) => p.id === c.acpProfileId)?.name || ""}`.toLowerCase().includes(historyQuery.toLowerCase()));
       kids.push({ type: "modal", key: "history", title: "Sessions", closeAction: "toggleHistory", children: [
@@ -410,7 +421,7 @@ const mod: AppModule = {
               { type: "button", key: "connect", text: connected ? "Reconnect" : "Connect", action: "reconnect", style: chatStyle.control, disabled: !!active?.busy } as UiNode,
               { type: "button", key: "stop", text: "Stop agent", action: "stopBackground", style: chatStyle.control, variant: "danger", disabled: !live || live.status === "stopped" } as UiNode,
             ] : [{ type: "button", key: "connect", text: connected ? "Disconnect" : "Connect", action: connected ? "disconnect" : "connect", style: chatStyle.control } as UiNode]),
-            { type: "button", key: "adapters", text: "Manage agents…", action: "openAdapters", style: chatStyle.control },
+            { type: "button", key: "adapters", text: "Manage agents…", action: "openAdapters", style: chatStyle.control, tooltip: "Install or update ACP adapters in Settings" },
           ] },
           ...(background ? [{ type: "row", key: "runtime", gap: 8, align: "center", wrap: true, children: [
             { type: "button", key: "update-runtime", text: confirmRuntimeUpdate ? "Confirm update" : "Update runtime", action: confirmRuntimeUpdate ? "updateRuntime" : "askUpdateRuntime",
@@ -678,22 +689,13 @@ const mod: AppModule = {
       if (ev.action === "removeImage") { attachments.splice(Number(ev.value), 1); ctx.ui.invalidate(); return; }
       if (ev.action === "toggleMcpPicker") { mcpOpen = !mcpOpen; if (mcpOpen) ctx.events.emit("ai.skillsRequested", {}); ctx.ui.invalidate(); return; }
       if (ev.action === "toggleSettings") { settingsOpen = !settingsOpen; ctx.ui.invalidate(); return; }
-      if (ev.action === "openAdapters" && ws) { adaptersOpen = true; adaptersMsg = null; await loadAdapters(ctx); return; }
-      if (ev.action === "closeAdapters") { adaptersOpen = false; return; }
-      if (ev.action === "checkAdapters") { adaptersMsg = null; await loadAdapters(ctx); return; }
-      if (ev.action === "installAdapter" && ws) {
-        adaptersBusy = String(ev.value); adaptersMsg = null; ctx.ui.invalidate();
-        try {
-          const r = await call("installAdapter", { workspaceId: ws.id, adapterId: ev.value }, 17 * 60 * 1000);
-          adaptersMsg = { level: "success", text: `✓ ${r.adapterId} installed/updated on ${r.machineId}` };
-        } catch (e) { adaptersMsg = { level: "error", text: errMsg(e) }; }
-        adaptersBusy = null;
-        await loadAdapters(ctx);
-        return;
-      }
+      if (ev.action === "openAdapters") { ctx.events.emit("settings.open", { category: JSON.stringify([ctx.moduleId, ADAPTERS_SECTION]) }); return; }
       if (ev.action === "toggleProviderAuth") {
         const p = view?.profiles.find((p: any) => p.id === view?.active?.conversation?.acpProfileId);
-        if (p?.authOption) await ctx.modules.call("acp", "setAuthSettings", { [p.authOption.field]: !!ev.value });
+        if (p?.authOption) {
+          await ctx.modules.call("acp", "setAuthSettings", { [p.authOption.field]: !!ev.value });
+          await load(ctx);
+        }
         return;
       }
       if (ev.action === "newChat" && ws) { await call("create", { workspaceId: ws.id, profileId: conv?.acpProfileId }); historyOpen = false; settingsOpen = false; modelsOpen = false; }

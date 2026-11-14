@@ -371,6 +371,9 @@ const mod:AppModule={
     }),
     reconnect:(ctx,a)=>serialize(String(a.id),async()=>{
       const s=session(a.id);
+      if(["busy","waiting","starting"].includes(s.status))throw new Error("Wait for the agent to finish its turn, or cancel it, before reconnecting");
+      if(live.has(s.id))await stop(ctx,s.id);
+      if(typeof a.claudeSubscription==="boolean")s.claudeSubscription=a.claudeSubscription;
       // Refreshed OAuth headers from the desktop replace the expired ones before reconnecting.
       const auth=a.authorization&&typeof a.authorization==="object"?a.authorization:{};
       s.mcps=(s.mcps as any[]).map(m=>typeof auth[m.id]==="string"&&Array.isArray(m.headers)?{...m,headers:[...m.headers.filter((h:any)=>String(h.name).toLowerCase()!=="authorization"),{name:"Authorization",value:auth[m.id]}]}:m);

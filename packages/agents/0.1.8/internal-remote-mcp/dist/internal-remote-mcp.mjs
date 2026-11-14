@@ -1,0 +1,376 @@
+// ../sdk/runtime.ts
+var JsonRpcPeer = class {
+  constructor(send, startId = 1) {
+    this.send = send;
+    this.buf = "";
+    this.nextId = 1;
+    this.pending = /* @__PURE__ */ new Map();
+    this.onRequest = async (m) => {
+      throw rpcError(-32601, "Method not found: " + m);
+    };
+    this.onNotification = () => {
+    };
+    this.onProtocolError = () => {
+    };
+    this.nextId = startId;
+  }
+  get pendingCount() {
+    return this.pending.size;
+  }
+  get nextRequestId() {
+    return this.nextId;
+  }
+  get partial() {
+    return this.buf;
+  }
+  restore(partial) {
+    this.buf = partial;
+  }
+  feed(chunk) {
+    this.buf += chunk;
+    let i;
+    while ((i = this.buf.indexOf("\n")) >= 0) {
+      const line = this.buf.slice(0, i).trim();
+      this.buf = this.buf.slice(i + 1);
+      if (!line) continue;
+      let msg;
+      try {
+        msg = JSON.parse(line);
+      } catch (e) {
+        this.onProtocolError("invalid JSON", line);
+        continue;
+      }
+      this.handle(msg, line);
+    }
+  }
+  handle(msg, line) {
+    if (msg && msg.method && msg.id !== void 0 && msg.id !== null) {
+      const id = msg.id;
+      this.onRequest(msg.method, msg.params, id).then(
+        (result) => this.send(JSON.stringify({ jsonrpc: "2.0", id, result: result === void 0 ? null : result })),
+        (err) => this.send(JSON.stringify({ jsonrpc: "2.0", id, error: { code: err && typeof err.rpcCode === "number" ? err.rpcCode : -32603, message: err && err.message || String(err), data: err && err.data } }))
+      ).catch(() => {
+      });
+    } else if (msg && msg.method) {
+      try {
+        this.onNotification(msg.method, msg.params);
+      } catch (e) {
+        this.onProtocolError(String(e), line);
+      }
+    } else if (msg && (msg.result !== void 0 || msg.error !== void 0) && msg.id !== void 0) {
+      const p = this.pending.get(msg.id);
+      if (!p) return;
+      this.pending.delete(msg.id);
+      if (msg.error) {
+        const d = msg.error.data;
+        const detail = d ? typeof d === "string" ? d : typeof d.message === "string" ? d.message : JSON.stringify(d) : "";
+        const e = new Error((msg.error.message || "JSON-RPC error") + (detail && !String(msg.error.message).includes(detail) ? `: ${detail.slice(0, 600)}` : ""));
+        e.rpcCode = msg.error.code;
+        e.data = msg.error.data;
+        p.reject(e);
+      } else p.resolve(msg.result);
+    } else {
+      this.onProtocolError("unrecognized message", line);
+    }
+  }
+  request(method, params) {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject, method });
+      this.send(JSON.stringify({ jsonrpc: "2.0", id, method, params })).catch((e) => {
+        this.pending.delete(id);
+        reject(e);
+      });
+    });
+  }
+  notify(method, params) {
+    return this.send(JSON.stringify({ jsonrpc: "2.0", method, params }));
+  }
+  failAll(reason) {
+    for (const [id, p] of this.pending) {
+      const e = new Error(reason);
+      e.code = "ECLOSED";
+      p.reject(e);
+      this.pending.delete(id);
+    }
+  }
+};
+function rpcError(code, message, data) {
+  const e = new Error(message);
+  e.rpcCode = code;
+  e.data = data;
+  return e;
+}
+function errMsg(e) {
+  return e && (e.message || String(e)) || "unknown error";
+}
+
+// modules/services/internal-remote-mcp/src/index.ts
+var db;
+var listener = null;
+var scopes = /* @__PURE__ */ new Map();
+var connections = /* @__PURE__ */ new Map();
+var proxy = `const net=require('node:net');const s=net.connect({host:'127.0.0.1',port:Number(process.env.HATO_MCP_PORT)},()=>{s.write(JSON.stringify({token:process.env.HATO_MCP_TOKEN})+'\\n');process.stdin.pipe(s)});s.pipe(process.stdout);s.on('error',e=>{console.error(e.message);process.exit(1)});s.on('close',()=>process.exit(0));process.stdin.on('end',()=>s.end());`;
+var object = (properties, required = []) => ({ type: "object", properties, required, additionalProperties: false });
+var AGENT = { type: "object", description: "Background agent to start in the task", properties: { name: { type: "string", maxLength: 120 }, prompt: { type: "string", description: "First prompt for the agent" }, model: { type: "string", description: "Model id; defaults to this agent's model" } }, required: ["prompt"], additionalProperties: false };
+var tools = [
+  { name: "agents_create", description: "Create a background worker inheriting this agent’s provider, workspace, instructions, MCP and skill permissions", inputSchema: object({ name: { type: "string" }, text: { type: "string" }, model: { type: "string" } }, ["name"]) },
+  { name: "agents_stop", description: "Stop a background agent process", inputSchema: object({ id: { type: "string" } }, ["id"]) },
+  { name: "agents_list", description: "List background agents in this workspace", inputSchema: object({}) },
+  { name: "agents_history", description: "Read agent dialogue, capped at 20 messages and 16k characters. Images and reasoning are excluded. includeTools adds tool summaries; before pages earlier.", inputSchema: object({ id: { type: "string" }, before: { type: "number" }, includeTools: { type: "boolean" } }, ["id"]) },
+  { name: "agents_prompt", description: "Prompt or steer a background agent in this workspace", inputSchema: object({ id: { type: "string" }, text: { type: "string" }, steer: { type: "boolean" } }, ["id", "text"]) },
+  { name: "agents_cancel", description: "Cancel a background agent turn", inputSchema: object({ id: { type: "string" } }, ["id"]) },
+  { name: "terminals_list", description: "List terminals belonging to this workspace", inputSchema: object({}) },
+  { name: "terminals_read", description: "Read bounded terminal output", inputSchema: object({ key: { type: "string" }, cursor: { type: "number" } }, ["key"]) },
+  { name: "terminals_write", description: "Write input to a workspace terminal, including commands ending with a newline", inputSchema: object({ key: { type: "string" }, text: { type: "string" } }, ["key", "text"]) },
+  { name: "tasks_list", description: "List the Git tasks (branch + linked worktree) of this workspace's project. Requires the Hato desktop to be open.", inputSchema: object({}) },
+  { name: "tasks_create", description: "Create a Git task in this workspace's project, optionally starting a background agent in it with a prompt. Needs the user's approval in the Hato desktop unless this agent runs on autopilot. With `branch`, an existing local branch is checked out, a branch on exactly one remote is tracked, otherwise a new branch is created from HEAD; without it a task/<name>-<id> branch is generated. The new agent inherits this agent's provider, model, instructions, skills, MCP servers and autopilot.", inputSchema: object({ name: { type: "string", maxLength: 100 }, branch: { type: "string", maxLength: 200 }, agent: AGENT }) },
+  { name: "tasks_start_agent", description: "Start a background agent with a prompt in an existing Git task of this project (task ids come from tasks_list). Needs the user's approval in the Hato desktop unless this agent runs on autopilot. The agent inherits this agent's provider, model, instructions, skills, MCP servers and autopilot.", inputSchema: object({ taskId: { type: "string" }, agent: AGENT }, ["taskId", "agent"]) },
+  { name: "tasks_reconcile", description: "Refresh task statuses for this workspace's project against `git worktree list`. Never deletes anything. Requires the Hato desktop to be open.", inputSchema: object({}) },
+  { name: "skills_list", description: "List skills selected for this agent", inputSchema: object({}) },
+  { name: "skills_read", description: "Read a selected skill", inputSchema: object({ path: { type: "string" } }, ["path"]) }
+];
+async function ctl(ctx, scope, op, args = {}) {
+  if (!scope.daemon) throw new Error("No daemon for this endpoint");
+  const grant = await ctx.host.capabilities.request({ kind: "process", root: scope.root });
+  try {
+    const r = await ctx.host.process.run(grant.grant, { executable: scope.daemon.bin, args: ["daemon", "ctl", "--dir", scope.daemon.dir], cwd: scope.root }, { stdin: JSON.stringify({ op, args }) + "\n", timeoutMs: 3e4 });
+    if (r.code !== 0) throw new Error(r.stderr || "Daemon control failed");
+    const v = JSON.parse(r.stdout);
+    if (!v.ok) throw new Error(v.error?.message || "Daemon request failed");
+    return v.value;
+  } finally {
+    await ctx.host.capabilities.release(grant.grant);
+  }
+}
+async function agentCall(ctx, s, method, args) {
+  return s.daemon ? ctx.modules.call("agent-runner", method, args) : ctx.modules.call("persistent-agents", method, { ...args, workspaceId: s.workspaceId });
+}
+var TASK_OPS = { tasks_list: "list", tasks_create: "create", tasks_reconcile: "reconcile", tasks_start_agent: "startAgent" };
+var TASK_TIMEOUT_MS = 10 * 60 * 1e3;
+var CLAIM_RETRY_MS = 60 * 1e3;
+var taskRequests = /* @__PURE__ */ new Map();
+function agentArg(a) {
+  if (a == null) return void 0;
+  if (typeof a !== "object" || typeof a.prompt !== "string" || !a.prompt.trim()) throw new Error("agent.prompt is required");
+  if (a.prompt.length > 128 * 1024) throw new Error("agent.prompt is too large");
+  return { name: typeof a.name === "string" ? a.name.slice(0, 120) : "", prompt: a.prompt, model: typeof a.model === "string" ? a.model.slice(0, 200) : "" };
+}
+function taskArgs(op, a) {
+  if (op === "startAgent") {
+    if (typeof a.taskId !== "string" || !a.taskId) throw new Error("taskId is required");
+    const agent = agentArg(a.agent);
+    if (!agent) throw new Error("agent is required");
+    return { taskId: a.taskId, agent };
+  }
+  if (op !== "create") return {};
+  const name = typeof a.name === "string" ? a.name.trim().slice(0, 100) : "", branch = typeof a.branch === "string" ? a.branch.trim().slice(0, 200) : "";
+  if (!name && !branch) throw new Error("Provide a task name or a branch");
+  return { name, branch, agent: agentArg(a.agent) };
+}
+function queueTask(s, op, args) {
+  return new Promise((resolve, reject) => {
+    const id = crypto.randomUUID();
+    const timer = setTimeout(() => {
+      taskRequests.delete(id);
+      reject(new Error("The Hato desktop did not handle this request in time (is it open and was the request approved?)"));
+    }, TASK_TIMEOUT_MS);
+    taskRequests.set(id, { id, sessionId: s.sessionId, workspaceId: s.workspaceId, op, args, createdAt: Date.now(), claimedAt: null, resolve, reject, timer });
+  });
+}
+function finishTask(id, outcome) {
+  const r = taskRequests.get(id);
+  if (!r) return false;
+  taskRequests.delete(id);
+  clearTimeout(r.timer);
+  if (typeof outcome.error === "string") r.reject(new Error(outcome.error));
+  else r.resolve(outcome.value ?? null);
+  return true;
+}
+async function call(ctx, s, name, a) {
+  if (TASK_OPS[name]) {
+    const op = TASK_OPS[name], args = taskArgs(op, a);
+    if (!s.daemon) return ctx.modules.call("persistent-agents", "taskRequest", { sessionId: s.sessionId, workspaceId: s.workspaceId, op, args }, { timeoutMs: TASK_TIMEOUT_MS });
+    return queueTask(s, op, args);
+  }
+  if (name.startsWith("agents_")) {
+    const list = await agentCall(ctx, s, "list", {});
+    const permitted = list.filter((r) => r.workspaceId === s.workspaceId && r.root === s.root);
+    if (name === "agents_list") return permitted;
+    if (name === "agents_create") {
+      if (!permitted.some((r) => r.id === s.sessionId)) throw new Error("This endpoint is not attached to a background agent");
+      return agentCall(ctx, s, "fork", { parentId: s.sessionId, name: a.name, text: a.text, model: a.model });
+    }
+    if (!permitted.some((r) => r.id === a.id)) throw new Error("Agent is outside this workspace");
+    if (name === "agents_history") {
+      const view = await agentCall(ctx, s, "view", { id: a.id, before: a.before, limit: 20 });
+      let budget = 16e3;
+      const messages = [];
+      for (const m of [...view.messages].reverse()) {
+        if (budget <= 0) break;
+        if (m.role !== "user" && m.role !== "assistant" && !(a.includeTools === true && m.role === "tool")) continue;
+        const text = String(m.text || "").slice(0, Math.min(4e3, budget));
+        budget -= text.length;
+        messages.unshift({ key: m.key, role: m.role, text, truncated: text.length < String(m.text || "").length });
+      }
+      const first = messages[0]?.key || view.messages[0]?.key;
+      return { id: a.id, messages, before: first ? Number(String(first).replace("agent-msg-", "")) : view.before, hasOlder: view.before !== null || budget <= 0 };
+    }
+    if (name === "agents_prompt") return agentCall(ctx, s, "send", { id: a.id, text: a.text, steer: a.steer });
+    if (name === "agents_cancel") return agentCall(ctx, s, "cancel", { id: a.id });
+    if (name === "agents_stop") return agentCall(ctx, s, "stop", { id: a.id });
+  }
+  if (name.startsWith("terminals_")) {
+    if (!s.daemon) {
+      const map = { terminals_list: "list_tabs", terminals_read: "tail", terminals_write: "send" };
+      return ctx.modules.call("terminals", "workspaceControl", { tool: map[name], args: { ...a, tab: a.key }, scope: { workspaceId: s.workspaceId, conversationId: s.sessionId, machineId: "local" } });
+    }
+    const list = await ctl(ctx, s, "resources.list");
+    const allowed = (list.ptys || []).filter((p) => p.cwd === s.root || p.cwd.startsWith(s.root.replace(/\/$/, "") + "/"));
+    if (name === "terminals_list") return allowed;
+    if (!allowed.some((p) => p.key === a.key)) throw new Error("Terminal is outside this workspace");
+    return ctl(ctx, s, name === "terminals_read" ? "pty.read" : "pty.write", { key: a.key, cursor: a.cursor, limitBytes: 65536, text: a.text });
+  }
+  if (name === "skills_list") return s.skills;
+  if (name === "skills_read") {
+    if (!s.skills.includes(a.path)) throw new Error("Skill is not enabled for this session");
+    const g = await ctx.host.capabilities.request({ kind: "fs", root: s.root });
+    try {
+      return await ctx.host.fs.read(g.grant, a.path, 128 * 1024);
+    } finally {
+      await ctx.host.capabilities.release(g.grant);
+    }
+  }
+  throw new Error("Unknown workspace tool");
+}
+async function connection(ctx, handle) {
+  const c = { token: null, buffer: "", peer: null };
+  connections.set(handle, c);
+  await ctx.host.streams.listen(handle, {}, (chunk) => {
+    if (c.peer) {
+      c.peer.feed(chunk);
+      return;
+    }
+    c.buffer += chunk;
+    const i = c.buffer.indexOf("\n");
+    if (i < 0) {
+      if (c.buffer.length > 4096) void ctx.host.net.close(handle);
+      return;
+    }
+    let token;
+    try {
+      token = JSON.parse(c.buffer.slice(0, i)).token;
+    } catch {
+    }
+    if (typeof token !== "string" || !scopes.has(token)) {
+      void ctx.host.net.close(handle);
+      return;
+    }
+    c.token = token;
+    c.peer = new JsonRpcPeer((line) => ctx.host.net.write(handle, line + "\n"));
+    c.peer.onRequest = async (method, params) => {
+      const s = scopes.get(c.token);
+      if (!s) throw rpcError(-32001, "MCP access revoked");
+      if (method === "initialize") return { protocolVersion: ["2024-11-05", "2025-03-26", "2025-06-18"].includes(params?.protocolVersion) ? params.protocolVersion : "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "internal-remote-mcp", version: "0.1.0" } };
+      if (method === "ping") return {};
+      if (method === "tools/list") return { tools };
+      if (method === "tools/call") {
+        try {
+          const value = await call(ctx, s, params.name, params.arguments || {});
+          return { content: [{ type: "text", text: JSON.stringify(value) }] };
+        } catch (e) {
+          return { content: [{ type: "text", text: errMsg(e) }], isError: true };
+        }
+      }
+      throw rpcError(-32601, "Unknown MCP method");
+    };
+    const rest = c.buffer.slice(i + 1);
+    c.buffer = "";
+    if (rest) c.peer.feed(rest);
+  }, () => {
+    connections.delete(handle);
+    void ctx.host.net.close(handle).catch(() => {
+    });
+  });
+}
+async function listen(ctx) {
+  if (listener) return listener;
+  listener = await ctx.host.net.listenLoopback();
+  let pending = "";
+  await ctx.host.streams.listen(listener.handle, {}, (chunk) => {
+    pending += chunk;
+    let i;
+    while ((i = pending.indexOf("\n")) >= 0) {
+      const line = pending.slice(0, i);
+      pending = pending.slice(i + 1);
+      try {
+        const e = JSON.parse(line);
+        if (e.connection) void connection(ctx, e.connection);
+      } catch {
+      }
+    }
+  });
+  return listener;
+}
+var mod = {
+  id: "internal-remote-mcp",
+  moduleApiVersion: 1,
+  async activate(ctx) {
+    db = await ctx.host.db.openNamespace("internal-remote-mcp");
+    await ctx.host.db.exec(db, "CREATE TABLE IF NOT EXISTS scopes(token TEXT PRIMARY KEY,data TEXT NOT NULL)");
+    for (const r of await ctx.host.db.query(db, "SELECT data FROM scopes")) {
+      const s = JSON.parse(r.data);
+      scopes.set(s.token, s);
+    }
+  },
+  canSwap: () => ({ ok: scopes.size === 0 && taskRequests.size === 0, reason: "Workspace MCP endpoints are active" }),
+  methods: {
+    /** Static workspace tool catalog (same list served by tools/list). */
+    tools: () => tools.map((t) => ({ name: String(t.name), title: t.title || void 0, description: String(t.description || ""), readOnly: !!t.annotations?.readOnlyHint, destructive: !!t.annotations?.destructiveHint })),
+    /** Desktop gateway (over the daemon link): take unclaimed task requests. A claim that was not resolved is offered again later. */
+    async claimTaskRequests(ctx, _a, meta) {
+      if (meta.caller !== "daemon-client") throw new Error("Only the desktop gateway handles task requests");
+      const now = Date.now(), out = [];
+      for (const r of taskRequests.values()) if (r.claimedAt === null || now - r.claimedAt > CLAIM_RETRY_MS) {
+        r.claimedAt = now;
+        out.push({ id: r.id, sessionId: r.sessionId, workspaceId: r.workspaceId, op: r.op, args: r.args, createdAt: r.createdAt });
+      }
+      return out;
+    },
+    async resolveTaskRequest(ctx, a, meta) {
+      if (meta.caller !== "daemon-client") throw new Error("Only the desktop gateway handles task requests");
+      return finishTask(String(a.id), { value: a.value, error: typeof a.error === "string" ? a.error : void 0 });
+    },
+    async endpoint(ctx, a, meta) {
+      if (!["agent-runner", "persistent-agents", "daemon-client"].includes(meta.caller)) throw new Error("Only the session controller can issue workspace endpoints");
+      let root = String(a.root || "");
+      if (!a.daemon) {
+        const d = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
+        if (d.location !== "local") throw new Error("Standalone endpoint requires a local workspace");
+        root = d.rootAbsolutePath;
+      }
+      const g = await ctx.host.capabilities.request({ kind: "fs", root });
+      await ctx.host.capabilities.release(g.grant);
+      const scope = { sessionId: String(a.sessionId), workspaceId: String(a.workspaceId), root: g.root, skills: Array.isArray(a.skills) ? a.skills : [], daemon: a.daemon, token: crypto.randomUUID() + crypto.randomUUID() };
+      scopes.set(scope.token, scope);
+      await ctx.host.db.exec(db, "INSERT INTO scopes(token,data) VALUES(?,?)", [scope.token, JSON.stringify(scope)]);
+      const l = await listen(ctx);
+      return { id: "internal-remote-mcp", name: "internal-remote-mcp", command: "node", args: ["-e", proxy], env: [{ name: "HATO_MCP_PORT", value: String(l.port) }, { name: "HATO_MCP_TOKEN", value: scope.token }] };
+    },
+    async revoke(ctx, a, meta) {
+      if (!["agent-runner", "persistent-agents", "daemon-client"].includes(meta.caller)) throw new Error("Only session controllers revoke endpoints");
+      for (const r of [...taskRequests.values()]) if (r.sessionId === a.sessionId) finishTask(r.id, { error: "Agent endpoint was revoked" });
+      for (const [t, s] of scopes) if (s.sessionId === a.sessionId) {
+        scopes.delete(t);
+        await ctx.host.db.exec(db, "DELETE FROM scopes WHERE token=?", [t]);
+        for (const [h, c] of connections) if (c.token === t) await ctx.host.net.close(h).catch(() => {
+        });
+      }
+      return null;
+    }
+  }
+};
+var index_default = mod;
+export {
+  index_default as default
+};
