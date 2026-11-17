@@ -155,13 +155,10 @@ export function blockRunView(run: RunDetail, b: WorkflowBlock, st: WorkflowBlock
     if (agent.busy) out.push({ type: "progress", key: k("agent-busy"), indeterminate: true, height: 3 } as UiNode);
     const ref = JSON.stringify([run.id, b.id]);
     const history = S.chatHistory.get(ref);
-    const transcript = history?.messages || (st.agentMessages?.length ? st.agentMessages : (st.chat || []).map(m => ({ key: k(`m-${m.id}`), role: m.role, text: m.text })));
-    const hasOlder = (history ? history.before : st.agentHistoryBefore) != null;
-    const messages = transcriptItems(transcript, { agentLabel: b.label, hasOlder, loadingOlder: history?.loading, historyError: history?.error, loadOlderAction: "chatHistoryOlder" });
-    const older = messages.find(m => m.key === "__older");
-    if (older?.type === "button") { older.value = ref; older.key = `__older:${transcript[0]?.key || ""}`; }
+    const transcript = (history?.messages || (st.agentMessages?.length ? st.agentMessages : (st.chat || []).map(m => ({ key: k(`m-${m.id}`), role: m.role, text: m.text })))).slice(-20);
+    const messages = transcriptItems(transcript, { agentLabel: b.label });
     if (messages.length) out.push({ type: "column", key: k("messages"), height: 320, children: [{ type: "transcript", key: `chat-history:${ref}`, scrollbarMode: "scrolling", grow: true, scrollKey: `${run.id}:${b.id}:${st.sessionId || ""}`, followKey: followKey(transcript),
-      hasOlder, loadingOlder: history?.loading, loadOlderAction: history?.error ? undefined : "chatHistoryOlder", children: messages }] });
+      children: messages }] });
     if (run.status !== "cancelled") out.push({ type: "row", key: k("chat"), gap: 6, align: "end", children: [
       { type: "textInput", key: `chat:${run.id}:${b.id}`, value: S.chatDrafts.get(`chat:${run.id}:${b.id}`) || "", changeAction: "chatText", submitAction: "chatSend", placeholder: `Message ${b.label}`, grow: true, multiline: true, rows: 2 } as UiNode,
       btn("send", "Send", "chatSend", { value: `chat:${run.id}:${b.id}`, variant: "primary", disabled: agent.busy }),
@@ -175,13 +172,14 @@ export function blockRunView(run: RunDetail, b: WorkflowBlock, st: WorkflowBlock
   }
   if (b.type === "meeting" && st.meeting?.messages.length) out.push(
     text(k("transcript-title"), "Meeting transcript", { weight: "semibold" }),
-    { type: "column", key: k("transcript"), scroll: true, maxHeight: 280, gap: 6, children: st.meeting.messages.map(m => ({
-      type: "column", key: k(`mt-${m.seq}`), gap: 2,
-      style: { borderLeft: 3, borderColor: participantColor(run, m.blockId), paddingX: 10, paddingY: 6, background: "background", radius: 4 }, children: [
-        muted("author", `${m.author} · ${new Date(m.at).toLocaleTimeString()}`, { color: participantColor(run, m.blockId), weight: "semibold" }),
-        text("message", m.text, { selectable: true, ...(m.kind === "status" ? { size: "xs", style: { italic: true } } : {}) }),
-      ],
-    } as UiNode)) },
+    { type: "column", key: k("transcript"), height: 280, children: [{ type: "transcript", key: `meeting-transcript:${run.id}:${b.id}`, scrollbarMode: "scrolling", grow: true, scrollKey: `${run.id}:${b.id}`,
+      children: st.meeting.messages.slice(-20).map(m => ({
+        type: "column", key: k(`mt-${m.seq}`), gap: 2,
+        style: { borderLeft: 3, borderColor: participantColor(run, m.blockId), paddingX: 10, paddingY: 6, background: "background", radius: 4 }, children: [
+          muted("author", `${m.author} · ${new Date(m.at).toLocaleTimeString()}`, { color: participantColor(run, m.blockId), weight: "semibold" }),
+          text("message", m.text, { selectable: true, ...(m.kind === "status" ? { size: "xs", style: { italic: true } } : {}) }),
+        ],
+      } as UiNode)) } as UiNode] },
   );
   if (includeActivity) out.push(activityLog(run, st, prefix));
   return out;

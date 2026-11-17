@@ -156,7 +156,8 @@ const mod: AppModule = {
       };
       append(changeTree(group), 0);
     }
-    children.push({ type: "column", key: "files", grow: true, scroll: true, gap: 3, children: list.length ? list : [{ type: "label", key: "clean", text: !status ? "Loading…" : !status.repo ? "Not a Git repository" : query ? "No matching files" : "No changes in this changeset", color: "muted", padding: 12 }] });
+    // Uniform rows let the renderer build only the visible part of a long change list.
+    children.push({ type: "column", key: "files", grow: true, scroll: true, gap: 3, ...(list.length ? { itemHeight: 28 } : {}), children: list.length ? list : [{ type: "label", key: "clean", text: !status ? "Loading…" : !status.repo ? "Not a Git repository" : query ? "No matching files" : "No changes in this changeset", color: "muted", padding: 12 }] });
     children.push({ type: "row", key: "selection", gap: 4, wrap: true, children: [
       { type: "label", key: "count", text: `${picked.length} selected`, size: "xs", color: "muted", grow: true },
       { type: "select", key: "move", value: null, placeholder: "Move selected to…", action: "move", disabled: busy || !picked.length,
