@@ -8,7 +8,7 @@ import { acpServer, transportOf } from "@hato/sdk/mcp-servers";
 import type { AgentProfile } from "@hato/sdk/persistent-agents";
 import {
   type WorkflowBlock, type WorkflowBlockState, type WorkflowDefinition, type WorkflowEdge, type WorkflowRun, type WorkflowRunEnv,
-  edgeType, isAgentBlock, isCapabilityBlock, isStartBlock, preview, renderPrompt,
+  edgeType, isAgentBlock, isCapabilityBlock, isInternalMcp, isStartBlock, preview, renderPrompt,
 } from "@hato/sdk/workflows";
 import { appAction, runScript } from "./procs";
 import { issueEndpoint, revokeWhere } from "./mcp";
@@ -18,6 +18,8 @@ export interface Exec {
   mcpCalls: Map<string, { blockId: string; edgeId: string; callId: string; title: string; status: string }>;
   outputs: Map<string, string>; busy: Set<string>;
   timers: Map<string, ReturnType<typeof setTimeout>>;
+  /** One-shot delay overrides (ms) for the next arming of a Timer, set by an agent's tool call. */
+  delays: Map<string, number>;
   answers: Map<string, { pauseId: string; resolve: (v: string) => void; reject: (e: Error) => void }>;
   background: Set<Promise<unknown>>; loops: Map<string, number>; steps: number;
   joins: Map<string, { resolved: Set<string>; active: Set<string>; outputs: Map<string, string>; fired: boolean }>;
@@ -108,7 +110,7 @@ function assertActive(x: Exec) { if (x.cancelled) throw new Error("Workflow run 
 
 export function newExec(run: WorkflowRun, env: WorkflowRunEnv): Exec {
   const x: Exec = {
-    run, env, def: run.definition, mcpCalls: new Map(), outputs: new Map(), busy: new Set(), timers: new Map(), answers: new Map(), background: new Set(),
+    run, env, def: run.definition, mcpCalls: new Map(), outputs: new Map(), busy: new Set(), timers: new Map(), delays: new Map(), answers: new Map(), background: new Set(),
     loops: new Map(), steps: 0, joins: new Map(), fetched: new Map(), meetingWaiters: new Map(), participantStatuses: new Map(run.blocks.map(s => [s.blockId, s.status])), procs: new Set(), cancelled: false, driving: false,
   };
   for (const s of run.blocks) if (s.output !== undefined) x.outputs.set(s.blockId, s.output);
@@ -132,6 +134,9 @@ function reaches(x: Exec, from: string, to: string) {
 }
 /** Connections that close a cycle are loop returns, not join inputs. */
 const forwardEdge = (x: Exec, e: WorkflowEdge) => !e.loop && flowEdge(e) && !reaches(x, e.to, e.from);
+/** Whether the run's own flow can reach a block. Blocks that only run when an agent calls them
+ *  (e.g. a Timer used as a tool) fire as independent events and are never join inputs. */
+const flowDriven = (x: Exec, id: string) => defaultRoots(x).some(r => r === id || reaches(x, r, id));
 /** Blocks a caller may use: use connections, and every outgoing connection of a Chatbox. */
 export function toolTargets(x: Exec, callerId: string): WorkflowBlock[] {
   const caller = block(x, callerId);
@@ -146,7 +151,7 @@ function joinInput(x: Exec, target: string, active: WorkflowEdge[], outputs: Map
 function resolveEdge(x: Exec, e: WorkflowEdge, active: boolean, output: string, path: string[], visited = new Set<string>()): Promise<unknown>[] {
   if (active) transfer(x, e.id, "flow", output);
   const target = e.to;
-  const incoming = x.def.edges.filter(i => i.to === target && forwardEdge(x, i));
+  const incoming = x.def.edges.filter(i => i.to === target && forwardEdge(x, i) && flowDriven(x, i.from));
   const outgoing = () => x.def.edges.filter(o => o.from === target && forwardEdge(x, o));
   if (incoming.length < 2) {
     if (active) return [invoke(x, target, output, path)];
@@ -239,9 +244,19 @@ async function followers(x: Exec, b: WorkflowBlock, s: WorkflowBlockState, outpu
   for (const e of out.filter(e => edgeType(e) === "path" && e.label !== s.selectedRoute && forwardEdge(x, e)))
     pending.push(...resolveEdge(x, e, false, "", [...ancestors, id]));
   for (const e of out.filter(e => edgeType(e) === "follow" || (edgeType(e) === "path" && e.label === s.selectedRoute))) {
-    // A block used as a tool returns its result to the waiting caller; a drawn connection
-    // back to that caller must not start a second turn in its active session.
-    if (x.busy.has(e.to)) { log(s, "lifecycle", `Skipped connection to active block '${block(x, e.to).label}'`); continue; }
+    if (x.busy.has(e.to)) {
+      const target = block(x, e.to);
+      // A block used as a tool returns its result to the waiting caller; a drawn connection
+      // back to that caller must not also inject it into the caller's active turn.
+      if (ancestors.includes(e.to) || !isAgentBlock(target) || !stateOf(x, e.to).sessionId) {
+        log(s, "lifecycle", `Skipped connection to active block '${target.label}'`); continue;
+      }
+      // Any other upstream activity (a fired timer, a parallel branch) steers the running session.
+      transfer(x, e.id, "flow", output, undefined, "steer");
+      log(s, "lifecycle", `Steered output into active block '${target.label}'`);
+      pending.push(steer(x, e.to, output));
+      continue;
+    }
     const back = ancestors.includes(e.to) || e.to === id || !forwardEdge(x, e);
     if (back) {
       const count = (x.loops.get(e.id) ?? 0) + 1, limit = x.def.settings?.maxLoopCount ?? 100;
@@ -280,7 +295,8 @@ async function script(x: Exec, b: WorkflowBlock, s: WorkflowBlockState, input: s
 
 function armTimer(x: Exec, b: WorkflowBlock, s: WorkflowBlockState, input: string) {
   const old = x.timers.get(b.id); if (old) clearTimeout(old);
-  const ms = Math.max(0, (b.seconds ?? 0) * 1000);
+  const override = x.delays.get(b.id); x.delays.delete(b.id);
+  const ms = Math.max(0, override ?? (b.seconds ?? 0) * 1000);
   Object.assign(s, { status: "waiting_timer", waitingUntil: new Date(Date.now() + ms).toISOString(), pauseId: crypto.randomUUID() });
   log(s, "lifecycle", `Timer armed for ${s.waitingUntil}`);
   touch(x);
@@ -294,6 +310,38 @@ function armTimer(x: Exec, b: WorkflowBlock, s: WorkflowBlockState, input: strin
     touch(x);
     track(x, followers(x, b, s, input, []).catch(e => { x.flowFailed ??= `${b.label}: ${errMsg(e)}`; }));
   }, ms));
+}
+
+/** Delay in ms for a Timer armed by an agent: `seconds` or an absolute ISO `at`, else the block's
+ *  own seconds. Bounded by the run's maximum duration so a timer cannot outlive its run. */
+export function timerDelay(x: Exec, a: { seconds?: unknown; at?: unknown }): number | undefined {
+  const max = x.def.settings?.maxRunDurationMs ?? 24 * 3600_000;
+  let ms: number | undefined;
+  if (a.at !== undefined && a.at !== null && a.at !== "") {
+    const t = Date.parse(String(a.at));
+    if (!Number.isFinite(t)) throw new Error("Timer 'at' must be an ISO 8601 date-time");
+    ms = t - Date.now();
+  } else if (a.seconds !== undefined && a.seconds !== null && a.seconds !== "") {
+    const n = Number(a.seconds);
+    if (!Number.isFinite(n) || n < 0) throw new Error("Timer 'seconds' must be a non-negative number");
+    ms = n * 1000;
+  }
+  if (ms === undefined) return undefined;
+  if (ms > max) throw new Error(`Timer delay exceeds the run's maximum duration of ${Math.round(max / 1000)} seconds`);
+  return Math.max(0, ms);
+}
+
+/** Status or cancellation of a Timer without re-arming it. */
+export function timerAction(x: Exec, id: string, action: "status" | "cancel") {
+  const s = stateOf(x, id), armed = x.timers.has(id);
+  if (action === "cancel" && armed) {
+    clearTimeout(x.timers.get(id)!); x.timers.delete(id);
+    Object.assign(s, { status: "cancelled", completedAt: now(), waitingUntil: undefined, pauseId: undefined });
+    log(s, "lifecycle", "Timer cancelled by an agent");
+    touch(x);
+    return { status: "cancelled" };
+  }
+  return { status: armed ? "armed" : s.status, ...(armed ? { firesAt: s.waitingUntil } : {}) };
 }
 
 async function ask(x: Exec, b: WorkflowBlock, s: WorkflowBlockState, question: string): Promise<string> {
@@ -350,7 +398,7 @@ function instructions(x: Exec, b: WorkflowBlock) {
     tools.length ? `Connected workflow blocks and capabilities: ${JSON.stringify(tools)}.` : "No workflow blocks are connected to you as tools.",
     "Call workflow_connections to discover your connected blocks and their invocation methods before deciding which tools to use. Check the connected capabilities before claiming you lack access. Blocks with invocation workflow_use_block accept block_id and input; provider_mcp_tools means use that MCP server's advertised tools directly.",
     caps.includes("mcp") ? "Connected MCP servers are available capabilities. Identify them by server_name in workflow_connections, then inspect their advertised tool names and descriptions. If your provider loads tools lazily, use its tool discovery/search facility to find that server's tools. Use relevant tools for the user's request without requiring the user to name the server. If discovery or connection fails, report that specific error rather than claiming no MCP server is connected." : "",
-    tools.length ? "For connected AI Agents and Chatboxes: omit action to run and wait, start launches in the background, status checks state, tail reads recent messages (lines 1–50) and steer sends input to a running session. A timed_out result means the block keeps working; check it with status or workflow_block_messages. Run App blocks take action start, status, kill or tail. Meetings automatically publish participant status changes (started activity, idle, permission wait, error or stop) as room messages. Use diff or wait to receive them without status polling. Publishing does not consume your unread cursor or invoke other agents. Meetings take publish (message), tail, diff, wait, status and shake (peer_block_id and an explicit message, required). Skill blocks return instructions to apply in your own session. Timers arm and return at once; when they fire, their follow connections receive the input you gave them. User Prompt and Yes/No Prompt blocks wait for the user's answer. action \"fetch\" returns output you have not seen yet. Use workflow_block_output to page through long outputs. Keep requests and reports concise." : "",
+    tools.length ? "For connected AI Agents and Chatboxes: omit action to run and wait, start launches in the background, status checks state, tail reads recent messages (lines 1–50) and steer sends input to a running session. A timed_out result means the block keeps working; check it with status or workflow_block_messages. Run App blocks take action start, status, kill or tail. Meetings automatically publish participant status changes (started activity, idle, permission wait, error or stop) as room messages. Use diff or wait to receive them without status polling. Publishing does not consume your unread cursor or invoke other agents. Meetings take publish (message), tail, diff, wait, status and shake (peer_block_id and an explicit message, required). Skill blocks return instructions to apply in your own session. Timers arm and return at once; pass seconds (delay) or at (ISO 8601 time) to choose when they fire, else the block's seconds apply. Re-arming replaces the pending timer; action status shows when it fires and cancel disarms it. When a timer fires, its follow connections receive the input you gave them, steering agents that are busy. User Prompt and Yes/No Prompt blocks wait for the user's answer. action \"fetch\" returns output you have not seen yet. Use workflow_block_output to page through long outputs. Keep requests and reports concise." : "",
     caps.includes("terminal_control") ? "Terminal Control: always call workflow_use_block with the connected Terminal Control block_id and action list, read or write. read/write take key; read accepts cursor; write takes text. These calls are logged on the block. Do not use direct workspace terminals_* tools. Reuse existing terminals; do not start agents in terminals." : "",
     caps.includes("task_controls") ? "Task controls: use the workspace tasks_list, tasks_create, tasks_start_agent and tasks_reconcile tools (they need the Hato desktop open)." : "",
     paths.length ? `Available paths: ${JSON.stringify(paths)}. Call workflow_choose_path with one of them before you finish; your final answer is passed to the chosen path.` : "",
@@ -360,27 +408,67 @@ function instructions(x: Exec, b: WorkflowBlock) {
 
 async function agentCall(method: string, args: any, timeoutMs = 60_000) { return ctx.modules.call<any>("agent-runner", method, args, { timeoutMs }); }
 
-async function createSession(x: Exec, b: WorkflowBlock) {
+/** Session-level configuration of an agent block: provider, model and the MCP servers of its
+ *  connected MCP and Task controls blocks. `signature` detects hot updates that need a reconnect. */
+function sessionConfig(x: Exec, b: WorkflowBlock) {
   const profile = pickProfile(x, b);
-  if (b.reasoning && !(await agentCall("health", {}).catch(() => null))?.reasoning) throw new Error("Reasoning needs the updated agent runtime. Stop saved background agents before upgrading their runtime, then retry.");
   const targets = toolTargets(x, b.id);
-  const extra = targets.filter(t => t.type === "mcp").map(t => x.env.mcpServers.find(m => m.id === t.mcp?.serverId)).filter(Boolean).map((m: any) => {
+  const mcpIds = targets.filter(t => t.type === "mcp").map(t => t.mcp?.serverId);
+  // Workspace tools are issued by the agent runtime itself (as for Task controls).
+  const workspaceTools = mcpIds.includes("internal-remote-mcp");
+  const extra = mcpIds.filter(id => id !== "internal-remote-mcp").map(id => x.env.mcpServers.find(m => m.id === id)).filter(Boolean).map((m: any) => {
     const prepared = x.env.mcpConfigs?.[m.id];
     if (prepared) return { id: m.id, ...prepared };
+    if (isInternalMcp(m.id)) throw new Error(`“${m.name}” is issued when the workflow is saved or a run starts. Save the workflow (or start a new run) to connect it.`);
     if (transportOf(m) !== "stdio" && m.auth?.type === "oauth") throw new Error(`MCP server “${m.name}” needs fresh authorization. Start a new workflow run to reconnect it.`);
     return { id: m.id, ...acpServer(m) };
   });
+  const workspaceMcp = (workspaceTools || targets.some(t => t.type === "task_controls")) && !!x.env.daemon;
+  const name = `${x.run.workflowName} · ${b.label}`.slice(0, 120), model = b.model || "", agentFile = b.agentFile || null;
+  const signature = JSON.stringify([profile.id, model, agentFile, extra.map(m => m.id).sort(), workspaceMcp]);
+  return { profile, name, model, agentFile, extra, workspaceMcp, signature };
+}
+const tokenOf = (endpoint: any) => endpoint.env.find((v: any) => v.name === "HATO_MCP_TOKEN")?.value;
+
+async function createSession(x: Exec, b: WorkflowBlock, s: WorkflowBlockState) {
+  if (b.reasoning && !(await agentCall("health", {}).catch(() => null))?.reasoning) throw new Error("Reasoning needs the updated agent runtime. Stop saved background agents before upgrading their runtime, then retry.");
+  const c = sessionConfig(x, b);
   const endpoint = await issueEndpoint(ctx, { kind: "run", runId: x.run.id, blockId: b.id });
   const id = crypto.randomUUID();
   const spec = {
-    id, name: `${x.run.workflowName} · ${b.label}`.slice(0, 120), workspaceId: x.env.workspaceId, workspaceName: x.env.workspaceName, root: x.env.root, machineId: x.env.machineId,
-    profile, model: b.model || "", reasoning: b.reasoning || "", agentFile: b.agentFile || null, skills: [], mcps: [endpoint, ...extra], claudeSubscription: x.env.claudeSubscription,
-    workspaceMcp: targets.some(t => t.type === "task_controls") && !!x.env.daemon, daemon: x.env.daemon,
+    id, name: c.name, workspaceId: x.env.workspaceId, workspaceName: x.env.workspaceName, root: x.env.root, machineId: x.env.machineId,
+    profile: c.profile, model: c.model, reasoning: b.reasoning || "", agentFile: c.agentFile, skills: [], mcps: [endpoint, ...c.extra], claudeSubscription: x.env.claudeSubscription,
+    workspaceMcp: c.workspaceMcp, daemon: x.env.daemon,
     autopilot: !!b.autopilot, workflow: { runId: x.run.id, blockId: b.id },
   };
   try { await agentCall("create", { spec }, 240_000); }
-  catch (e) { await revokeWhere(ctx, s => s.kind === "run" && s.token === endpoint.env.find(v => v.name === "HATO_MCP_TOKEN")?.value); throw e; }
+  catch (e) { await revokeWhere(ctx, sc => sc.kind === "run" && sc.token === tokenOf(endpoint)); throw e; }
+  s.sessionConfig = c.signature;
   return id;
+}
+
+/** Hot update of an idle session: when the block's provider, model or MCP servers changed, the
+ *  agent reconnects with the new configuration and keeps its conversation (a new provider hands
+ *  the history over). Runs before a turn, never during one. A failure keeps the old session. */
+async function reconfigure(x: Exec, b: WorkflowBlock, s: WorkflowBlockState) {
+  let c: ReturnType<typeof sessionConfig>;
+  try { c = sessionConfig(x, b); } catch (e) { log(s, "error", `Hot update not applied: ${errMsg(e)}`); return; }
+  // Sessions created before signatures existed: assume no MCP blocks were attached.
+  const current = s.sessionConfig ?? JSON.stringify([c.profile.id, c.model, c.agentFile, [], toolTargets(x, b.id).some(t => t.type === "task_controls") && !!x.env.daemon]);
+  if (current === c.signature) { s.sessionConfig = c.signature; return; }
+  const endpoint = await issueEndpoint(ctx, { kind: "run", runId: x.run.id, blockId: b.id });
+  const token = tokenOf(endpoint);
+  try {
+    await agentCall("update", { id: s.sessionId, patch: { name: c.name, profile: c.profile, model: c.model, agentFile: c.agentFile, skills: [], mcps: [endpoint, ...c.extra], workspaceMcp: c.workspaceMcp } }, 240_000);
+  } catch (e) {
+    await revokeWhere(ctx, sc => sc.kind === "run" && sc.token === token);
+    log(s, "error", `Hot update not applied: ${errMsg(e)}`);
+    return;
+  }
+  await revokeWhere(ctx, sc => sc.kind === "run" && sc.runId === x.run.id && sc.blockId === b.id && sc.token !== token);
+  s.sessionConfig = c.signature;
+  log(s, "lifecycle", "Session reconnected with the updated workflow configuration");
+  touch(x);
 }
 
 const seqOf = (m: any) => Number(String(m?.key || "").replace("agent-msg-", "")) || 0;
@@ -413,17 +501,23 @@ async function turn(x: Exec, s: WorkflowBlockState, text: string): Promise<strin
 
 async function agent(x: Exec, b: WorkflowBlock, s: WorkflowBlockState, input: string) {
   const fresh = !s.sessionId;
-  if (fresh) { s.sessionId = await createSession(x, b); touch(x); }
+  if (fresh) { s.sessionId = await createSession(x, b, s); touch(x); }
+  else await reconfigure(x, b, s);
   const limit = x.def.settings?.promptLimitChars ?? 200_000;
   const clipped = preview(input, 20_000);
   let text: string;
   const references = referenceUpdates(b.prompt, x.outputs, s.referenceContext && s.referenceContext.sessionId === s.sessionId ? s.referenceContext.values : {});
+  // A prompt changed by a hot update since this session last received it is delivered once more.
+  const promptChanged = !fresh && s.appliedPrompt !== undefined && s.appliedPrompt !== b.prompt;
+  s.appliedPrompt = b.prompt;
   if (b.type === "chatbox") {
-    text = fresh ? `${instructions(x, b)}\n\nSession guidance:\n${renderPrompt(b.prompt, "", x.outputs)}\n\nUser message:\n${clipped}` : clipped + references.text;
+    text = fresh ? `${instructions(x, b)}\n\nSession guidance:\n${renderPrompt(b.prompt, "", x.outputs)}\n\nUser message:\n${clipped}`
+      : promptChanged ? `Updated session guidance (the workflow was edited):\n${renderPrompt(b.prompt, "", x.outputs)}\n\nUser message:\n${clipped}`
+      : clipped + references.text;
     s.chat = [...(s.chat || []), { id: crypto.randomUUID(), role: "user" as const, text: clipped, at: now() }].slice(-200);
   } else {
     const template = /\{\{\s*input\s*\}\}/.test(b.prompt) ? b.prompt : `${b.prompt}\n\nInput:\n{{input}}`;
-    const body = fresh || /\{\{/.test(b.prompt) ? renderPrompt(template, clipped, x.outputs) : clipped;
+    const body = fresh || promptChanged || /\{\{/.test(b.prompt) ? renderPrompt(template, clipped, x.outputs) : clipped;
     text = fresh ? `${instructions(x, b)}\n\n${body}` : body;
   }
   if (text.length > limit) text = preview(text, limit);
@@ -570,6 +664,20 @@ export function defaultRoots(x: Exec) {
   const starts = x.def.blocks.filter(isStartBlock);
   if (starts.length) return starts.map(b => b.id);
   return x.def.blocks.filter(b => !x.def.edges.some(e => e.to === b.id) && !isCapabilityBlock(b) && !(b.type === "chatbox" && !x.run.input.trim()) && !["meeting", "skill"].includes(b.type)).map(b => b.id);
+}
+
+/** Adopt a saved revision of the run's workflow (hot update). The graph, prompts, settings and
+ *  connections apply from the next step; running agent sessions keep their provider, model and
+ *  session-level MCP servers. Timers of removed blocks are disarmed; active removed blocks finish. */
+export function adoptDefinition(x: Exec, def: WorkflowDefinition) {
+  const ids = new Set(def.blocks.map(b => b.id));
+  let disarmed = false;
+  for (const [id, t] of [...x.timers]) if (!ids.has(id)) { clearTimeout(t); x.timers.delete(id); disarmed = true; }
+  for (const id of [...x.joins.keys()]) if (!ids.has(id)) x.joins.delete(id);
+  x.def = def; x.run.definition = def; x.run.workflowName = def.name;
+  x.run.blocks = x.run.blocks.filter(s => ids.has(s.blockId) || x.busy.has(s.blockId) || x.answers.has(s.blockId));
+  for (const b of def.blocks) stateOf(x, b.id);
+  if (disarmed) settle(x); else touch(x);
 }
 
 /** Close the run once nothing is active. A Chatbox remains available for later user turns. */

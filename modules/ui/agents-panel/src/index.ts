@@ -7,7 +7,9 @@ import {errMsg} from "@hato/sdk/runtime";
 let ws:any=null,catalog:any=null,rows:AgentSession[]=[];
 let selected:string|null=null,creating=false,error:string|null=null,busy=false,visible=false;
 /** Agent being edited in the form (null while creating), and a pending destructive confirmation. */
-let editing:string|null=null,confirming:{action:"clear"|"remove";id:string}|null=null;
+let editing:string|null=null,confirming:{action:"clear"|"remove"|"removeMany";id:string}|null=null;
+/** Multi-select mode: row clicks pick agents for bulk removal instead of opening them. */
+let selecting=false,picked=new Set<string>();
 let name="",profile="",agentFile="",filter="";
 /** Agents started by workflow runs (and the workflow configurator) are hidden unless shown. */
 let showWorkflow=false;
@@ -34,14 +36,14 @@ async function refresh(ctx:ModuleContext,force=false) {
   try {
     const next:AgentSession[]=await call(ctx,"list");
     if(mine!==epoch||id!==ws?.id)return;
-    rows=next;animate(ctx);
+    rows=next;for(const id of picked)if(!next.some(s=>s.id===id))picked.delete(id);animate(ctx);
     error=null;
   }catch(e){if(mine===epoch)error=errMsg(e);}
   finally{if(refreshing===mine)refreshing=null;ctx.ui.invalidate();}
 }
 async function setup(ctx:ModuleContext) {
   const mine=++epoch;
-  busy=false;error=null;rows=[];animate(ctx);selected=null;catalog=null;creating=false;
+  busy=false;error=null;rows=[];selecting=false;picked.clear();confirming=null;animate(ctx);selected=null;catalog=null;creating=false;
   if(!ws){ctx.ui.invalidate();return;}
   try{const c=await call(ctx,"catalog");if(mine!==epoch)return;catalog=c;profile=c.profiles[0]?.id||"";}
   catch(e){if(mine===epoch)error=errMsg(e);}
@@ -102,6 +104,7 @@ const mod:AppModule={id:"agents-panel",moduleApiVersion:1,
     {type:"textInput",key:"agent-filter",...filterInput,prefixSvg:uiIcons.search,placeholder:"Filter agents",value:filter,changeAction:"filter",grow:true},
     {type:"button",key:"workflow-toggle",text:workflowCount()?String(workflowCount()):"",iconSvg:workflowIcon,action:"toggleWorkflow",small:true,variant:showWorkflow?"primary":"ghost",
       tooltip:showWorkflow?"Showing workflow agents — click to hide them":`Show workflow agents${workflowCount()?` (${workflowCount()} hidden)`:""}`},
+    {type:"button",key:"multiselect",text:"",iconSvg:uiIcons.check,action:"toggleSelect",small:true,variant:selecting?"primary":"ghost",tooltip:selecting?"Leave multi-select":"Select several agents to delete"},
     {type:"button",key:"new",text:"",iconSvg:uiIcons.plus,action:"new",small:true,variant:"ghost",tooltip:"Create agent"},
     {type:"button",key:"refresh",text:"",iconSvg:uiIcons.refresh,action:"refresh",small:true,variant:"ghost",tooltip:"Refresh agents"},
   ]},{type:"row",key:"summary",children:[{type:"label",key:"count",text:`${rows.filter(s=>showWorkflow||!isWorkflowAgent(s)).length} agents${!showWorkflow&&workflowCount()?` · ${workflowCount()} workflow hidden`:""}`,size:"xs",color:"muted",grow:true}]}];
@@ -111,14 +114,20 @@ const mod:AppModule={id:"agents-panel",moduleApiVersion:1,
   if(ws) {
     const query=filter.trim().toLowerCase();
     const agents=rows.filter(s=>(showWorkflow||!isWorkflowAgent(s))&&[s.name,s.profile.name,s.status,s.activity||""].some(v=>v.toLowerCase().includes(query)));
+    const visibleIds=agents.map(s=>s.id),chosen=visibleIds.filter(id=>picked.has(id));
+    if(selecting)children.push({type:"row",key:"select-bar",gap:4,children:[
+      {type:"button",key:"select-all",text:chosen.length===visibleIds.length&&visibleIds.length?"Clear selection":"Select all",action:"selectAll",small:true,variant:"ghost",disabled:!visibleIds.length},
+      {type:"label",key:"select-count",text:`${chosen.length} selected`,size:"xs",color:"muted",grow:true},
+      {type:"button",key:"delete-selected",text:`Delete (${chosen.length})`,iconSvg:uiIcons.trash,action:"confirmRemoveMany",small:true,variant:"danger",disabled:busy||!chosen.length},
+    ]});
     children.push({type:"tree",key:"agents",rowHeight:42,rowGap:0,iconSize:18,grow:true,selectAction:"open",expandAction:"noop",rows:agents.map(s=>({
       key:s.id,label:s.name,detail:s.activity||`${s.profile.name} · ${s.machineId}`,badge:s.status,
       tooltip:`${s.profile.name} · ${s.machineId}${s.activity?"\n"+s.activity:""}`,
-      selected:s.id===selected,depth:0,expandable:false,expanded:false,
-      iconSvg:working(s)?spinnerSvg():s.status==="waiting"?uiIcons.warning:uiIcons["message-square"],iconColor:working(s)?"primary":s.status==="error"?"danger":s.status==="waiting"?"warning":"muted",
+      selected:selecting?picked.has(s.id):s.id===selected,depth:0,expandable:false,expanded:false,
+      iconSvg:selecting&&picked.has(s.id)?uiIcons.check:working(s)?spinnerSvg():s.status==="waiting"?uiIcons.warning:uiIcons["message-square"],iconColor:selecting&&picked.has(s.id)?"primary":working(s)?"primary":s.status==="error"?"danger":s.status==="waiting"?"warning":"muted",
     }))});
     if(!agents.length)children.push(label("empty",query?"No matching agents.":!showWorkflow&&workflowCount()?"Only workflow agents here — use the workflow button to show them.":"No background agents in this workspace. Create one to begin."));
-    const current=rows.find(s=>s.id===selected);
+    const current=selecting?undefined:rows.find(s=>s.id===selected);
     if(current) {
       const running=["starting","busy","waiting"].includes(current.status);
       children.push({type:"row",key:"agent-actions",gap:4,children:[
@@ -127,7 +136,16 @@ const mod:AppModule={id:"agents-panel",moduleApiVersion:1,
         {type:"button",key:"remove",text:"Remove",iconSvg:uiIcons.trash,action:"confirmRemove",value:current.id,small:true,variant:"ghost",disabled:busy,tooltip:`Stop and delete ${current.name}`},
       ]});
     }
-    if(confirming) {
+    if(confirming?.action==="removeMany") {
+      const n=[...picked].filter(id=>rows.some(s=>s.id===id)).length;
+      children.push({type:"modal",key:"confirm",title:"Remove agents",closeAction:"dismiss",children:[
+        label("confirm-text",`Remove ${n} agent${n===1?"":"s"}? They are stopped and their conversation history is deleted. Files they changed are kept.`),
+        {type:"row",key:"confirm-buttons",gap:4,children:[
+          {type:"button",key:"confirm-yes",text:`Remove ${n}`,action:"removeMany",variant:"danger",small:true,disabled:busy||!n},
+          button("confirm-no","Cancel","dismiss"),
+        ]},
+      ]});
+    } else if(confirming) {
       const target=rows.find(s=>s.id===confirming!.id);
       if(target)children.push({type:"modal",key:"confirm",title:confirming.action==="remove"?"Remove agent":"Clear session",closeAction:"dismiss",children:[
         label("confirm-text",confirming.action==="remove"
@@ -147,6 +165,14 @@ const mod:AppModule={id:"agents-panel",moduleApiVersion:1,
   const value=String(ev.value||"");
   if(ev.action==="filter"){filter=value;ctx.ui.invalidate();return;}
   if(ev.action==="toggleWorkflow"){showWorkflow=!showWorkflow;if(!showWorkflow&&isWorkflowAgent(rows.find(s=>s.id===selected)))selected=null;ctx.ui.invalidate();return;}
+  if(ev.action==="toggleSelect"){selecting=!selecting;picked.clear();confirming=null;ctx.ui.invalidate();return;}
+  if(selecting&&ev.action==="open"){const id=ev.rowKey||value;if(picked.has(id))picked.delete(id);else picked.add(id);ctx.ui.invalidate();return;}
+  if(ev.action==="selectAll"){
+    const query=filter.trim().toLowerCase();
+    const ids=rows.filter(s=>(showWorkflow||!isWorkflowAgent(s))&&[s.name,s.profile.name,s.status,s.activity||""].some(v=>v.toLowerCase().includes(query))).map(s=>s.id);
+    if(ids.length&&ids.every(id=>picked.has(id)))ids.forEach(id=>picked.delete(id));else ids.forEach(id=>picked.add(id));
+    ctx.ui.invalidate();return;
+  }
   if(ev.action==="name"){name=value;return;}
   if(ev.action==="provider"){profile=value;return;}
   if(ev.action==="agentFile"){agentFile=value;return;}
@@ -179,6 +205,18 @@ const mod:AppModule={id:"agents-panel",moduleApiVersion:1,
       if(mine!==epoch)return;creating=false;editing=null;
     }
     else if(ev.action==="back"){creating=false;editing=null;}
+    else if(ev.action==="confirmRemoveMany"){if(picked.size)confirming={action:"removeMany",id:""};}
+    else if(ev.action==="removeMany") {
+      confirming=null;
+      const failures:string[]=[];
+      for(const id of [...picked]) {
+        if(mine!==epoch)return;
+        try{await actionCall("remove",{id});picked.delete(id);if(selected===id)selected=null;ctx.events.emit("agents-panel.agentRemoved",{workspaceId,id});}
+        catch(e){failures.push(errMsg(e));}
+      }
+      if(failures.length)error=`${failures.length} agent${failures.length===1?"":"s"} could not be removed: ${failures[0]}`;
+      else selecting=false;
+    }
     else if(ev.action==="confirmClear"||ev.action==="confirmRemove"){confirming={action:ev.action==="confirmClear"?"clear":"remove",id:value};}
     else if(ev.action==="dismiss"){confirming=null;}
     else if(ev.action==="clear"){confirming=null;await actionCall("clear",{id:value});ctx.events.emit("agents-panel.agentCleared",{workspaceId,id:value});}

@@ -10,7 +10,7 @@ import {
   blockingIssues, edgeType, isAgentBlock, isCapabilityBlock, normalizeDefinition, preview, validateWorkflow,
 } from "@hato/sdk/workflows";
 import { WORKFLOW_TEMPLATES } from "@hato/sdk/workflow-templates";
-import { recordMcpActivity, cancel, chat, drive, execs, initEngine, invoke, messages, newExec, stateOf, steer, toolTargets, toolCatalogue, touch, track, transfer, useMeeting, answer, type Exec } from "./engine";
+import { adoptDefinition, recordMcpActivity, timerAction, timerDelay, cancel, chat, drive, execs, initEngine, invoke, messages, newExec, stateOf, steer, toolTargets, toolCatalogue, touch, track, transfer, useMeeting, answer, type Exec } from "./engine";
 import { initMcp, issueEndpoint, revokeWhere, type Scope } from "./mcp";
 import { terminalAction } from "./terminal";
 import { appAction, killAllApps, listApps, runningApps } from "./procs";
@@ -49,7 +49,7 @@ async function definition(projectId: string, id: string) {
   if (!r) throw new Error(`Workflow '${id}' not found`);
   return { definition: JSON.parse(r.data) as WorkflowDefinition, revision: Number(r.revision) };
 }
-async function saveDefinition(projectId: string, raw: any, expected: number | null | undefined, available?: any) {
+async function saveDefinition(projectId: string, raw: any, expected: number | null | undefined, available?: any, mcpEnv?: Pick<WorkflowRunEnv, "mcpServers" | "mcpConfigs">) {
   const def = normalizeDefinition(raw);
   const current = (await ctxRef.host.db.query<any>(db, "SELECT revision, data, project FROM definitions WHERE id=?", [def.id]))[0];
   if (current && current.project !== projectId) throw new Error("This workflow id belongs to another project; choose a new id");
@@ -59,7 +59,33 @@ async function saveDefinition(projectId: string, raw: any, expected: number | nu
   const revision = current ? Number(current.revision) + 1 : 1;
   await ctxRef.host.db.exec(db, "INSERT INTO definitions(id,project,revision,data) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, data=excluded.data",
     [def.id, projectId, revision, JSON.stringify(def)]);
-  return { id: def.id, revision, definition: def, issues: validateWorkflow(def, available) };
+  const issues = validateWorkflow(def, available);
+  const updatedRuns = blockingIssues(issues).length ? 0 : await updateRuns(projectId, def, mcpEnv);
+  return { id: def.id, revision, definition: def, issues, updatedRuns };
+}
+/** Hot update: every run of the workflow, live or finished, adopts the saved revision. */
+async function updateRuns(projectId: string, def: WorkflowDefinition, mcpEnv?: Pick<WorkflowRunEnv, "mcpServers" | "mcpConfigs">) {
+  const rows = await ctxRef.host.db.query<any>(db, "SELECT id FROM runs WHERE project=? AND workflow=?", [projectId, def.id]);
+  // Servers and fresh configurations prepared by the desktop gateway let sessions attach new MCP blocks.
+  const withMcp = (env: WorkflowRunEnv) => mcpEnv && Array.isArray(mcpEnv.mcpServers)
+    ? Object.assign(env, { mcpServers: mcpEnv.mcpServers, mcpConfigs: { ...env.mcpConfigs, ...mcpEnv.mcpConfigs } }) : env;
+  let count = 0;
+  for (const { id } of rows) {
+    const live = execs.get(id);
+    if (live) {
+      adoptDefinition(live, def);
+      await ctxRef.host.db.exec(db, "UPDATE runs SET env=? WHERE id=?", [JSON.stringify(withMcp(live.env)), id]);
+      count++; continue;
+    }
+    const stored = await loadRun(id); if (!stored) continue;
+    if (mcpEnv) await ctxRef.host.db.exec(db, "UPDATE runs SET env=? WHERE id=?", [JSON.stringify(withMcp(stored.env)), id]);
+    const run = stored.run, ids = new Set(def.blocks.map(b => b.id));
+    run.definition = def; run.workflowName = def.name;
+    run.blocks = run.blocks.filter(s => ids.has(s.blockId));
+    for (const b of def.blocks) if (!run.blocks.some(s => s.blockId === b.id)) run.blocks.push({ blockId: b.id, status: "idle", runs: 0, log: [] });
+    save(run); count++;
+  }
+  return count;
 }
 async function listDefinitions(projectId: string) {
   const rows = await ctxRef.host.db.query<any>(db, "SELECT data, revision FROM definitions WHERE project=? ORDER BY id", [projectId]);
@@ -77,8 +103,8 @@ function detail(run: WorkflowRun) {
 const object = (properties: any, required: string[] = []) => ({ type: "object", properties, required, additionalProperties: false });
 const RUN_TOOLS = [
   { name: "workflow_connections", description: "Discover connected workflow blocks and capabilities, including MCP server names, invocation methods, and allowed actions. Call before choosing tools or claiming a capability is unavailable.", inputSchema: object({}) },
-  { name: "workflow_use_block", description: "Run or control a connected workflow block. Pass block_id and input; action selects start/status/tail/steer (AI Agent, Chatbox), start/status/kill/tail (Run App), publish/tail/diff/wait/status/shake (Meeting; shake requires peer_block_id and a specific message), list/read/write (Terminal Control, key/cursor/text), or fetch (unseen output of any data block).",
-    inputSchema: object({ block_id: { type: "string" }, input: { type: "string" }, action: { type: "string" }, lines: { type: "number" }, timeout_seconds: { type: "number" }, message: { type: "string" }, peer_block_id: { type: "string" }, key: { type: "string" }, cursor: { type: "number" }, text: { type: "string" }, after: { type: "number" } }, ["block_id"]) },
+  { name: "workflow_use_block", description: "Run or control a connected workflow block. Pass block_id and input; action selects start/status/tail/steer (AI Agent, Chatbox), start/status/kill/tail (Run App), start/status/cancel (Timer; seconds or at sets the delay), publish/tail/diff/wait/status/shake (Meeting; shake requires peer_block_id and a specific message), list/read/write (Terminal Control, key/cursor/text), or fetch (unseen output of any data block).",
+    inputSchema: object({ block_id: { type: "string" }, input: { type: "string" }, action: { type: "string" }, lines: { type: "number" }, timeout_seconds: { type: "number" }, seconds: { type: "number" }, at: { type: "string" }, message: { type: "string" }, peer_block_id: { type: "string" }, key: { type: "string" }, cursor: { type: "number" }, text: { type: "string" }, after: { type: "number" } }, ["block_id"]) },
   { name: "workflow_block_output", description: "Read retained output of a connected block in pages without running it.", inputSchema: object({ block_id: { type: "string" }, offset: { type: "number" }, limit: { type: "number" } }, ["block_id"]) },
   { name: "workflow_block_messages", description: "Read recent messages of a connected AI Agent or Chatbox without starting a turn.", inputSchema: object({ block_id: { type: "string" }, count: { type: "number" } }, ["block_id"]) },
   { name: "workflow_choose_path", description: "Choose the outgoing path your output is passed to. Call before finishing when paths are available.", inputSchema: object({ path: { type: "string" } }, ["path"]) },
@@ -202,6 +228,12 @@ async function runToolBody(s: Extract<Scope, { kind: "run" }>, name: string, a: 
     const st = stateOf(x, t.id); st.output = JSON.stringify(app); x.outputs.set(t.id, st.output); st.status = "succeeded"; st.runs++; touch(x);
     return { app };
   }
+  if (t.type === "timer") {
+    if (action === "status" || action === "cancel") return timerAction(x, t.id, action);
+    if (action && action !== "start") throw new Error(`Timer '${t.label}' takes action start (default), status or cancel`);
+    const ms = timerDelay(x, a);
+    if (ms !== undefined) x.delays.set(t.id, ms);
+  }
   const edge = x.def.edges.find(e => e.from === caller && e.to === t.id);
   const timeoutMs = Math.min(Math.max((Number(a.timeout_seconds) || (edge?.timeoutMs ?? 300_000) / 1000) * 1000, 1000), 86_400_000);
   if (isAgentBlock(t)) {
@@ -255,7 +287,7 @@ const mod: AppModule = {
     health: () => ({ ok: true, version: WORKFLOW_RUNNER_VERSION, active: [...execs.values()].filter(x => x.driving || x.busy.size || x.timers.size || x.answers.size).length, apps: runningApps() }),
     async list(_ctx, a) { return listDefinitions(String(a.projectId)); },
     async get(_ctx, a) { return definition(String(a.projectId), String(a.id)); },
-    async save(_ctx, a, meta) { gateway(meta); return saveDefinition(String(a.projectId), a.definition, a.expectedRevision === undefined ? undefined : a.expectedRevision, a.available); },
+    async save(_ctx, a, meta) { gateway(meta); return saveDefinition(String(a.projectId), a.definition, a.expectedRevision === undefined ? undefined : a.expectedRevision, a.available, a.mcpEnv); },
     async remove(ctx, a, meta) {
       gateway(meta);
       const active = [...execs.values()].some(x => x.run.workflowId === a.id && x.run.projectId === a.projectId && (x.driving || x.busy.size));

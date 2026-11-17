@@ -4,9 +4,9 @@
 // runtime, reached through the `workflows` gateway.
 import type { AppModule, ModuleContext, UiNode } from "@hato/sdk/types";
 import { errMsg } from "@hato/sdk/runtime";
-import { blockingIssues, isStartBlock, isAgentBlock, normalizeDefinition, type WorkflowEdgeType } from "@hato/sdk/workflows";
+import { blockingIssues, isStartBlock, isAgentBlock, normalizeDefinition, validateWorkflow, type WorkflowEdgeType } from "@hato/sdk/workflows";
 import { CARD } from "./style";
-import { S, ACTIVE, btn, call, latestRun, muted, shownRunId, rememberChatHistory } from "./state";
+import { S, ACTIVE, btn, call, latestRun, muted, text, shownRunId, rememberChatHistory } from "./state";
 import { addBlock, block, changed, connect, designer, duplicateBlock, edge, mutate, openDraft, redoDraft, removeBlock, renameBlockId, saveDraft, setField, undoDraft, loadProviderChoices } from "./designer";
 import { tickTransfers, clearTransfers } from "./transfers";
 import { chatStatus } from "./runs";
@@ -119,7 +119,7 @@ const mod: AppModule = {
       if (S.ws?.id) workspaceDrafts.set(S.ws.id, draftState());
       S.ws = next; S.open.clear(); S.cardRun.clear(); S.cardBlock.clear(); S.defs.clear(); S.maximized = null;
       Object.assign(S, { selectedId: null, draft: null, revision: null, dirty: false, issues: [], undo: [], redo: [], selection: null,
-        starting: null, quick: null, confirm: null, importOpen: false, busy: false, designerInline: false,
+        starting: null, quick: null, confirm: null, importOpen: false, libOpen: false, busy: false, designerInline: false,
         ...(workspaceDrafts.get(next?.id) || {}) });
       S.lastSnapshot = { at: 0, field: "" };
       S.startText.clear(); S.chatDrafts.clear(); S.answers.clear();
@@ -157,6 +157,14 @@ const mod: AppModule = {
       muted("i", "Paste a workflow definition (Hato or HatoPad format). It is saved as a new workflow.", { size: "sm" }),
       { type: "textInput", key: "import-text", value: S.importText, changeAction: "importText", multiline: true, rows: 14, placeholder: "{\"name\": …, \"blocks\": […], \"edges\": […]}" } as UiNode,
       { type: "row", key: "ib", gap: 6, children: [{ type: "spacer", key: "s" }, btn("c", "Cancel", "importClose"), btn("go", "Import", "importGo", { variant: "primary", disabled: !S.importText.trim() })] },
+    ] } as UiNode);
+    if (S.libOpen) extra.push({ type: "modal", key: "library", title: "Global workflow Library", closeAction: "libraryClose", width: 520, children: [
+      muted("i", "Workflows saved here are available in every project. Adding one creates an independent copy in this workspace.", { size: "sm" }),
+      ...(S.libEntries.length ? S.libEntries.map(e => ({ type: "row", key: `lib:${e.id}`, gap: 8, style: { background: "background", borderColor: "border", borderWidth: 1, radius: 8, padding: 8 }, children: [
+        { type: "column", key: "c", gap: 2, grow: true, children: [text("n", e.name, { weight: "medium", wrap: false }), ...(e.description ? [muted("d", e.description.length > 160 ? e.description.slice(0, 159) + "…" : e.description)] : [])] },
+        btn("add", "Add", "libraryUse", { variant: "primary", value: e.id, disabled: S.busy }),
+      ] } as UiNode)) : [muted("none", "No global workflows yet. Use “Save to Library” on a workflow card to add one.", { size: "sm" })]),
+      { type: "row", key: "lb", gap: 6, children: [{ type: "spacer", key: "s" }, btn("c", "Close", "libraryClose")] },
     ] } as UiNode);
     if (S.designerOpen && !S.designerInline && S.draft)
       extra.push({ type: "window", key: "designer-window", titlebar: false, title: `Workflow designer — ${S.draft.name}`, width: S.designerSize.width, height: S.designerSize.height, closeAction: "designerClosed", children: [designer()] } as UiNode);
@@ -197,6 +205,19 @@ const mod: AppModule = {
         }
         case "rerun": { const d = S.details.get(value), wf = runWorkflow(value); if (!d || !wf) return; await act(ctx, () => startRun(ctx, wf, d.startBlockId, d.input)); return; }
         case "cancelRun": if (value) await act(ctx, async () => { await call(ctx, "cancel", { runId: value }); await reloadRun(ctx, value); }); return;
+        case "libraryOpen": await act(ctx, async () => { S.libEntries = await call(ctx, "libraryList"); S.libOpen = true; }); return;
+        case "libraryClose": S.libOpen = false; ctx.ui.invalidate(); return;
+        case "librarySave": await act(ctx, async () => {
+          const wf = S.list.find(w => w.id === value); if (!wf) return;
+          // Saving a workflow under a name already in the Library updates that entry.
+          const existing = (await call(ctx, "libraryList")).find((e: any) => e.name === wf.name);
+          await call(ctx, "librarySave", { id: value, libraryId: existing?.id });
+          S.notice = `${existing ? "Updated" : "Saved"} “${wf.name}” in the global Library.`;
+        }); return;
+        case "libraryUse": await act(ctx, async () => {
+          const r = await call(ctx, "libraryUse", { libraryId: value });
+          S.libOpen = false; await refreshList(ctx); S.open.add(r.id); S.defs.set(r.id, r.definition);
+        }); return;
         case "importOpen": S.importOpen = true; S.importText = ""; ctx.ui.invalidate(); return;
         case "importClose": S.importOpen = false; ctx.ui.invalidate(); return;
         case "importText": S.importText = value; return;
@@ -270,7 +291,12 @@ const mod: AppModule = {
         case "openDesigner": {
           const wf = value || ev.rowKey || S.selectedId; if (!wf) return;
           if (S.dirty && S.selectedId !== wf) { S.error = "Save the open designer's changes first."; ctx.ui.invalidate(); return; }
-          await act(ctx, async () => { if (S.selectedId !== wf || !S.draft) await openDraft(ctx, wf); S.designerOpen = true; schedule(ctx); await refreshDetails(ctx); });
+          await act(ctx, async () => {
+            // Providers and MCP servers change outside the panel; offer the current ones in the designer.
+            const catalog = await call(ctx, "catalog").catch(() => null);
+            if (catalog) { S.catalog = catalog; if (S.draft) S.issues = validateWorkflow(S.draft, { profiles: catalog.profiles, mcps: catalog.mcps }); }
+            if (S.selectedId !== wf || !S.draft) await openDraft(ctx, wf); S.designerOpen = true; schedule(ctx); await refreshDetails(ctx);
+          });
           return;
         }
         case "closeDesigner": if (S.confirm?.kind === "block") S.confirm = null; S.designerOpen = false; S.designerInline = false; schedule(ctx); ctx.ui.invalidate(); return;

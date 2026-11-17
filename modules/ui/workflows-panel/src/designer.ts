@@ -93,7 +93,7 @@ export function renameBlockId(oldId: string, next: string) {
 export async function saveDraft(ctx: ModuleContext) {
   if (!S.draft) return;
   const r = await call(ctx, "save", { definition: S.draft, expectedRevision: S.revision });
-  Object.assign(S, { revision: r.revision, draft: r.definition, issues: r.issues || [], dirty: false, notice: "Saved" });
+  Object.assign(S, { revision: r.revision, draft: r.definition, issues: r.issues || [], dirty: false, notice: r.updatedRuns ? `Saved · applied to ${r.updatedRuns} run${r.updatedRuns === 1 ? "" : "s"}` : "Saved" });
   S.defs.set(r.id, r.definition);
 }
 export function setField(target: any, f: string, raw: any) {

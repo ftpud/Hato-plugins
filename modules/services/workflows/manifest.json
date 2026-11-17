@@ -9,7 +9,8 @@
     "workspace",
     "persistence",
     "persistent-agents",
-    "workflow-runner"
+    "workflow-runner",
+    "library"
   ],
   "capabilities": [
     "remote.daemon",
@@ -18,7 +19,8 @@
   "calls": [
     "workspace",
     "persistence",
-    "persistent-agents"
+    "persistent-agents",
+    "library"
   ],
   "provides": [
     "workflows"
@@ -27,7 +29,7 @@
   "stateVersion": 1,
   "description": "Desktop gateway for visual workflows: installs the daemon workflow runtime, resolves providers, routes designer requests and contributes workflow self-configuration MCP commands.",
   "author": "Hato contributors",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "pluginPackage": "automation",
   "pluginType": "Automation"
 }

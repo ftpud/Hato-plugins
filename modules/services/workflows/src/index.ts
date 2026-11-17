@@ -5,7 +5,7 @@
 import type { AppModule, ModuleContext, DaemonTarget } from "@hato/sdk/types";
 import { errMsg, sshConnect, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { exportMcpTools } from "@hato/sdk/mcp";
-import { WORKFLOW_REFERENCE, WORKFLOW_RUNNER_VERSION, edgeType, isAgentBlock, normalizeDefinition, validateWorkflow, type WorkflowRunEnv, type WorkflowRun } from "@hato/sdk/workflows";
+import { INTERNAL_MCP_SERVERS, WORKFLOW_REFERENCE, WORKFLOW_RUNNER_VERSION, edgeType, isAgentBlock, isInternalMcp, normalizeDefinition, validateWorkflow, type WorkflowRunEnv, type WorkflowRun } from "@hato/sdk/workflows";
 import { advertisedChoices, providerChoiceKey } from "@hato/sdk/workflow-provider-options";
 import { agentActivity } from "@hato/sdk/persistent-agents";
 import { WORKFLOW_TEMPLATES } from "@hato/sdk/workflow-templates";
@@ -63,15 +63,27 @@ async function catalog(ctx: ModuleContext, d: WorkspaceDescriptor) {
   const mcps = ((await ctx.modules.call("persistence", "settings.get", { key: "persistent-agents.mcps" })) || []).filter((m: any) => m.enabled !== false);
   const preferred = await ctx.modules.call("persistence", "settings.get", { key: "workflows.defaultProfile" }).catch(() => null);
   const defaultProfileId = c.profiles.some((p: any) => p.id === preferred) ? preferred : c.profiles[0]?.id || "";
-  return { defaultProfileId, workspace: { id: d.id, name: d.name, machineId: d.machineId, location: d.location }, profiles: c.profiles.map((p: any) => ({ id: p.id, name: p.name, provider: p.provider })), skills: c.skills, agentFiles: c.agentFiles, mcps: mcps.map((m: any) => ({ id: m.id, name: m.name })), templates: WORKFLOW_TEMPLATES.map(t => ({ id: t.id, name: t.name, description: t.description })) };
+  return { defaultProfileId, workspace: { id: d.id, name: d.name, machineId: d.machineId, location: d.location }, profiles: c.profiles.map((p: any) => ({ id: p.id, name: p.name, provider: p.provider })), skills: c.skills, agentFiles: c.agentFiles, mcps: [...INTERNAL_MCP_SERVERS, ...mcps].map((m: any) => ({ id: m.id, name: m.name })), templates: WORKFLOW_TEMPLATES.map(t => ({ id: t.id, name: t.name, description: t.description })) };
 }
-async function runEnv(ctx: ModuleContext, d: WorkspaceDescriptor, workflowId?: string): Promise<WorkflowRunEnv> {
-  const t = await daemon(ctx, d);
-  const c = await ctx.modules.call("persistent-agents", "catalog", { workspaceId: d.id }, { timeoutMs: 120_000 });
+/** Desktop tools endpoints, one per workflow, reused so a new run or a save never revokes the
+ *  token a live session is using. Lost with this module's memory; then issued anew. */
+const desktopEndpoints = new Map<string, any>();
+async function desktopEndpoint(ctx: ModuleContext, d: WorkspaceDescriptor, workflowId: string) {
+  const key = `workflow:${d.id}:${workflowId}`;
+  let server = desktopEndpoints.get(key);
+  if (!server) {
+    // Issued through persistent-agents, which holds the desktop MCP grant.
+    const [{ id: _id, ...config }] = await ctx.modules.call<any[]>("persistent-agents", "mcpConfigs", { workspaceId: d.id, ids: ["internal-local-mcp"], conversationId: key }, { timeoutMs: 120_000 });
+    server = config; desktopEndpoints.set(key, server);
+  }
+  return server;
+}
+/** MCP servers and provider-ready configurations for the MCP blocks connected to agents of a
+ *  definition. Used at run start and on save, so a hot update can attach new servers. */
+async function mcpEnv(ctx: ModuleContext, d: WorkspaceDescriptor, definition?: any) {
   const mcps = ((await ctx.modules.call("persistence", "settings.get", { key: "persistent-agents.mcps" })) || []).filter((m: any) => m.enabled !== false);
   const mcpConfigs: Record<string, any> = {};
-  if (workflowId) {
-    const { definition } = await runner(ctx, d, "get", { id: workflowId });
+  if (definition) {
     const connected = new Set<string>();
     for (const edge of definition.edges) {
       const agent = definition.blocks.find((b: any) => b.id === edge.from);
@@ -80,16 +92,24 @@ async function runEnv(ctx: ModuleContext, d: WorkspaceDescriptor, workflowId?: s
     const ids = [...new Set<string>(definition.blocks
       .filter((b: any) => b.type === "mcp" && connected.has(b.id))
       .map((b: any) => b.mcp?.serverId).filter(Boolean))];
-    if (ids.length) {
-      const configs = await ctx.modules.call("persistent-agents", "mcpConfigs", { workspaceId: d.id, ids }, { timeoutMs: 120_000 });
+    if (ids.includes("internal-local-mcp")) mcpConfigs["internal-local-mcp"] = await desktopEndpoint(ctx, d, definition.id);
+    const configured = ids.filter(id => !isInternalMcp(id) && mcps.some((m: any) => m.id === id));
+    if (configured.length) {
+      const configs = await ctx.modules.call("persistent-agents", "mcpConfigs", { workspaceId: d.id, ids: configured }, { timeoutMs: 120_000 });
       for (const { id, ...config } of configs) mcpConfigs[id] = config;
     }
   }
+  return { mcpServers: [...INTERNAL_MCP_SERVERS, ...mcps], mcpConfigs };
+}
+async function runEnv(ctx: ModuleContext, d: WorkspaceDescriptor, workflowId?: string): Promise<WorkflowRunEnv> {
+  const t = await daemon(ctx, d);
+  const c = await ctx.modules.call("persistent-agents", "catalog", { workspaceId: d.id }, { timeoutMs: 120_000 });
+  const { mcpServers, mcpConfigs } = await mcpEnv(ctx, d, workflowId ? (await runner(ctx, d, "get", { id: workflowId })).definition : undefined);
   const subscription = await ctx.modules.call("persistence", "settings.get", { key: "acp.claude.useSubscription" });
   const preferred = await ctx.modules.call("persistence", "settings.get", { key: "workflows.defaultProfile" }).catch(() => null);
   return {
     projectId: d.projectId, workspaceId: d.id, workspaceName: d.name, root: d.rootAbsolutePath, machineId: d.machineId, daemon: { bin: t.bin, dir: t.dir },
-    profiles: c.profiles, defaultProfileId: c.profiles.some((p: any) => p.id === preferred) ? preferred : c.profiles[0]?.id || "", claudeSubscription: subscription !== false, mcpServers: mcps, mcpConfigs,
+    profiles: c.profiles, defaultProfileId: c.profiles.some((p: any) => p.id === preferred) ? preferred : c.profiles[0]?.id || "", claudeSubscription: subscription !== false, mcpServers, mcpConfigs,
   };
 }
 const available = async (ctx: ModuleContext, d: WorkspaceDescriptor) => { const c = await catalog(ctx, d); return { profiles: c.profiles, mcps: c.mcps }; };
@@ -166,9 +186,10 @@ const mod: AppModule = {
         inputSchema: object({ content: {}, expected_revision: { type: ["number", "null"] } }, ["content", "expected_revision"]),
         handler: async (a, s) => {
           const d = await scoped(s);
-          const r = await runner(ctx, d, "save", { definition: parse(a.content), expectedRevision: a.expected_revision === null ? null : Number(a.expected_revision), available: await available(ctx, d) });
+          const definition = normalizeDefinition(parse(a.content));
+          const r = await runner(ctx, d, "save", { definition, expectedRevision: a.expected_revision === null ? null : Number(a.expected_revision), available: await available(ctx, d), mcpEnv: await mcpEnv(ctx, d, definition) });
           ctx.events.emit("workflows.changed", { workspaceId: d.id, workflowId: r.id });
-          return { id: r.id, revision: r.revision, issues: r.issues };
+          return { id: r.id, revision: r.revision, issues: r.issues, updated_runs: r.updatedRuns ?? 0 };
         } },
       { name: "validate", title: "Validate a workflow", description: "Validate a workflow definition without saving it.", inputSchema: object({ content: {} }, ["content"]), annotations: { readOnlyHint: true },
         handler: async (a, s) => ({ issues: validateWorkflow(normalizeDefinition(parse(a.content)), await available(ctx, await scoped(s))) }) },
@@ -192,7 +213,7 @@ const mod: AppModule = {
     async get(ctx, a) { const d = await resolve(ctx, a.workspaceId); const r = await runner(ctx, d, "get", { id: a.id }); return { ...r, issues: validateWorkflow(r.definition, await available(ctx, d)) }; },
     async save(ctx, a) {
       const d = await resolve(ctx, a.workspaceId);
-      const r = await runner(ctx, d, "save", { definition: a.definition, expectedRevision: a.expectedRevision, available: await available(ctx, d) });
+      const r = await runner(ctx, d, "save", { definition: a.definition, expectedRevision: a.expectedRevision, available: await available(ctx, d), mcpEnv: await mcpEnv(ctx, d, normalizeDefinition(a.definition)) });
       ctx.events.emit("workflows.changed", { workspaceId: d.id, workflowId: r.id });
       return r;
     },
@@ -201,6 +222,28 @@ const mod: AppModule = {
       const def = await runner(ctx, d, "starter", { templateId: a.templateId || "blank" });
       if (a.name) def.name = String(a.name).slice(0, 200);
       if (a.definition) Object.assign(def, normalizeDefinition(a.definition), { id: def.id });
+      const r = await runner(ctx, d, "save", { definition: def, expectedRevision: null, available: await available(ctx, d) });
+      ctx.events.emit("workflows.changed", { workspaceId: d.id, workflowId: r.id });
+      return r;
+    },
+    // ---- global workflow library (stored by the library service, scope "global")
+    async libraryList(ctx) { return (await ctx.modules.call<any[]>("library", "list", { scope: "global" })).filter((e: any) => e.kind === "workflow"); },
+    /** Publish a workspace workflow to the global Library; updates the entry when libraryId is given. */
+    async librarySave(ctx, a) {
+      const d = await resolve(ctx, a.workspaceId), { definition } = await runner(ctx, d, "get", { id: a.id });
+      const { id: _id, revision: _rev, ...rest } = definition as any;
+      const content = JSON.stringify(rest, null, 2);
+      const old = a.libraryId ? await ctx.modules.call<any>("library", "read", { scope: "global", id: a.libraryId }) : null;
+      return ctx.modules.call("library", "save", { scope: "global", id: old?.id, kind: "workflow", name: String(a.name || definition.name).slice(0, 120), description: String(a.description ?? definition.description ?? "").slice(0, 1000), path: "WORKFLOW.json", content, expectedRevision: old ? old.revision : null });
+    },
+    /** Create a new workspace workflow from a global Library entry. */
+    async libraryUse(ctx, a) {
+      const entry = await ctx.modules.call<any>("library", "read", { scope: "global", id: a.libraryId, path: "WORKFLOW.json" });
+      if (entry.kind !== "workflow") throw new Error("Library entry is not a workflow");
+      const definition = normalizeDefinition(JSON.parse(entry.content));
+      const d = await resolve(ctx, a.workspaceId);
+      const def = await runner(ctx, d, "starter", { templateId: "blank" });
+      Object.assign(def, definition, { id: def.id });
       const r = await runner(ctx, d, "save", { definition: def, expectedRevision: null, available: await available(ctx, d) });
       ctx.events.emit("workflows.changed", { workspaceId: d.id, workflowId: r.id });
       return r;

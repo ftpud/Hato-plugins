@@ -10,7 +10,7 @@ import { parseVirtualTab, virtualTab, type VirtualShow } from "@hato/sdk/virtual
 const PROVIDER = "library-panel";
 const BOOK = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 5v16M3 3h5a4 4 0 0 1 4 2 4 4 0 0 1 4-2h5v16h-5a4 4 0 0 0-4 2 4 4 0 0 0-4-2H3Z\"/></svg>";
 const AGENT = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"4\" y=\"8\" width=\"16\" height=\"12\" rx=\"3\"/><path d=\"M12 4v4M9 13h.01M15 13h.01M9 17h6\"/></svg>";
-const rootOf = (kind: string) => kind === "agent" ? "AGENT.md" : "SKILL.md";
+const rootOf = (kind: string) => kind === "agent" ? "AGENT.md" : kind === "workflow" ? "WORKFLOW.json" : "SKILL.md";
 
 type Scope = "global" | "project";
 interface Target { workspaceId: string; scope: Scope; id: string; path: string }
@@ -142,9 +142,9 @@ function rows(): TreeRow[] {
   const q = query.trim().toLowerCase();
   for (const entry of entries.filter(e => `${e.name} ${e.description} ${e.paths.join(" ")}`.toLowerCase().includes(q))) {
     const open = expanded.has(entry.id) || !!q;
-    result.push({ key: entry.id, label: entry.name, tooltip: entry.description || undefined, badge: entry.kind === "agent" ? "agent" : "skill",
+    result.push({ key: entry.id, label: entry.name, tooltip: entry.description || undefined, badge: entry.kind === "agent" ? "agent" : entry.kind === "workflow" ? "workflow" : "skill",
       depth: 0, expandable: true, expanded: open, selected: selectedId === entry.id && !selectedFile, weight: "medium",
-      iconSvg: entry.kind === "agent" ? AGENT : BOOK, contextMenu: entryMenu(entry) });
+      iconSvg: entry.kind === "agent" || entry.kind === "workflow" ? AGENT : BOOK, contextMenu: entryMenu(entry) });
     if (!open) continue;
     const dirs = new Set<string>();
     for (const p of entry.paths as string[]) {

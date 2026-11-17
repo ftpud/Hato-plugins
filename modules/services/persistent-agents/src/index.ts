@@ -334,13 +334,21 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     return result;
   },
   async fork(ctx,a) {await owned(ctx,{...a,id:a.parentId});return invoke(ctx,a.workspaceId,"fork",{parentId:a.parentId,name:a.name,text:a.text,model:a.model});},
-  async mcpConfigs(ctx,a) {
+  async mcpConfigs(ctx,a,meta) {
     await ctx.modules.call("workspace","resolve",{workspaceId:String(a.workspaceId)});
     if(!Array.isArray(a.ids)||!a.ids.every((id:any)=>typeof id==="string"))throw new Error("MCP server ids are required");
-    const ids=new Set<string>(a.ids),list=(await mcps(ctx)).filter(m=>m.enabled!==false&&ids.has(m.id));
+    const ids=new Set<string>(a.ids),desktop:any[]=[];
+    // Desktop tools for workflow agents: the workflows gateway names the token's owner (one per workflow).
+    if(ids.delete("internal-local-mcp")) {
+      if(meta?.caller!=="workflows"||typeof a.conversationId!=="string"||!a.conversationId.startsWith("workflow:"))throw new Error("Desktop tools are issued to workflows only");
+      const endpoint=await ctx.modules.call<any>("internal-local-mcp","endpoint",{conversationId:a.conversationId,workspaceId:String(a.workspaceId)});
+      desktop.push({id:"internal-local-mcp",...endpoint.server});
+    }
+    if(!ids.size)return desktop;
+    const list=(await mcps(ctx)).filter(m=>m.enabled!==false&&ids.has(m.id));
     if(list.length!==ids.size)throw new Error("A connected MCP server is missing or disabled");
     const auth=await oauthHeaders(ctx,list);
-    return list.map(m=>({id:m.id,...acpServer(m,auth[m.id])}));
+    return [...desktop,...list.map(m=>({id:m.id,...acpServer(m,auth[m.id])}))];
   },
   async view(ctx,a) {
     const v=await invoke(ctx,String(a.workspaceId),"view",{id:a.id,before:a.before,limit:a.limit});

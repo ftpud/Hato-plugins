@@ -428,8 +428,9 @@ const mod:AppModule={
     /** Change an agent's configuration. Anything besides the name restarts a connected agent; a new
      *  provider also starts a new provider session. Instructions are re-sent on the next prompt. */
     update:(ctx,a,meta)=>serialize(String(a.id),async()=>{
-      if(meta.caller!=="daemon-client")throw new Error("Only the desktop gateway edits agents");
       const s=session(a.id),p=a.patch||{};
+      // The workflow runtime reconfigures only the sessions of its own workflow blocks (hot updates).
+      if(meta.caller!=="daemon-client"&&!(meta.caller==="workflow-runner"&&s.workflow))throw new Error("Only the desktop gateway edits agents");
       const name=String(p.name||"").trim().slice(0,120);if(!name)throw new Error("Agent name is required");
       // A patch without `profile` renames only.
       if(p.profile!==undefined&&(!p.profile?.executable||!Array.isArray(p.profile.args)||!Array.isArray(p.skills)||!Array.isArray(p.mcps)))throw new Error("Invalid agent configuration");

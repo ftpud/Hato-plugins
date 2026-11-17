@@ -20,6 +20,7 @@ function toolbar(): UiNode[] {
         options: (S.catalog?.templates || [{ id: "blank", name: "Blank workflow" }]).map((t: any) => ({ value: t.id, label: t.name })) } as UiNode,
       icon("new", uiIcons.plus, "create", "Create a workflow from the selected template", { disabled: !S.ws || S.busy }),
       icon("import", uiIcons.files, "importOpen", "Import workflow JSON", { disabled: !S.ws }),
+      icon("global-lib", uiIcons.globe, "libraryOpen", "Add a workflow from the global Library", { disabled: !S.ws }),
       icon("refresh", uiIcons.refresh, "refresh", "Refresh", { disabled: !S.ws }),
     ] },
     { type: "row", key: "heading", gap: 6, children: [
@@ -74,7 +75,7 @@ function workflowCard(w: Summary, maximized: boolean): UiNode {
     statusChip("status", status),
     ...(!open ? starts.slice(0, 3).map(b => icon(`qs-${b.id}`, b.type === "start_input" ? blockIcon["circle-play"] : blockIcon.play, b.type === "start_input" ? "quickStart" : "startButton", `Start: ${b.label}`, { value: `${w.id}:${b.id}`, disabled: S.busy })) : []),
     icon("design", blockIcon.edit, "openDesigner", "Open in the designer", { value: w.id }),
-    ...(open && def ? [icon("json", blockIcon.copy, "", "Copy workflow JSON", { copyText: JSON.stringify(def, null, 2) }), icon("del-wf", uiIcons.trash, "confirmWorkflow", "Delete workflow", { value: w.id })] : []),
+    ...(open && def ? [icon("to-library", uiIcons.import, "librarySave", "Save to the global Library to reuse in other projects", { value: w.id, disabled: S.busy }), icon("json", blockIcon.copy, "", "Copy workflow JSON", { copyText: JSON.stringify(def, null, 2) }), icon("del-wf", uiIcons.trash, "confirmWorkflow", "Delete workflow", { value: w.id })] : []),
     ...(!maximized ? [icon("fold", open ? blockIcon["chevron-up"] : blockIcon["chevron-down"], "toggleCard", open ? "Collapse workflow" : "Show workflow content", { value: w.id })] : []),
     icon("max", maximized ? blockIcon.minimize : blockIcon.maximize, "maximize", maximized ? "Restore item size" : "Expand to panel", { value: w.id }),
   ] };
