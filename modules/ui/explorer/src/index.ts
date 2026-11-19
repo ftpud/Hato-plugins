@@ -154,7 +154,8 @@ const mod: AppModule = {
   },
   deactivate() { presentation?.dispose(); presentation = null; },
   snapshot: () => ({ workspaceId: ws?.id || null, expanded: [...expanded], filterCollapsed: [...filterCollapsed], query, showIgnored, contentMode }),
-  render(): UiNode {
+  render(ctx): UiNode {
+    const canTransfer = typeof ctx?.host?.fs?.importFile === "function" && typeof ctx?.host?.fs?.exportFile === "function";
     const filtering = !!query.trim();
     const grepping = filtering && contentMode;
     const rows = treeRows(filtering ? directories(filteredEntries()) : dirs, expanded, ws?.view?.previewPath || null, filtering, filterCollapsed);
@@ -177,6 +178,7 @@ const mod: AppModule = {
         { type: "label", key: "count", text: count, size: "xs", color: "muted", grow: true, tooltip: filtering ? "Search covers workspace paths, excluding .git object storage. Project paths are cached, including collapsed folders. Hidden ignored folders are skipped before traversal; results update while indexing. Up to 1,000 matches are shown." : "Folders load as you expand them; filtering searches the workspace." },
         { type: "button", key: "reveal", text: "", iconSvg: uiIcons["locate"], action: "reveal", small: true, variant: "ghost", disabled: !ws.view?.previewPath, tooltip: "Reveal selected file" },
         { type: "button", key: "collapse", text: "", iconSvg: uiIcons["collapse"], action: "collapseAll", small: true, variant: "ghost", tooltip: "Collapse all folders" },
+        ...(canTransfer ? [{ type: "button", key: "upload", text: "", iconSvg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V3m-5 5 5-5 5 5M4 16v5h16v-5"/></svg>`, action: "upload", small: true, variant: "ghost", tooltip: "Upload file to workspace root" } as UiNode] : []),
         { type: "button", key: "refresh", text: "", iconSvg: uiIcons["refresh"], action: "refresh", small: true, variant: "ghost", tooltip: "Refresh files" },
       ] });
       if (error) children.push({ type: "status", key: "err", text: error, level: "error" });
@@ -190,7 +192,10 @@ const mod: AppModule = {
         expandedIconSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m5 9 7 7 7-7"/></svg>', rows: rows.map(row => {
           const change = gitFiles.find(file => file.path === row.key);
           const below = row.expandable && gitFiles.some(file => file.path.startsWith(row.key + "/"));
-          return { ...row, ...presentation?.get(ws.id, row.key, row.expandable ? "dir" : "file"), badge: pending.has(row.key) ? "…" : change ? ({ modified: "M", added: "A", deleted: "D", renamed: "R", untracked: "U", conflicted: "!", copied: "C", typechange: "T" } as Record<string, string>)[change.kind] || "M" : below ? "•" : "" };
+          const contextMenu = row.expandable
+            ? [{ text: "Upload File…", action: "upload" }]
+            : [{ text: "Download File…", action: "download" }];
+          return { ...row, contextMenu: canTransfer ? contextMenu : undefined, ...presentation?.get(ws.id, row.key, row.expandable ? "dir" : "file"), badge: pending.has(row.key) ? "…" : change ? ({ modified: "M", added: "A", deleted: "D", renamed: "R", untracked: "U", conflicted: "!", copied: "C", typechange: "T" } as Record<string, string>)[change.kind] || "M" : below ? "•" : "" };
         }), selectAction: "open", expandAction: "expand", style: { fontWeight: 400 }, grow: true });
     }
     return { type: "column", key: "explorer-root", gap: 4, padding: 8, grow: true, children };
@@ -200,6 +205,18 @@ const mod: AppModule = {
     const workspaceId = ws.id;
     const version = epoch;
     try {
+      if (ev.action === "upload" || ev.action === "download") {
+        if (ev.action === "download" && !ev.rowKey) return;
+        const result = await ctx.modules.call("files", "transfer", {
+          workspaceId, direction: ev.action, path: ev.rowKey ?? ".",
+        }, { timeoutMs: 660000 });
+        if (result && version === epoch) {
+          error = null;
+          ctx.host.ui.toast("info", ev.action === "upload" ? "File uploaded" : "File downloaded");
+          ctx.ui.invalidate();
+        }
+        return;
+      }
       if (ev.action === "filter") {
         const nextQuery = String(ev.value || "");
         if (nextQuery === query) return;

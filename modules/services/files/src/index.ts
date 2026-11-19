@@ -36,7 +36,7 @@ function writeGrant(ctx: ModuleContext, d: WorkspaceDescriptor): Promise<ScopeGr
   const key = `${d.machineId}|${d.rootAbsolutePath}`;
   let p = writeGrants.get(key);
   if (!p) {
-    p = (async () => ctx.host.capabilities.request({ kind: "fs", root: d.rootAbsolutePath, target: await targetFor(ctx, d), write: true, purpose: "Save files edited in the source editor." }))();
+    p = (async () => ctx.host.capabilities.request({ kind: "fs", root: d.rootAbsolutePath, target: await targetFor(ctx, d), write: true, purpose: "Save edits and upload files into the workspace." }))();
     writeGrants.set(key, p);
     p.catch(() => writeGrants.delete(key));
   }
@@ -190,6 +190,28 @@ const mod: AppModule = {
       if (query.trim().length < 2) return { files: [], matchCount: 0, fileCount: 0, truncated: false };
       const d = await desc(ctx, a.workspaceId);
       return grepFiles(ctx, d, query, !a.hideIgnored, Math.min(2000, Math.max(1, Number(a.maxMatches) || 500)));
+    },
+    async transfer(ctx, a) {
+      if (typeof ctx.host.fs.importFile !== "function" || typeof ctx.host.fs.exportFile !== "function") {
+        throw new Error("File transfers require a newer Hato host");
+      }
+      if (a.direction !== "upload" && a.direction !== "download") throw new Error("Invalid transfer direction");
+      const d = await desc(ctx, a.workspaceId);
+      const path = cleanRel(a.path);
+      return withWorkspace(ctx, d, async () => {
+        if (a.direction === "download") {
+          const g = await workspaceGrant(ctx, d, "fs");
+          return ctx.host.fs.exportFile(g.grant, path);
+        }
+        const g = await writeGrant(ctx, d);
+        const result = await ctx.host.fs.importFile(g.grant, path);
+        if (result) {
+          invalidateSearch(d);
+          invalidateIgnored(d);
+          ctx.events.emit("files.changed", { workspaceId: a.workspaceId });
+        }
+        return result;
+      });
     },
     async list(ctx, a) {
       const d = await desc(ctx, a.workspaceId);
