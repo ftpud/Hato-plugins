@@ -114,6 +114,11 @@ async function runEnv(ctx: ModuleContext, d: WorkspaceDescriptor, workflowId?: s
     profiles: c.profiles, defaultProfileId: c.profiles.some((p: any) => p.id === preferred) ? preferred : c.profiles[0]?.id || "", claudeSubscription: subscription !== false, mcpServers, mcpConfigs,
   };
 }
+async function startWorkflow(ctx: ModuleContext, d: WorkspaceDescriptor, id: string, input: unknown, startBlockId?: string) {
+  const r = await runner(ctx, d, "start", { workflowId: id, input: String(input || ""), startBlockId, env: await runEnv(ctx, d, id) });
+  ctx.events.emit("workflows.changed", { workspaceId: d.id, runId: r.id });
+  return r;
+}
 const available = async (ctx: ModuleContext, d: WorkspaceDescriptor) => { const c = await catalog(ctx, d); return { profiles: c.profiles, mcps: c.mcps }; };
 
 /** A background agent that edits this project's workflows through the configurator endpoint. */
@@ -169,6 +174,8 @@ const mod: AppModule = {
   activate(ctx) {
     const object = (properties: any, required: string[] = []) => ({ type: "object", properties, required, additionalProperties: false });
     const scoped = async (scope: { workspaceId: string }) => resolve(ctx, scope.workspaceId);
+    const targetWorkspace = { type: "string", description: "Target workspace ID: project:<projectId>:root or task:<taskId>." };
+    const runParams = { id: { type: "string", description: "Saved workflow ID." }, input: { type: "string" }, start_block_id: { type: "string" } };
     const parse = (c: any) => typeof c === "string" ? JSON.parse(c) : c;
     mcp = exportMcpTools(ctx, "Workflows", [
       { name: "reference", title: "Workflow format reference", description: "Read the workflow definition format: blocks, connections, templates and agent tools.", inputSchema: object({}), annotations: { readOnlyHint: true },
@@ -177,6 +184,9 @@ const mod: AppModule = {
         handler: async (_a, s) => catalog(ctx, await scoped(s)) },
       { name: "list", title: "List workflows", description: "List this project's workflows with their revisions.", inputSchema: object({}), annotations: { readOnlyHint: true },
         handler: async (_a, s) => runner(ctx, await scoped(s), "list") },
+      { name: "list_in_workspace", title: "List workflows in another workspace", description: "List saved workflows belonging to the project of an explicit project or task workspace.",
+        inputSchema: object({ workspace_id: targetWorkspace }, ["workspace_id"]), annotations: { readOnlyHint: true }, timeoutMs: 120000,
+        handler: async (a, s) => { await scoped(s); return runner(ctx, await resolve(ctx, a.workspace_id), "list"); } },
       { name: "read", title: "Read a workflow", description: "Read a workflow definition and revision. Use id \"new\" (optionally template_id) for a starter definition.", inputSchema: object({ id: { type: "string" }, template_id: { type: "string" } }, ["id"]), annotations: { readOnlyHint: true },
         handler: async (a, s) => {
           const d = await scoped(s);
@@ -195,8 +205,18 @@ const mod: AppModule = {
         } },
       { name: "validate", title: "Validate a workflow", description: "Validate a workflow definition without saving it.", inputSchema: object({ content: {} }, ["content"]), annotations: { readOnlyHint: true },
         handler: async (a, s) => ({ issues: validateWorkflow(normalizeDefinition(parse(a.content)), await available(ctx, await scoped(s))) }) },
-      { name: "run", title: "Run a workflow", description: "Start a workflow run on the workspace daemon. Only use when the user explicitly asks to run it.", inputSchema: object({ id: { type: "string" }, input: { type: "string" }, start_block_id: { type: "string" } }, ["id"]),
-        handler: async (a, s) => { const d = await scoped(s); const r = await runner(ctx, d, "start", { workflowId: String(a.id), input: String(a.input || ""), startBlockId: a.start_block_id, env: await runEnv(ctx, d, String(a.id)) }); ctx.events.emit("workflows.changed", { workspaceId: d.id, runId: r.id }); return r; } },
+      { name: "run", title: "Run a workflow", description: "Start a workflow run on the workspace daemon. Only use when the user explicitly asks to run it.", inputSchema: object(runParams, ["id"]),
+        handler: async (a, s) => startWorkflow(ctx, await scoped(s), String(a.id), a.input, a.start_block_id) },
+      { name: "run_in_workspace", title: "Run a workflow in another workspace", description: "Run a saved workflow from the target project's catalogue in an explicit project or task workspace. Only use when the user explicitly asks to run it.",
+        inputSchema: object({ workspace_id: targetWorkspace, ...runParams }, ["workspace_id", "id"]), timeoutMs: 180000,
+        handler: async (a, s) => {
+          if (typeof a.id !== "string" || !a.id) throw new Error("A saved workflow ID is required");
+          await scoped(s);
+          const d = await resolve(ctx, a.workspace_id);
+          if (d.taskId && d.status !== "ready") throw new Error(`Task worktree is ${d.status}; reconcile it first`);
+          const run = await startWorkflow(ctx, d, a.id, a.input, a.start_block_id);
+          return { ...run, workspaceId: d.id, projectId: d.projectId };
+        } },
       { name: "run_status", title: "Workflow run status", description: "Read a workflow run's status and block results (or list recent runs when run_id is omitted).", inputSchema: object({ run_id: { type: "string" }, workflow_id: { type: "string" } }), annotations: { readOnlyHint: true },
         handler: async (a, s) => {
           const d = await scoped(s);
@@ -256,9 +276,7 @@ const mod: AppModule = {
       // Recheck an idle daemon before each new run. A prior check may have deferred
       // an upgrade because another run or app was still active.
       prepared.delete(d.machineId);
-      const r = await runner(ctx, d, "start", { workflowId: a.id, input: String(a.input || ""), startBlockId: a.startBlockId || undefined, env: await runEnv(ctx, d, a.id) });
-      ctx.events.emit("workflows.changed", { workspaceId: d.id, runId: r.id });
-      return r;
+      return startWorkflow(ctx, d, a.id, a.input, a.startBlockId || undefined);
     },
     async chatHistory(ctx, a) {
       const d = await resolve(ctx, a.workspaceId), r: WorkflowRun = await runner(ctx, d, "run", { id: a.runId });

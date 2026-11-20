@@ -4,6 +4,7 @@ import { sshConnect, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/
 import { workspaceSkills } from "../../files/src/skills";
 import { agentActivity, agentSettings, autoAgentName, isAutoAgentName, relativeAgentPath, type AgentMcp, type AgentSpec } from "@hato/sdk/persistent-agents";
 import { imageAttachments } from "@hato/sdk/images";
+import { exportMcpTools } from "@hato/sdk/mcp";
 import { acpServer, transportOf, validateMcp } from "@hato/sdk/mcp-servers";
 import { LIBRARY_STATE, isLibraryRef, libraryCatalog, libraryInstructions, libraryItemsFor, libraryRef, libraryRefId, textDigest } from "@hato/sdk/library";
 
@@ -102,17 +103,21 @@ function libraryInline(c:Awaited<ReturnType<typeof catalog>>,paths:(string|null)
 }
 /** MCP selection ids of an existing agent, as offered by `catalog`. */
 const agentMcpIds=(s:AgentSpec)=>[...(s.workspaceMcp?["internal-remote-mcp"]:[]),...s.mcps.map(m=>m.id)];
-/** Validate a provider/instructions/skills/MCP selection against the workspace catalog and resolve it. */
-async function agentConfig(ctx:ModuleContext,c:Awaited<ReturnType<typeof catalog>>,a:any,sessionId:string) {
+/** Validate selections before connecting to their MCP servers or starting a provider. */
+function agentSelection(c:Awaited<ReturnType<typeof catalog>>,a:any) {
   const profile=c.profiles.find((p:any)=>p.id===a.profileId);if(!profile)throw new Error("Select an enabled provider for this machine");
   const skills=(Array.isArray(a.skills)?a.skills:[]).map(relativeAgentPath);
   if(skills.some((p:string)=>!c.skills.some(s=>s.path===p)))throw new Error("Selected skill is no longer available");
   const agentFile=a.agentFile?relativeAgentPath(a.agentFile):null;
   if(agentFile&&!c.agentFiles.some(f=>f.path===agentFile))throw new Error("Selected agent file is no longer available");
-  // Library entries are not workspace files: the runtime receives their text with the configuration.
-  const inline=libraryInline(c,[agentFile,...skills]);
   const ids:string[]=Array.isArray(a.mcps)?a.mcps:[];
   if(ids.some(id=>!c.mcps.some(m=>m.id===id)))throw new Error("Unknown MCP server");
+  return {profile,model:String(a.model||""),agentFile,skills,ids};
+}
+async function agentConfig(ctx:ModuleContext,c:Awaited<ReturnType<typeof catalog>>,selection:ReturnType<typeof agentSelection>,sessionId:string) {
+  const {profile,model,agentFile,skills,ids}=selection;
+  // Library entries are not workspace files: the runtime receives their text with the configuration.
+  const inline=libraryInline(c,[agentFile,...skills]);
   await target(ctx,c.workspace.id);
   const chosen=(await mcps(ctx)).filter(m=>m.enabled!==false&&ids.includes(m.id));
   const auth=await oauthHeaders(ctx,chosen);
@@ -126,7 +131,7 @@ async function agentConfig(ctx:ModuleContext,c:Awaited<ReturnType<typeof catalog
     const endpoint=await ctx.modules.call("internal-local-mcp","endpoint",{conversationId:sessionId,workspaceId:c.workspace.id});
     servers.push({id:"internal-local-mcp",...endpoint.server});
   }
-  return {profile,model:String(a.model||""),agentFile,skills,mcps:servers,workspaceMcp:ids.includes("internal-remote-mcp"),inline};
+  return {profile,model,agentFile,skills,mcps:servers,workspaceMcp:ids.includes("internal-remote-mcp"),inline};
 }
 // Git task requests from background agents' workspace MCP. The project always comes from the
 // agent's own workspace. Creating a task or starting an agent in one needs the user's native
@@ -138,11 +143,92 @@ function agentRequest(a:any) {
   if(!prompt)throw new Error("A background agent needs a prompt");
   return {name:clip(a.name,120)||"Task agent",prompt,model:clip(a.model,200)};
 }
-async function approve(ctx:ModuleContext,session:any,title:string,detail:string,allowLabel:string,operation:string) {
+async function approve(ctx:ModuleContext,session:any,title:string,detail:string,allowLabel:string,operation:string,timeoutMs=9*60*1000) {
   if(session.autopilot)return;
-  const decision=await ctx.host.approvals.request({title:`${session.name}: ${title}`,detail,operation,timeoutMs:9*60*1000,
+  const decision=await ctx.host.approvals.request({title:`${session.name}: ${title}`,detail,operation,timeoutMs,
     options:[{id:"allow",label:allowLabel,kind:"allow"},{id:"deny",label:"Deny",kind:"deny"}]});
   if(decision.optionId!=="allow")throw new Error(decision.expired?"The request was not approved in time":`The user denied: ${title}`);
+}
+
+async function createAgent(ctx:ModuleContext,c:Awaited<ReturnType<typeof catalog>>,a:any,selection:ReturnType<typeof agentSelection>,id:string,fromChat=false) {
+  const config=await agentConfig(ctx,c,selection,id);
+  const subscription=await ctx.modules.call("persistence","settings.get",{key:"acp.claude.useSubscription"});
+  const policy=a.approvalPolicy==="autopilot"?"autopilot":a.approvalPolicy==="auto-low"?"auto-low":"ask";
+  const settings=agentSettings(a.settings);
+  const spec:AgentSpec={id,name:String(a.name||"Agent").trim().slice(0,120),customName:a.autoName!==true&&!!String(a.name||"").trim(),workspaceId:c.workspace.id,workspaceName:c.workspace.name,root:c.workspace.rootAbsolutePath,machineId:c.workspace.machineId,
+    ...config,claudeSubscription:subscription!==false,daemon:daemonInfo.get(c.workspace.machineId),
+    ...(fromChat&&policy!=="ask"?{autopilot:policy==="autopilot",approvalPolicy:policy==="auto-low"?"auto-low" as const:undefined}:{}),
+    ...(Object.keys(settings).length?{settings}:{})};
+  return invoke(ctx,c.workspace.id,"create",{spec});
+}
+
+async function readyWorkspace(ctx:ModuleContext,workspaceId:unknown) {
+  if(typeof workspaceId!=="string"||!workspaceId)throw new Error("workspace_id is required");
+  const d=await ctx.modules.call<WorkspaceDescriptor>("workspace","resolve",{workspaceId});
+  if(d.taskId&&d.status!=="ready")throw new Error(`Task worktree is ${d.status}; reconcile it first`);
+  return d;
+}
+
+function desktopAgentTools(ctx:ModuleContext) {
+  const object=(properties:Record<string,unknown>,required:string[])=>({type:"object",properties,required,additionalProperties:false});
+  const workspaceId={type:"string",description:"Target workspace ID: task:<taskId> from persistent-agents__list_tasks or project:<projectId>:root from a project ID."};
+  const selectionList={type:"array",items:{type:"string"},maxItems:32};
+  return exportMcpTools(ctx,"Background agents",[
+    {name:"list_tasks",title:"List tasks in any project",description:"Find the task workspace IDs for a registered project.",
+      inputSchema:object({project_id:{type:"string",description:"Project ID from projects__list."}},["project_id"]),annotations:{readOnlyHint:true},
+      async handler(a,scope) {
+        await ctx.modules.call("workspace","resolve",{workspaceId:scope.workspaceId});
+        if(typeof a.project_id!=="string"||!a.project_id)throw new Error("project_id is required");
+        const d=await readyWorkspace(ctx,`project:${a.project_id}:root`);
+        const tasks=await ctx.modules.call<any[]>("git-tasks","list",{projectId:d.projectId});
+        return tasks.map(t=>({id:t.id,workspaceId:`task:${t.id}`,name:t.name,branch:t.branch,status:t.status}));
+      }},
+    {name:"options",title:"View background agent configuration options",description:"List provider profiles, instruction files, skills and MCP server IDs available in the target workspace.",
+      inputSchema:object({workspace_id:workspaceId},["workspace_id"]),annotations:{readOnlyHint:true},timeoutMs:120000,
+      async handler(a,scope) {
+        await ctx.modules.call("workspace","resolve",{workspaceId:scope.workspaceId});
+        const d=await readyWorkspace(ctx,a.workspace_id);
+        const c=await catalog(ctx,d.id);
+        return {workspaceId:d.id,projectId:d.projectId,name:d.name,machineId:d.machineId,agentFiles:c.agentFiles,skills:c.skills,
+          profiles:c.profiles.map((p:any)=>({id:p.id,name:p.name,provider:p.provider})),mcps:c.mcps.map(m=>({id:m.id,name:m.name}))};
+      }},
+    {name:"start",title:"Start a background agent in a workspace",description:"Create a background agent in an explicit project or task workspace and send its first prompt after the user's approval. Use persistent-agents__options to discover IDs for its provider, instructions, skills and MCP servers.",
+      inputSchema:object({workspace_id:workspaceId,prompt:{type:"string",minLength:1,maxLength:128*1024},
+        name:{type:"string",maxLength:120},profile_id:{type:"string"},model:{type:"string",maxLength:200},
+        agent_file:{type:"string",description:"Instruction path from the target options."},skills:selectionList,
+        mcp_ids:{...selectionList,description:"MCP server IDs from the target options. Defaults to Workspace tools; pass [] to omit MCP servers."},
+        settings:{type:"object",description:"Provider configuration option IDs and values.",additionalProperties:{type:["string","boolean"]},maxProperties:32},
+      },["workspace_id","prompt","profile_id"]),timeoutMs:180000,
+      async handler(a,scope) {
+        if(typeof a.prompt!=="string"||!a.prompt.trim()||a.prompt.length>128*1024)throw new Error("A prompt of up to 128 Ki characters is required");
+        if(typeof a.profile_id!=="string"||!a.profile_id)throw new Error("profile_id is required");
+        for(const value of [a.skills,a.mcp_ids]) {
+          if(value!==undefined&&(!Array.isArray(value)||value.length>32||value.some(id=>typeof id!=="string"||!id)))throw new Error("Select up to 32 skill or MCP IDs");
+        }
+        const origin=await ctx.modules.call<WorkspaceDescriptor>("workspace","resolve",{workspaceId:scope.workspaceId});
+        const d=await readyWorkspace(ctx,a.workspace_id);
+        const c=await catalog(ctx,d.id);
+        const config={name:clip(a.name,120)||"Background agent",profileId:a.profile_id,model:clip(a.model,200),agentFile:a.agent_file,
+          skills:a.skills,mcps:a.mcp_ids??["internal-remote-mcp"],settings:agentSettings(a.settings)};
+        const selection=agentSelection(c,config);
+        const details=[`Source: ${origin.name} (${origin.machineId})`,`Target: ${d.name} (${d.machineId})`,
+          `Agent: ${config.name}`,`Provider: ${selection.profile.name}${selection.model?` · ${selection.model}`:""}`,
+          `Instructions: ${selection.agentFile||"None"}`,`Skills: ${selection.skills.join(", ")||"None"}`,
+          `MCP servers: ${selection.ids.map(id=>c.mcps.find(m=>m.id===id)?.name||id).join(", ")||"None"}`,
+          ...(Object.keys(config.settings).length?[`Provider settings: ${JSON.stringify(config.settings)}`]:[]),
+          `Prompt: ${a.prompt.length>1500?a.prompt.slice(0,1500)+"…":a.prompt}`];
+        await approve(ctx,{name:origin.name},"Start a background agent",details.join("\n"),"Start agent","persistent-agents.create",60000);
+        await readyWorkspace(ctx,d.id);
+        const id=crypto.randomUUID();
+        const result={id,name:config.name,workspaceId:d.id,projectId:d.projectId};
+        try { await createAgent(ctx,c,config,selection,id); }
+        catch(e) { throw new Error(`Agent ${id} could not start in ${d.name}: ${e instanceof Error?e.message:String(e)}`); }
+        ctx.events.emit("persistent-agents.changed",{workspaceId:d.id});
+        try { await invoke(ctx,d.id,"send",{id,text:a.prompt}); }
+        catch(e) { return {...result,promptAccepted:false,error:e instanceof Error?e.message:String(e)}; }
+        return {...result,promptAccepted:true};
+      }},
+  ]);
 }
 const agentLines=(agent:{name:string;prompt:string;model:string}|null)=>agent?[`Background agent: ${agent.name}${agent.model?` (${agent.model})`:""}`,`Prompt: ${agent.prompt.length>1500?agent.prompt.slice(0,1500)+"…":agent.prompt}`]:[];
 /** Start a background agent in a task workspace, configured like its parent (provider, model,
@@ -236,9 +322,12 @@ async function pushLibrary(ctx:ModuleContext) {
     }
   }
 }
+let desktopMcp:ReturnType<typeof exportMcpTools>;
 const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
+  canSwap:()=>({ok:(desktopMcp?.pending()??0)===0,reason:"A background agent MCP command is running"}),
   deactivate() {if(daemonPoll)clearInterval(daemonPoll);daemonPoll=null;if(libraryTimer)clearTimeout(libraryTimer);libraryTimer=null;},
   activate(ctx) {
+    desktopMcp=desktopAgentTools(ctx);
     ctx.state.watch(LIBRARY_STATE,()=>{if(libraryTimer)clearTimeout(libraryTimer);libraryTimer=setTimeout(()=>{libraryTimer=null;void pushLibrary(ctx).catch(e=>ctx.log.warn(String(e)));},1500);});
     // If the local daemon is already running, connect to it so background activity and task
     // requests are seen without opening the Agents panel first. Never starts a daemon.
@@ -307,17 +396,8 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
   },
   async create(ctx,a,meta) {
     const c=await catalog(ctx,String(a.workspaceId));
-    const id=crypto.randomUUID();
-    const config=await agentConfig(ctx,c,a,id);
-    const subscription=await ctx.modules.call("persistence","settings.get",{key:"acp.claude.useSubscription"});
     // Chats started from the AI panel carry the current chat's approval policy and provider options.
-    const policy=a.approvalPolicy==="autopilot"?"autopilot":a.approvalPolicy==="auto-low"?"auto-low":"ask";
-    const settings=agentSettings(a.settings);
-    const spec:AgentSpec={id,name:String(a.name||"Agent").trim().slice(0,120),customName:a.autoName!==true&&!!String(a.name||"").trim(),workspaceId:c.workspace.id,workspaceName:c.workspace.name,root:c.workspace.rootAbsolutePath,machineId:c.workspace.machineId,
-      ...config,claudeSubscription:subscription!==false,daemon:daemonInfo.get(c.workspace.machineId),
-      ...(meta?.caller==="ai"&&policy!=="ask"?{autopilot:policy==="autopilot",approvalPolicy:policy==="auto-low"?"auto-low" as const:undefined}:{}),
-      ...(Object.keys(settings).length?{settings}:{})};
-    return invoke(ctx,c.workspace.id,"create",{spec});
+    return createAgent(ctx,c,a,agentSelection(c,a),crypto.randomUUID(),meta?.caller==="ai");
   },
   /** Edit name, provider, instructions, skills and MCP servers. Only a rename leaves a connected agent running. */
   async update(ctx,a) {
@@ -339,7 +419,8 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     // Desktop-hosted endpoints are re-issued for the new selection.
     await ctx.modules.call("internal-local-mcp","revoke",{conversationId:s.id}).catch(()=>{});
     await ctx.modules.call("internal-remote-mcp","revoke",{sessionId:s.id}).catch(()=>{});
-    const config=await agentConfig(ctx,c,{...a,mcps:ids,skills,agentFile,model:s.profile.id===a.profileId?s.model:""},s.id);
+    const selection=agentSelection(c,{...a,mcps:ids,skills,agentFile,model:s.profile.id===a.profileId?s.model:""});
+    const config=await agentConfig(ctx,c,selection,s.id);
     const result=await invoke(ctx,a.workspaceId,"update",{id:s.id,patch:{name,customName,...config}});
     await followName(ctx,a.workspaceId,s.id,followsProvider);
     return result;
