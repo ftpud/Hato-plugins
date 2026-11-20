@@ -5,6 +5,7 @@ import { workspaceSkills } from "../../files/src/skills";
 import { agentActivity, agentSettings, autoAgentName, isAutoAgentName, relativeAgentPath, type AgentMcp, type AgentSpec } from "@hato/sdk/persistent-agents";
 import { imageAttachments } from "@hato/sdk/images";
 import { acpServer, transportOf, validateMcp } from "@hato/sdk/mcp-servers";
+import { LIBRARY_STATE, isLibraryRef, libraryCatalog, libraryInstructions, libraryItemsFor, libraryRef, libraryRefId, textDigest } from "@hato/sdk/library";
 
 const activityCache=new Map<string,{revision:number;status:string;text:string}>();
 const daemonInfo=new Map<string,{bin:string;dir:string}>();
@@ -73,7 +74,14 @@ async function oauthHeaders(ctx:ModuleContext,list:AgentMcp[]):Promise<Record<st
 async function catalog(ctx:ModuleContext,workspaceId:string) {
   const d:WorkspaceDescriptor=await ctx.modules.call("workspace","resolve",{workspaceId});
   const profiles=(await providerProfiles(ctx)).filter((p:any)=>p.enabled&&(p.machineId==="*"||p.machineId===d.machineId));
-  const skills=await workspaceSkills(ctx,d);
+  // Library skills/agents come from the optional Library plugin's published catalog (no call grant needed).
+  const library=ctx.state.get(LIBRARY_STATE);
+  const libraryText=new Map<string,string>();
+  const fromLibrary=(kind:"skill"|"agent")=>libraryItemsFor(library,d,kind).map(i=>{
+    libraryText.set(libraryRef(i.id),libraryInstructions(i));
+    return {name:i.name,description:i.description,path:libraryRef(i.id),source:i.projectId?"library-project":"library-global"};
+  });
+  const skills=[...(await workspaceSkills(ctx,d)).map(s=>({...s,source:"workspace"})),...fromLibrary("skill")];
   const grant=await workspaceGrant(ctx,d,"fs");
   const agentFiles:{name:string;path:string}[]=[];
   try {if((await ctx.host.fs.stat(grant.grant,"AGENTS.md")).kind==="file")agentFiles.push({name:"AGENTS.md",path:"AGENTS.md"});}catch{}
@@ -81,10 +89,16 @@ async function catalog(ctx:ModuleContext,workspaceId:string) {
     let entries;try{entries=(await ctx.host.fs.list(grant.grant,dir)).entries;}catch{continue;}
     for(const e of entries)if(e.kind==="file"&&e.name.endsWith(".md"))agentFiles.push({name:e.name,path:`${dir}/${e.name}`});
   }
-  return {workspace:d,profiles,skills,agentFiles,mcps:[
+  agentFiles.push(...fromLibrary("agent").map(a=>({name:`Library · ${a.name}`,path:a.path})));
+  return {workspace:d,profiles,skills,agentFiles,libraryText,mcps:[
     {id:"internal-remote-mcp",name:"Workspace tools (background agents and terminals)"},
     ...(d.location==="local"?[{id:"internal-remote-mcp-local",name:"Workspace tools · local desktop terminals (online only)"}]:[]),
     {id:"internal-local-mcp",name:"Desktop tools (requires desktop online)"},...(await mcps(ctx)).filter(m=>m.enabled!==false)]};
+}
+function libraryInline(c:Awaited<ReturnType<typeof catalog>>,paths:(string|null)[]) {
+  const inline:Record<string,string>={};
+  for(const p of paths)if(isLibraryRef(p)){const text=c.libraryText.get(p);if(text===undefined)throw new Error("A selected Library entry is not available on this machine");inline[p]=text;}
+  return inline;
 }
 /** MCP selection ids of an existing agent, as offered by `catalog`. */
 const agentMcpIds=(s:AgentSpec)=>[...(s.workspaceMcp?["internal-remote-mcp"]:[]),...s.mcps.map(m=>m.id)];
@@ -95,6 +109,8 @@ async function agentConfig(ctx:ModuleContext,c:Awaited<ReturnType<typeof catalog
   if(skills.some((p:string)=>!c.skills.some(s=>s.path===p)))throw new Error("Selected skill is no longer available");
   const agentFile=a.agentFile?relativeAgentPath(a.agentFile):null;
   if(agentFile&&!c.agentFiles.some(f=>f.path===agentFile))throw new Error("Selected agent file is no longer available");
+  // Library entries are not workspace files: the runtime receives their text with the configuration.
+  const inline=libraryInline(c,[agentFile,...skills]);
   const ids:string[]=Array.isArray(a.mcps)?a.mcps:[];
   if(ids.some(id=>!c.mcps.some(m=>m.id===id)))throw new Error("Unknown MCP server");
   await target(ctx,c.workspace.id);
@@ -103,14 +119,14 @@ async function agentConfig(ctx:ModuleContext,c:Awaited<ReturnType<typeof catalog
   // Agents receive ACP-shaped entries; OAuth servers carry a short-lived token refreshed on reconnect.
   const servers:any[]=chosen.map(m=>({id:m.id,...acpServer(m,auth[m.id])}));
   if(ids.includes("internal-remote-mcp-local")) {
-    const endpoint=await ctx.modules.call("internal-remote-mcp","endpoint",{workspaceId:c.workspace.id,sessionId,skills});
+    const endpoint=await ctx.modules.call("internal-remote-mcp","endpoint",{workspaceId:c.workspace.id,sessionId,skills:[...new Set([agentFile,...skills].filter(Boolean))],inline});
     servers.push({...endpoint,id:"internal-remote-mcp-local",name:"internal-remote-mcp-local"});
   }
   if(ids.includes("internal-local-mcp")) {
     const endpoint=await ctx.modules.call("internal-local-mcp","endpoint",{conversationId:sessionId,workspaceId:c.workspace.id});
     servers.push({id:"internal-local-mcp",...endpoint.server});
   }
-  return {profile,model:String(a.model||""),agentFile,skills,mcps:servers,workspaceMcp:ids.includes("internal-remote-mcp")};
+  return {profile,model:String(a.model||""),agentFile,skills,mcps:servers,workspaceMcp:ids.includes("internal-remote-mcp"),inline};
 }
 // Git task requests from background agents' workspace MCP. The project always comes from the
 // agent's own workspace. Creating a task or starting an agent in one needs the user's native
@@ -197,9 +213,33 @@ async function pollDaemons(ctx:ModuleContext) {
     if(sig!==busySignature){busySignature=sig;ctx.state.set("persistent-agents.busy",busy);}
   } finally {polling=false;}
 }
+/** After a Library edit, give running agents on connected machines the new text of the entries they
+ *  use. They are not restarted; the next prompt carries the changed text under a new fingerprint. */
+let libraryTimer:ReturnType<typeof setTimeout>|null=null;
+async function pushLibrary(ctx:ModuleContext) {
+  const items=libraryCatalog(ctx.state.get(LIBRARY_STATE)).items;
+  for(const pending of [...prepared.values()]) {
+    let t:DaemonTarget;try{t=await pending;}catch{continue;}
+    let rows:any[];try{rows=await ctx.host.daemon.request(t,"modules.call",{target:"agent-runner",method:"list",args:{},timeoutMs:60000});}catch{continue;}
+    for(const s of rows) {
+      const inline:Record<string,string>={};
+      for(const ref of [s.agentFile,...(s.skills||[])].filter(isLibraryRef)) {
+        const item=items.find(i=>i.id===libraryRefId(ref));if(!item)continue;
+        const text=libraryInstructions(item);
+        if(s.inlineDigest?.[ref]!==textDigest(text))inline[ref]=text;
+      }
+      if(!Object.keys(inline).length)continue;
+      try {
+        await ctx.host.daemon.request(t,"modules.call",{target:"agent-runner",method:"refreshInline",args:{id:s.id,inline},timeoutMs:60000});
+        await ctx.modules.call("internal-remote-mcp","updateInline",{sessionId:s.id,inline}).catch(()=>{});
+      } catch(e){ctx.log.warn(`Library refresh for agent ${s.name}: ${e instanceof Error?e.message:String(e)}`);}
+    }
+  }
+}
 const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
-  deactivate() {if(daemonPoll)clearInterval(daemonPoll);daemonPoll=null;},
+  deactivate() {if(daemonPoll)clearInterval(daemonPoll);daemonPoll=null;if(libraryTimer)clearTimeout(libraryTimer);libraryTimer=null;},
   activate(ctx) {
+    ctx.state.watch(LIBRARY_STATE,()=>{if(libraryTimer)clearTimeout(libraryTimer);libraryTimer=setTimeout(()=>{libraryTimer=null;void pushLibrary(ctx).catch(e=>ctx.log.warn(String(e)));},1500);});
     // If the local daemon is already running, connect to it so background activity and task
     // requests are seen without opening the Agents panel first. Never starts a daemon.
     setTimeout(async()=>{
@@ -211,7 +251,7 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     },1500);
     // The AI module owns this request namespace; native event enforcement prevents spoofing it.
     // Keep this UI adapter allowlist narrow instead of exposing arbitrary module calls.
-    const allowed=new Set(["create","catalog","list","view","send","cancel","stop","reconnect","setModel","setConfig","setAutopilot","setPolicy","update","updateRuntime","reviewPermission","clear"]);
+    const allowed=new Set(["create","catalog","list","view","send","cancel","stop","reconnect","setModel","setConfig","setAutopilot","setPolicy","update","updateRuntime","reviewPermission","clear","listMcpTools"]);
     ctx.events.on("mcp-panel.request",async(request:any)=>{
       if(typeof request?.requestId!=="string"||!["listMcps","saveMcp","removeMcp","probeMcp","signInMcp","signOutMcp","cancelSignInMcp","listMcpTools"].includes(request.method))return;
       try{const value=await mod.methods![request.method](ctx,request.args||{},{caller:"mcp-panel"});ctx.events.emit("persistent-agents.mcpResponse",{requestId:request.requestId,value});}
@@ -231,7 +271,7 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     return performTask(ctx,{sessionId:String(a.sessionId),workspaceId:String(a.workspaceId),op:String(a.op),args:a.args||{}});
   },
   workspaceEndpoint:async(ctx,a)=>ctx.modules.call("internal-remote-mcp","endpoint",{workspaceId:String(a.workspaceId),sessionId:String(a.sessionId||crypto.randomUUID()),skills:Array.isArray(a.skills)?a.skills:[]}),
-  catalog:(ctx,a)=>catalog(ctx,String(a.workspaceId)),
+  catalog:async(ctx,a)=>{const {libraryText:_text,...c}=await catalog(ctx,String(a.workspaceId));return c;},
   async listMcps(ctx) {
     const list=await mcps(ctx);
     const remote=list.filter(m=>transportOf(m)!=="stdio"&&m.auth?.type==="oauth").map(m=>({id:m.id,url:m.url}));
@@ -290,9 +330,12 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     const ids=[...new Set<string>(Array.isArray(a.mcps)?a.mcps:[])].sort();
     const skills=[...(Array.isArray(a.skills)?a.skills:[])].map(relativeAgentPath).sort();
     const agentFile=a.agentFile?relativeAgentPath(a.agentFile):null;
-    const same=s.profile.id===a.profileId&&(s.agentFile||null)===agentFile&&JSON.stringify([...s.skills].sort())===JSON.stringify(skills)&&JSON.stringify(agentMcpIds(s).sort())===JSON.stringify(ids);
-    if(same)return invoke(ctx,a.workspaceId,"update",{id:s.id,patch:{name,customName}});
     const c=await catalog(ctx,String(a.workspaceId));
+    // A Library entry edited since it was selected counts as an instruction change.
+    const digests=(s as any).inlineDigest||{};
+    const libraryChanged=[agentFile,...skills].some(p=>isLibraryRef(p)&&c.libraryText.has(p)&&digests[p]!==textDigest(c.libraryText.get(p)!));
+    const same=!libraryChanged&&s.profile.id===a.profileId&&(s.agentFile||null)===agentFile&&JSON.stringify([...s.skills].sort())===JSON.stringify(skills)&&JSON.stringify(agentMcpIds(s).sort())===JSON.stringify(ids);
+    if(same)return invoke(ctx,a.workspaceId,"update",{id:s.id,patch:{name,customName}});
     // Desktop-hosted endpoints are re-issued for the new selection.
     await ctx.modules.call("internal-local-mcp","revoke",{conversationId:s.id}).catch(()=>{});
     await ctx.modules.call("internal-remote-mcp","revoke",{sessionId:s.id}).catch(()=>{});

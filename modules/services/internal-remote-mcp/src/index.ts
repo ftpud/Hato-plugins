@@ -1,6 +1,7 @@
 import type { AppModule,ModuleContext,Handle } from "@hato/sdk/types";
 import { JsonRpcPeer,errMsg,rpcError } from "@hato/sdk/runtime";
-interface Scope {sessionId:string;workspaceId:string;root:string;skills:string[];daemon?:{bin:string;dir:string};token:string}
+import { isLibraryRef, textDigest } from "@hato/sdk/library";
+interface Scope {sessionId:string;workspaceId:string;root:string;skills:string[];inline?:Record<string,string>;daemon?:{bin:string;dir:string};token:string}
 let db:Handle;
 let listener:{handle:string;port:number}|null=null;
 const scopes=new Map<string,Scope>();
@@ -22,8 +23,8 @@ const tools=[
   {name:"tasks_create",description:"Create a Git task in this workspace's project, optionally starting a background agent in it with a prompt. Needs the user's approval in the Hato desktop unless this agent runs on autopilot. With `branch`, an existing local branch is checked out, a branch on exactly one remote is tracked, otherwise a new branch is created from HEAD; without it a task/<name>-<id> branch is generated. The new agent inherits this agent's provider, model, instructions, skills, MCP servers and autopilot.",inputSchema:object({name:{type:"string",maxLength:100},branch:{type:"string",maxLength:200},agent:AGENT})},
   {name:"tasks_start_agent",description:"Start a background agent with a prompt in an existing Git task of this project (task ids come from tasks_list). Needs the user's approval in the Hato desktop unless this agent runs on autopilot. The agent inherits this agent's provider, model, instructions, skills, MCP servers and autopilot.",inputSchema:object({taskId:{type:"string"},agent:AGENT},["taskId","agent"])},
   {name:"tasks_reconcile",description:"Refresh task statuses for this workspace's project against `git worktree list`. Never deletes anything. Requires the Hato desktop to be open.",inputSchema:object({})},
-  {name:"skills_list",description:"List skills selected for this agent",inputSchema:object({})},
-  {name:"skills_read",description:"Read a selected skill",inputSchema:object({path:{type:"string"}},["path"])},
+  {name:"skills_list",description:"List this agent's instruction file and selected skills with the current fingerprint of each text. Compare with the [fingerprint] of the copy in your context; re-read any that differ or that you no longer have.",inputSchema:object({}),annotations:{readOnlyHint:true}},
+  {name:"skills_read",description:"Read the current text of this agent's instruction file or a selected skill (path from skills_list), with its fingerprint",inputSchema:object({path:{type:"string"}},["path"]),annotations:{readOnlyHint:true}},
 ];
 async function ctl(ctx:ModuleContext,scope:Scope,op:string,args:any={}) {
   if(!scope.daemon)throw new Error("No daemon for this endpoint");
@@ -116,23 +117,26 @@ async function call(ctx:ModuleContext,s:Scope,name:string,a:any) {
     if(!allowed.some((p:any)=>p.key===a.key))throw new Error("Terminal is outside this workspace");
     return ctl(ctx,s,name==="terminals_read"?"pty.read":"pty.write",{key:a.key,cursor:a.cursor,limitBytes:65536,text:a.text});
   }
-  if(name==="skills_list")return s.skills;
+  if(name==="skills_list") {
+    const out:any[]=[];
+    for(const path of s.skills){try{out.push({path,fingerprint:textDigest(await skillText(ctx,s,path))});}catch(e){out.push({path,error:errMsg(e)});}}
+    return out;
+  }
   if(name==="skills_read") {
     if(!s.skills.includes(a.path))throw new Error("Skill is not enabled for this session");
-    const g=await ctx.host.capabilities.request({kind:"fs",root:s.root});
-    try {return await ctx.host.fs.read(g.grant,a.path,128*1024);}finally{await ctx.host.capabilities.release(g.grant);}
+    const text=await skillText(ctx,s,a.path);
+    return {path:a.path,fingerprint:textDigest(text),text};
   }
   throw new Error("Unknown workspace tool");
 }
-async function connection(ctx:ModuleContext,handle:string) {
-  const c={token:null as string|null,buffer:"",peer:null as JsonRpcPeer|null};connections.set(handle,c);
-  await ctx.host.streams.listen(handle,{},chunk=>{
-    if(c.peer){c.peer.feed(chunk);return;}
-    c.buffer+=chunk;const i=c.buffer.indexOf("\n");
-    if(i<0){if(c.buffer.length>4096)void ctx.host.net.close(handle);return;}
-    let token;try{token=JSON.parse(c.buffer.slice(0,i)).token;}catch{}
-    if(typeof token!=="string"||!scopes.has(token)){void ctx.host.net.close(handle);return;}
-    c.token=token;
+async function skillText(ctx:ModuleContext,s:Scope,path:string):Promise<string> {
+  if(isLibraryRef(path)){const text=s.inline?.[path];if(text===undefined)throw new Error("Library skill text is unavailable; reselect the skill");return text;}
+  const g=await ctx.host.capabilities.request({kind:"fs",root:s.root});
+  try {const f=await ctx.host.fs.read(g.grant,path,128*1024);if(f.binary||f.truncated)throw new Error("Skill file is binary or too large");return f.text||"";}
+  finally{await ctx.host.capabilities.release(g.grant);}
+}
+let inflight=0;
+function attachPeer(ctx:ModuleContext,handle:string,c:{token:string|null;peer:JsonRpcPeer|null}) {
     c.peer=new JsonRpcPeer(line=>ctx.host.net.write(handle,line+"\n"));
     c.peer.onRequest=async(method,params)=>{
       const s=scopes.get(c.token!);if(!s)throw rpcError(-32001,"MCP access revoked");
@@ -140,25 +144,50 @@ async function connection(ctx:ModuleContext,handle:string) {
       if(method==="ping")return {};
       if(method==="tools/list")return {tools};
       if(method==="tools/call") {
+        inflight++;
         try {const value=await call(ctx,s,params.name,params.arguments||{});return {content:[{type:"text",text:JSON.stringify(value)}]};}
         catch(e){return {content:[{type:"text",text:errMsg(e)}],isError:true};}
+        finally{inflight--;}
       }
       throw rpcError(-32601,"Unknown MCP method");
     };
-    const rest=c.buffer.slice(i+1);c.buffer="";if(rest)c.peer.feed(rest);
+}
+/** Serve one accepted connection. `token` re-attaches a connection handed over by a module swap. */
+async function connection(ctx:ModuleContext,handle:string,token:string|null=null) {
+  const c={token,buffer:"",peer:null as JsonRpcPeer|null};connections.set(handle,c);
+  if(token)attachPeer(ctx,handle,c);
+  await ctx.host.streams.listen(handle,{},chunk=>{
+    if(c.peer){c.peer.feed(chunk);return;}
+    c.buffer+=chunk;const i=c.buffer.indexOf("\n");
+    if(i<0){if(c.buffer.length>4096)void ctx.host.net.close(handle);return;}
+    let first;try{first=JSON.parse(c.buffer.slice(0,i)).token;}catch{}
+    if(typeof first!=="string"||!scopes.has(first)){void ctx.host.net.close(handle);return;}
+    c.token=first;attachPeer(ctx,handle,c);
+    const rest=c.buffer.slice(i+1);c.buffer="";if(rest)c.peer!.feed(rest);
   },()=>{connections.delete(handle);void ctx.host.net.close(handle).catch(()=>{});});
 }
 async function listen(ctx:ModuleContext) {
   if(listener)return listener;
-  listener=await ctx.host.net.listenLoopback();let pending="";
-  await ctx.host.streams.listen(listener.handle,{},chunk=>{
+  listener=await ctx.host.net.listenLoopback();
+  await acceptLoop(ctx);return listener;
+}
+async function acceptLoop(ctx:ModuleContext) {
+  let pending="";
+  await ctx.host.streams.listen(listener!.handle,{},chunk=>{
     pending+=chunk;let i;
     while((i=pending.indexOf("\n"))>=0){const line=pending.slice(0,i);pending=pending.slice(i+1);try{const e=JSON.parse(line);if(e.connection)void connection(ctx,e.connection);}catch{}}
-  });return listener;
+  });
 }
 const mod:AppModule={id:"internal-remote-mcp",moduleApiVersion:1,
- async activate(ctx){db=await ctx.host.db.openNamespace("internal-remote-mcp");await ctx.host.db.exec(db,"CREATE TABLE IF NOT EXISTS scopes(token TEXT PRIMARY KEY,data TEXT NOT NULL)");for(const r of await ctx.host.db.query<any>(db,"SELECT data FROM scopes")){const s:Scope=JSON.parse(r.data);scopes.set(s.token,s);}},
- canSwap:()=>({ok:scopes.size===0&&taskRequests.size===0,reason:"Workspace MCP endpoints are active"}),
+ async activate(ctx,prev){
+  db=await ctx.host.db.openNamespace("internal-remote-mcp");await ctx.host.db.exec(db,"CREATE TABLE IF NOT EXISTS scopes(token TEXT PRIMARY KEY,data TEXT NOT NULL)");
+  for(const r of await ctx.host.db.query<any>(db,"SELECT data FROM scopes")){const s:Scope=JSON.parse(r.data);scopes.set(s.token,s);}
+  // A swap hands over the listener and authenticated connections; agents keep their MCP sessions.
+  if(prev?.listener){listener=prev.listener;await acceptLoop(ctx);for(const c of prev.conns||[])await connection(ctx,c.handle,c.token);}
+ },
+ snapshot:()=>({listener,conns:[...connections].filter(([,c])=>c.token).map(([handle,c])=>({handle,token:c.token}))}),
+ // Endpoints survive swaps (above); only running tool calls and pending task approvals hold one back.
+ canSwap:()=>({ok:inflight===0&&taskRequests.size===0,reason:"A workspace tool call or task request is in progress"}),
  methods:{
   /** Static workspace tool catalog (same list served by tools/list). */
   tools:()=>tools.map((t: any) => ({ name: String(t.name), title: t.title || undefined, description: String(t.description || ""), readOnly: !!t.annotations?.readOnlyHint, destructive: !!t.annotations?.destructiveHint })),
@@ -178,10 +207,19 @@ const mod:AppModule={id:"internal-remote-mcp",moduleApiVersion:1,
     let root=String(a.root||"");
     if(!a.daemon){const d=await ctx.modules.call("workspace","resolve",{workspaceId:a.workspaceId});if(d.location!=="local")throw new Error("Standalone endpoint requires a local workspace");root=d.rootAbsolutePath;}
     const g=await ctx.host.capabilities.request({kind:"fs",root});await ctx.host.capabilities.release(g.grant);
-    const scope:Scope={sessionId:String(a.sessionId),workspaceId:String(a.workspaceId),root:g.root,skills:Array.isArray(a.skills)?a.skills:[],daemon:a.daemon,token:crypto.randomUUID()+crypto.randomUUID()};
+    const scope:Scope={sessionId:String(a.sessionId),workspaceId:String(a.workspaceId),root:g.root,skills:Array.isArray(a.skills)?a.skills:[],inline:a.inline&&typeof a.inline==="object"?a.inline:{},daemon:a.daemon,token:crypto.randomUUID()+crypto.randomUUID()};
     scopes.set(scope.token,scope);await ctx.host.db.exec(db,"INSERT INTO scopes(token,data) VALUES(?,?)",[scope.token,JSON.stringify(scope)]);
     const l=await listen(ctx);
     return {id:"internal-remote-mcp",name:"internal-remote-mcp",command:"node",args:["-e",proxy],env:[{name:"HATO_MCP_PORT",value:String(l.port)},{name:"HATO_MCP_TOKEN",value:scope.token}]};
+  },
+  /** Replace Library text for a session's endpoints after a Library edit (no reconnect needed). */
+  async updateInline(ctx,a,meta){
+    if(!["agent-runner","persistent-agents","daemon-client"].includes(meta.caller))throw new Error("Only session controllers update endpoints");
+    for(const [t,s] of scopes)if(s.sessionId===a.sessionId){
+      const next={...(s.inline||{})};for(const [k,v] of Object.entries(a.inline||{}))if(s.skills.includes(k)&&typeof v==="string")next[k]=v;
+      s.inline=next;await ctx.host.db.exec(db,"UPDATE scopes SET data=? WHERE token=?",[JSON.stringify(s),t]);
+    }
+    return null;
   },
   async revoke(ctx,a,meta){if(!["agent-runner","persistent-agents","daemon-client"].includes(meta.caller))throw new Error("Only session controllers revoke endpoints");for(const r of [...taskRequests.values()])if(r.sessionId===a.sessionId)finishTask(r.id,{error:"Agent endpoint was revoked"});for(const [t,s]of scopes)if(s.sessionId===a.sessionId){scopes.delete(t);await ctx.host.db.exec(db,"DELETE FROM scopes WHERE token=?",[t]);for(const [h,c]of connections)if(c.token===t)await ctx.host.net.close(h).catch(()=>{});}return null;},
  }};

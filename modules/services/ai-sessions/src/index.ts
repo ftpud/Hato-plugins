@@ -328,6 +328,15 @@ const mod: AppModule = {
       return null;
     },
 
+    /** Tools an MCP server offers to desktop chats: Hato's own from internal-mcp, remote servers over HTTP. */
+    async mcpTools(ctx, a) {
+      const id = String(a.serverId || "");
+      if (id === "internal") return { tools: await ctx.modules.call("internal-mcp", "tools", {}) };
+      const server = (await configuredMcps(ctx)).find(m => m.id === id);
+      if (!server) throw new Error("Unknown MCP server");
+      if (transportOf(server) === "stdio") throw new Error("Local (command) servers start on the agent's machine when it connects; their tools can't be listed from here yet.");
+      return ctx.modules.call("mcp-auth", "listTools", { serverId: server.id, url: server.url, transport: server.transport, headers: server.headers, auth: server.auth }, { timeoutMs: 90000 });
+    },
     /** Everything the AI panel needs for the given workspace, in one call. */
     async view(ctx, a) {
       const desc = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });

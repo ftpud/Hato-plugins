@@ -3,6 +3,7 @@
 // this module installs/upgrades that runtime, resolves provider profiles and MCP servers into a
 // run environment, routes designer requests, and contributes the self-configuration MCP commands.
 import type { AppModule, ModuleContext, DaemonTarget } from "@hato/sdk/types";
+import { isLibraryRef } from "@hato/sdk/library";
 import { errMsg, sshConnect, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { exportMcpTools } from "@hato/sdk/mcp";
 import { INTERNAL_MCP_SERVERS, WORKFLOW_REFERENCE, WORKFLOW_RUNNER_VERSION, edgeType, isAgentBlock, isInternalMcp, normalizeDefinition, validateWorkflow, type WorkflowRunEnv, type WorkflowRun } from "@hato/sdk/workflows";
@@ -63,7 +64,8 @@ async function catalog(ctx: ModuleContext, d: WorkspaceDescriptor) {
   const mcps = ((await ctx.modules.call("persistence", "settings.get", { key: "persistent-agents.mcps" })) || []).filter((m: any) => m.enabled !== false);
   const preferred = await ctx.modules.call("persistence", "settings.get", { key: "workflows.defaultProfile" }).catch(() => null);
   const defaultProfileId = c.profiles.some((p: any) => p.id === preferred) ? preferred : c.profiles[0]?.id || "";
-  return { defaultProfileId, workspace: { id: d.id, name: d.name, machineId: d.machineId, location: d.location }, profiles: c.profiles.map((p: any) => ({ id: p.id, name: p.name, provider: p.provider })), skills: c.skills, agentFiles: c.agentFiles, mcps: [...INTERNAL_MCP_SERVERS, ...mcps].map((m: any) => ({ id: m.id, name: m.name })), templates: WORKFLOW_TEMPLATES.map(t => ({ id: t.id, name: t.name, description: t.description })) };
+  return { defaultProfileId, workspace: { id: d.id, name: d.name, machineId: d.machineId, location: d.location }, profiles: c.profiles.map((p: any) => ({ id: p.id, name: p.name, provider: p.provider })), // Workflow blocks read skills and instruction files from the workspace; Library entries are chat/agent-only for now.
+    skills: c.skills.filter((k: any) => !isLibraryRef(k.path)), agentFiles: c.agentFiles.filter((f: any) => !isLibraryRef(f.path)), mcps: [...INTERNAL_MCP_SERVERS, ...mcps].map((m: any) => ({ id: m.id, name: m.name })), templates: WORKFLOW_TEMPLATES.map(t => ({ id: t.id, name: t.name, description: t.description })) };
 }
 /** Desktop tools endpoints, one per workflow, reused so a new run or a save never revokes the
  *  token a live session is using. Lost with this module's memory; then issued anew. */

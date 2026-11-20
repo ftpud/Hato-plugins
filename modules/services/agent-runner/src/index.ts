@@ -8,6 +8,7 @@ import { advertisedChoices } from "@hato/sdk/workflow-provider-options";
 import { agentExecutable } from "@hato/sdk/agent-executable";
 import { modelChoices, relativeAgentPath, agentPolicy, agentSettings, LOW_RISK_TOOL_KINDS, type AgentSpec, type AgentSession, type AgentPermission } from "@hato/sdk/persistent-agents";
 import { imageAttachments } from "@hato/sdk/images";
+import { isLibraryRef, textDigest } from "@hato/sdk/library";
 import { reportedUsage } from "@hato/sdk/context-usage";
 import type { ImageAttachment } from "@hato/sdk/types";
 
@@ -56,7 +57,8 @@ function message(ctx:ModuleContext,s:AgentSession,role:ChatMessage["role"],text:
 }
 function publicSession(s:AgentSession) {
   // Secrets stay in the runner: env values and header values (e.g. OAuth bearer tokens) are redacted.
-  return {...s,profile:{...s.profile,envRefs:{}},mcps:s.mcps.map((m:any)=>({...m,env:[],...(Array.isArray(m.headers)?{headers:m.headers.map((h:any)=>({name:h.name,value:""}))}:{})}))};
+  const {inline,...rest}=s;
+  return {...rest,inlineDigest:Object.fromEntries(Object.entries(inline||{}).map(([k,v])=>[k,textDigest(v)])),profile:{...s.profile,envRefs:{}},mcps:s.mcps.map((m:any)=>({...m,env:[],...(Array.isArray(m.headers)?{headers:m.headers.map((h:any)=>({name:h.name,value:""}))}:{})}))};
 }
 function session(id:any):AgentSession { const s=sessions.get(String(id)); if(!s)throw new Error("Unknown persistent agent");return s; }
 async function request(c:Live,method:string,args:any,ms=120000):Promise<any> {
@@ -104,20 +106,66 @@ function update(ctx:ModuleContext,c:Live,u:any) {
   else if(kind==="current_mode_update"&&c.session.modes) { c.session.modes={...c.session.modes,currentModeId:u.currentModeId};void persist(ctx,c.session); }
   else if(kind==="usage_update") { c.session.usage=reportedUsage(u);void persist(ctx,c.session); }
 }
-async function readContext(ctx:ModuleContext,s:AgentSession):Promise<string> {
-  if(!s.agentFile && !s.skills.length)return "";
+/** One instruction file or skill as the agent receives it, with a fingerprint of its text. */
+interface Instruction { path: string; label: string; text: string; digest: string; skill: boolean; name: string; description: string }
+/** A SKILL.md front-matter value (plain, quoted, or a folded/literal block). */
+function frontMatter(text:string,key:string):string {
+  const header=/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text)?.[1];if(!header)return "";
+  const lines=header.split(/\r?\n/),i=lines.findIndex(l=>l.startsWith(key+":"));if(i<0)return "";
+  const value=lines[i].slice(key.length+1).trim();
+  if(/^[>|][-+]?$/.test(value)){const out:string[]=[];for(const l of lines.slice(i+1)){if(l&&!/^\s/.test(l))break;out.push(l.trim());}return out.join(" ").trim();}
+  return value.replace(/^(["'])([\s\S]*)\1$/,"$2");
+}
+/** Skills are listed by name and description and read on demand; they need the skills_read tool. */
+const lazySkills=(s:AgentSession)=>!!s.workspaceMcp;
+/** Current texts of the agent file and enabled skills (workspace files are re-read; Library text is
+ *  kept up to date by the desktop through `refreshInline`). */
+async function readInstructions(ctx:ModuleContext,s:AgentSession):Promise<Instruction[]> {
+  const paths=[...new Set([s.agentFile,...s.skills].filter(Boolean))] as string[];
+  if(!paths.length)return [];
   const grant=await ctx.host.capabilities.request({kind:"fs",root:s.root,target:{kind:"local"}});
   try {
-    const parts:string[]=[];
-    for(const path of [...new Set([s.agentFile,...s.skills].filter(Boolean))] as string[]) {
-      relativeAgentPath(path);
-      const file=await ctx.host.fs.read(grant.grant,path,128*1024);
-      if(file.binary||file.truncated)throw new Error(`Instruction file is binary or too large: ${path}`);
-      parts.push(`Instructions from ${path}:\n${file.text||""}`);
-      if(parts.join("\n\n").length>128*1024)throw new Error("Selected instructions exceed the total 128 KiB budget; select fewer skills");
+    const out:Instruction[]=[];let total=0;
+    for(const path of paths) {
+      let text:string;
+      if(isLibraryRef(path)) {
+        const t=s.inline?.[path];
+        if(t===undefined)throw new Error(`Library entry ${path} is no longer attached; reselect it in the chat's skills`);
+        text=t;
+      } else {
+        relativeAgentPath(path);
+        const file=await ctx.host.fs.read(grant.grant,path,128*1024);
+        if(file.binary||file.truncated)throw new Error(`Instruction file is binary or too large: ${path}`);
+        text=file.text||"";
+      }
+      const skill=path!==s.agentFile;
+      // Only texts sent in full count toward the prompt budget; lazily read skills cost metadata.
+      if(!skill||!lazySkills(s))total+=text.length;
+      if(total>128*1024)throw new Error("Selected instructions exceed the total 128 KiB budget; select fewer skills or enable Workspace tools so skills load on demand");
+      const name=skill?frontMatter(text,"name")||path.split("/").slice(-2,-1)[0]||path:path;
+      out.push({path,label:skill?`skill "${name}" (${path})`:`instruction file (${path})`,text,digest:textDigest(text),skill,name,description:skill?frontMatter(text,"description"):""});
     }
-    return parts.join("\n\n");
+    return out;
   } finally { await ctx.host.capabilities.release(grant.grant); }
+}
+/** Instruction text for the next prompt: new or changed texts in full (with fingerprints), removed
+ *  ones named, and a one-line fingerprint index the agent uses to notice a lost or stale copy. */
+function instructionContext(s:AgentSession,current:Instruction[]) {
+  // Sessions from before fingerprints: assume what is selected now was sent with the first prompt.
+  const sent:Record<string,string>=s.contextSent?(s.sentDigests??Object.fromEntries(current.map(i=>[i.path,i.digest]))):{};
+  const parts:string[]=[],lazy=lazySkills(s);
+  const changed=current.filter(i=>sent[i.path]!==i.digest);
+  // Full text: the instruction file always; skills only when the agent has no skills_read tool.
+  for(const i of changed.filter(i=>!i.skill||!lazy))
+    parts.push(`${sent[i.path]?"UPDATED instructions — replaces any earlier version of":"Instructions from"} ${i.label} [fingerprint ${i.digest}]:\n${i.text}`);
+  // Metadata only: the agent reads a skill with skills_read when a task calls for it.
+  const listed=changed.filter(i=>i.skill&&lazy);
+  if(listed.length)parts.push(`${Object.keys(sent).length?"Skills added or updated":"Skills available"} (not loaded — when a task matches a skill's description, read its full text with the skills_read tool and the path below before acting; re-read a skill marked updated even if you read it before):\n`
+    +listed.map(i=>`- ${i.name}${sent[i.path]?" (updated)":""}: ${i.description||"no description"} — path ${i.path} [fingerprint ${i.digest}]`).join("\n"));
+  const removed=Object.keys(sent).filter(p=>!current.some(i=>i.path===p));
+  if(removed.length)parts.push(`No longer in effect (stop following them): ${removed.join(", ")}`);
+  const index=current.length?`[Hato instructions in effect: ${current.map(i=>`${i.label} #${i.digest}`).join("; ")}. ${lazy?"skills_read returns the current text and fingerprint of any of these; use it when you need a skill or no longer have the text":"If you no longer have one of these texts with that fingerprint in your context, ask the user to resend it"}.]`:"";
+  return {preamble:parts.join("\n\n"),index,digests:Object.fromEntries(current.map(i=>[i.path,i.digest]))};
 }
 async function stop(ctx:ModuleContext,id:string) {
   const s=session(id), c=live.get(id);
@@ -140,11 +188,11 @@ async function start(ctx:ModuleContext,s:AgentSession) {
   s.status="starting";s.error=null;await persist(ctx,s);
   let c:Live|undefined;
   try {
-    const context=await readContext(ctx,s);
+    await readInstructions(ctx,s); // fail fast on missing or oversized instructions
     let mcpServers:any[]=s.mcps.map(({id,...server})=>server);
     if(s.workspaceMcp) {
       await ctx.modules.call("internal-remote-mcp","revoke",{sessionId:s.id});
-      const server=await ctx.modules.call("internal-remote-mcp","endpoint",{sessionId:s.id,workspaceId:s.workspaceId,root:s.root,skills:s.skills,daemon:s.daemon});
+      const server=await ctx.modules.call("internal-remote-mcp","endpoint",{sessionId:s.id,workspaceId:s.workspaceId,root:s.root,skills:[...new Set([s.agentFile,...s.skills].filter(Boolean))],inline:s.inline||{},daemon:s.daemon});
       const {id,...config}=server;mcpServers=[...mcpServers,config];
     }
     let sessionServers=mcpServers;
@@ -167,7 +215,7 @@ async function start(ctx:ModuleContext,s:AgentSession) {
       spawned=await ctx.host.process.spawn(grant.grant,{target:{kind:"local"},executable:ctx.host.env.info().platform==="macos"?"/bin/zsh":"/bin/sh",
         args:["-lc",envRemove.length?'exec /usr/bin/env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN "$@"':'exec /usr/bin/env "$@"',"hato-agent",`PATH=${pathEnv}`,launch.executable,...launch.args],cwd:s.root,env:launch.env,envRemove});
     } finally { await ctx.host.capabilities.release(grant.grant); }
-    c={session:s,process:spawned.handle,peer:null as any,subscriptions:[],permissions:new Map(),queued:[],cancelSent:false,stopping:false,context,firstPrompt:!s.contextSent,turn:Date.now(),stderr:"",steering:false};
+    c={session:s,process:spawned.handle,peer:null as any,subscriptions:[],permissions:new Map(),queued:[],cancelSent:false,stopping:false,context:"",firstPrompt:!s.contextSent,turn:Date.now(),stderr:"",steering:false};
     const connection=c;
     c.peer=new JsonRpcPeer(line=>ctx.host.process.write(connection.process,line+"\n"));
     live.set(s.id,c);
@@ -256,11 +304,15 @@ function promptBlocks(text:string,images:ImageAttachment[]) {
 async function prompt(ctx:ModuleContext,c:Live,text:string,images:ImageAttachment[]=[]) {
   const s=c.session;
   if(s.status!=="ready")throw new Error("Agent is not idle");
+  const instructions=instructionContext(s,await readInstructions(ctx,s));
   const handoff = s.handoffPending ? chatHandoff((await ctx.host.db.query<any>(db,"SELECT role,text FROM messages WHERE session_id=? AND role IN ('user','assistant') ORDER BY seq DESC LIMIT 12",[s.id])).reverse()) : "";
   c.turn=Date.now();c.cancelSent=false;s.status="busy";s.error=null;
   await message(ctx,s,"user",text,undefined,undefined,images);await persist(ctx,s);
-  const context=[c.firstPrompt?c.context:"",handoff].filter(Boolean).join("\n\n"); s.handoffPending=false; c.firstPrompt=false;s.contextSent=true;await persist(ctx,s);
-  void c.peer.request("session/prompt",{sessionId:s.sessionId,prompt:promptBlocks(context?`${context}\n\nUser request:\n${text}`:text,images)}).then(async r=>{
+  const context=[instructions.preamble,handoff].filter(Boolean).join("\n\n"); s.handoffPending=false; c.firstPrompt=false;s.contextSent=true;s.sentDigests=instructions.digests;await persist(ctx,s);
+  // The fingerprint index goes only with messages that (re)send instructions: the first one and
+  // after a skill is switched on/off or its text changes. Other messages are sent as typed.
+  const body=(context?`${context}\n\nUser request:\n${text}`:text)+(instructions.preamble&&instructions.index?`\n\n${instructions.index}`:"");
+  void c.peer.request("session/prompt",{sessionId:s.sessionId,prompt:promptBlocks(body,images)}).then(async r=>{
     await enqueue(()=>ctx.host.db.exec(db,"UPDATE permissions SET resolved=1 WHERE session_id=?",[s.id]));
     for(const pending of c.permissions.values())pending.resolve({outcome:{outcome:"cancelled"}});
     c.permissions.clear();
@@ -434,20 +486,31 @@ const mod:AppModule={
       const name=String(p.name||"").trim().slice(0,120);if(!name)throw new Error("Agent name is required");
       // A patch without `profile` renames only.
       if(p.profile!==undefined&&(!p.profile?.executable||!Array.isArray(p.profile.args)||!Array.isArray(p.skills)||!Array.isArray(p.mcps)))throw new Error("Invalid agent configuration");
-      const configChanged=p.profile!==undefined&&JSON.stringify([s.profile,s.model,s.agentFile,s.skills,s.mcps,!!s.workspaceMcp])!==JSON.stringify([p.profile,String(p.model||""),p.agentFile||null,p.skills,p.mcps,!!p.workspaceMcp]);
+      const configChanged=p.profile!==undefined&&JSON.stringify([s.profile,s.model,s.agentFile,s.skills,s.mcps,!!s.workspaceMcp,s.inline||{}])!==JSON.stringify([p.profile,String(p.model||""),p.agentFile||null,p.skills,p.mcps,!!p.workspaceMcp,p.inline||{}]);
       if(configChanged&&["busy","waiting","starting"].includes(s.status))throw new Error("Wait for the agent to finish its turn, or cancel it, before changing its configuration");
       const wasLive=live.has(s.id);
       if(configChanged&&wasLive)await stop(ctx,s.id);
       const newProvider=configChanged&&s.profile.id!==p.profile.id;
-      const instructionsChanged=configChanged&&JSON.stringify([s.agentFile,s.skills])!==JSON.stringify([p.agentFile||null,p.skills]);
+      const instructionsChanged=configChanged&&JSON.stringify([s.agentFile,s.skills,s.inline||{}])!==JSON.stringify([p.agentFile||null,p.skills,p.inline||{}]);
       s.name=name;
       if(typeof p.customName==="boolean")s.customName=p.customName;
       if(configChanged) {
-        Object.assign(s,{profile:p.profile,model:String(p.model||""),agentFile:p.agentFile||null,skills:p.skills,mcps:p.mcps,workspaceMcp:!!p.workspaceMcp,contextSent:newProvider||instructionsChanged?false:s.contextSent});
+        Object.assign(s,{profile:p.profile,model:String(p.model||""),agentFile:p.agentFile||null,skills:p.skills,mcps:p.mcps,workspaceMcp:!!p.workspaceMcp,inline:p.inline&&typeof p.inline==="object"?p.inline:{},contextSent:newProvider||(instructionsChanged&&!s.sentDigests)?false:s.contextSent});
         if(newProvider){s.handoffPending=true;s.sessionId=null;s.configOptions=[];s.models=null;s.modes=null;s.usage=null;s.reasoning="";s.settings={};}
       }
       await persist(ctx,s);
       if(configChanged&&wasLive)await start(ctx,s);
+      return publicSession(s);
+    }),
+    /** Desktop gateway: replace the text of attached Library entries after a Library edit. No restart;
+     *  the next prompt sends the changed text (its fingerprint differs from what was sent). */
+    refreshInline:(ctx,a,meta)=>serialize(String(a.id),async()=>{
+      if(meta.caller!=="daemon-client")throw new Error("Only the desktop gateway refreshes Library text");
+      const s=session(a.id),next={...(s.inline||{})};let changed=false;
+      for(const [k,v] of Object.entries(a.inline||{}))if(k in next&&typeof v==="string"&&next[k]!==v){next[k]=v;changed=true;}
+      if(!changed)return publicSession(s);
+      s.inline=next;await persist(ctx,s);
+      if(s.workspaceMcp)await ctx.modules.call("internal-remote-mcp","updateInline",{sessionId:s.id,inline:next}).catch(()=>{});
       return publicSession(s);
     }),
     /** Drop the conversation: history, pending permissions and queued steering, then a fresh provider session. */

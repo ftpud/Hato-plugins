@@ -50,7 +50,7 @@ async function setup(ctx:ModuleContext) {
   if(visible)await refresh(ctx,true);
 }
 function schedule(ctx:ModuleContext){animate(ctx);if(timer)clearInterval(timer);timer=visible?setInterval(()=>{void refresh(ctx);},1500):null;}
-function checks(items:any[],set:Set<string>,action:string):UiNode[]{return items.map(item=>({type:"toggle",key:`${action}:${item.path||item.id}`,label:item.name||item.id,checked:set.has(item.path||item.id),action,value:item.path||item.id} as UiNode));}
+function checks(items:any[],set:Set<string>,action:string):UiNode[]{return items.map(item=>({type:"toggle",key:`${action}:${item.path||item.id}`,label:(item.source==="library-global"?"Library · ":item.source==="library-project"?"Project library · ":"")+(item.name||item.id),...(item.description?{tooltip:item.description}:{}),checked:set.has(item.path||item.id),action,value:item.path||item.id} as UiNode));}
 const label=(key:string,text:string):UiNode=>({type:"label",key,text,wrap:true,color:"muted",size:"sm"});
 function editorWindow():UiNode {
   const target=editing?rows.find(s=>s.id===editing):null;
@@ -67,10 +67,10 @@ function editorWindow():UiNode {
         {type:"textInput",key:"agent-name",placeholder:"Agent name",value:name,changeAction:"name"},
         {type:"select",key:"provider",label:"Provider",value:profile,options:catalog.profiles.map((p:any)=>({value:p.id,label:p.name})),action:"provider"},
         label("model-note",editing?"Changing the provider starts a new provider session; choose its model in the chat. Changes other than the name restart a connected agent.":"Connect to choose from the provider’s models before sending the first prompt."),
-        {type:"select",key:"agent-file",label:"Agent instructions",value:agentFile,options:[{value:"",label:"No agent file"},...catalog.agentFiles.map((f:any)=>({value:f.path,label:f.path}))],action:"agentFile"},
+        {type:"select",key:"agent-file",label:"Agent instructions",value:agentFile,options:[{value:"",label:"No agent file"},...catalog.agentFiles.map((f:any)=>({value:f.path,label:f.path.startsWith("library:")?f.name:f.path}))],action:"agentFile"},
         label("mcp-heading","Allowed MCP servers"),...checks(catalog.mcps,mcps,"mcp"),
         label("skills-heading","Allowed skills"),...checks(catalog.skills,skills,"skill"),
-        ...(!catalog.skills.length?[label("no-skills","No workspace skills found in .agents/skills.")]:[]),
+        ...(!catalog.skills.length?[label("no-skills","No skills: add them to .agents/skills or the Library (global entries must be available on this machine).")]:[]),
         label("scope-note","Selections control supplied instructions, skills and MCP connections. Provider-native tools keep the provider’s permission controls."),
         label("lifetime","Runs on the workspace machine’s daemon, including local workspaces. Closing this panel or Hato does not stop a running turn."),
       ]},

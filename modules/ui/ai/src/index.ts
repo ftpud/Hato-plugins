@@ -7,7 +7,8 @@ import { chatStyle } from "@hato/sdk/chat-style";
 import { followKey, transcriptItems } from "@hato/sdk/chat-transcript";
 import { uiIcons } from "@hato/sdk/ui-icons";
 import { imageAttachments } from "@hato/sdk/images";
-import type { AppModule, ModuleContext, UiNode, ImageAttachment, SettingField, SettingsSection } from "@hato/sdk/types";
+import type { AppModule, ModuleContext, UiNode, UiColor, ImageAttachment, SettingField, SettingsSection } from "@hato/sdk/types";
+import { LIBRARY_STATE, isLibraryRef, libraryInstructions, libraryItemsFor, libraryRef, libraryRefId } from "@hato/sdk/library";
 import { exportSettings } from "@hato/sdk/settings";
 import { debounce, errMsg } from "@hato/sdk/runtime";
 import { resolveWorkspaceLink } from "@hato/sdk/links";
@@ -102,6 +103,7 @@ let historyScrollReset = 0;
 let skillsOpen = false;
 let modelQuery = "";
 let workspaceSkillState: any = null;
+let libraryState: unknown = null;
 let attachments: ImageAttachment[] = [];
 const connectionAttempts = new Set<string>();
 let draft: string | undefined = undefined;
@@ -245,6 +247,140 @@ function visibleHistory(active: any) {
     hasNewer: active?.windowed ? !!active.hasNewer : window.hasNewer };
 }
 
+// ---- "Connected to this chat": MCP servers and their tools, skills, instructions and agents ----
+type ToolInfo = { name: string; title?: string; description: string; readOnly?: boolean; destructive?: boolean };
+const toolLists = new Map<string, { busy: boolean; tools?: ToolInfo[]; error?: string }>();
+const toolsExpanded = new Set<string>();
+const toolKey = (id: string) => (background ? "bg:" : "chat:") + id;
+const chip = (key: string, text: string, color: UiColor, bg: string): UiNode =>
+  ({ type: "label", key, text, size: "xs", weight: "medium", color, style: { background: bg, radius: 9, paddingX: 7, paddingY: 1, noShrink: true } });
+const tone = { ok: ["success", "#2f9e6a22"], warn: ["warning", "#d8962022"], off: ["muted", "#80808022"], info: ["primary", "#6f7cf622"] } as const;
+const heading = (key: string, text: string, count?: number): UiNode =>
+  ({ type: "label", key, text: count === undefined ? text : `${text} · ${count}`, size: "xs", weight: "semibold", color: "muted" });
+const sourceLabel = (source?: string) => source === "library-global" ? "Library" : source === "library-project" ? "Project library" : "Workspace";
+/** Skills offered in the current workspace: background chats use the agent catalog; desktop chats
+ *  combine .agents/skills with Library skills available on this machine. */
+function offeredSkills(workspace: { name: string; description: string; path: string }[]): { name: string; description: string; path: string; source: string }[] {
+  if (background) return list(backgroundCatalog?.workspaceId === ws?.id ? backgroundCatalog?.skills : []).map((k: any) => ({ ...k, source: k.source || "workspace" }));
+  return [...workspace.map(k => ({ ...k, source: "workspace" })),
+    ...libraryItemsFor(libraryState, ws, "skill").map(i => ({ name: i.name, description: i.description, path: libraryRef(i.id), source: i.projectId ? "library-project" : "library-global" }))];
+}
+function toolsList(id: string): UiNode[] {
+  const entry = toolLists.get(toolKey(id));
+  if (!entry || entry.busy) return [{ type: "label", key: "tools-loading", text: "Loading tools…", size: "xs", color: "muted" }];
+  if (entry.error) return [{ type: "label", key: "tools-error", text: entry.error, size: "xs", color: "danger", wrap: true }];
+  const tools = entry.tools || [];
+  if (!tools.length) return [{ type: "label", key: "tools-none", text: "This server exposes no tools.", size: "xs", color: "muted" }];
+  return [{ type: "column", key: "tools", gap: 2, maxHeight: 220, scroll: true, children: tools.map((t): UiNode => ({ type: "column", key: "t-" + t.name, gap: 1, style: { background: "panel", radius: 6, paddingX: 8, paddingY: 4 }, children: [
+    { type: "row", key: "h", gap: 6, align: "center", children: [
+      { type: "label", key: "n", text: t.name, mono: true, size: "xs", weight: "medium", grow: true, selectable: true },
+      ...(t.readOnly ? [chip("ro", "read-only", tone.ok[0], tone.ok[1])] : []),
+      ...(t.destructive ? [chip("dx", "destructive", tone.warn[0], tone.warn[1])] : []),
+    ] },
+    ...(t.description ? [{ type: "label", key: "d", text: t.description.length > 220 ? t.description.slice(0, 220) + "…" : t.description, size: "xs", color: "muted", wrap: true, tooltip: t.description } as UiNode] : []),
+  ] })) }];
+}
+function connectionsPopover(conv: any, live: any, active: any, connected: boolean, workspaceSkills: { name: string; description: string; path: string }[], skillState: any,
+  providerName: string, modelName: string, modelId: string): UiNode {
+  const servers: any[] = view.mcpServers || [{ id: "internal", name: "Hato" }];
+  const on = new Set<string>(conv.mcpSelection || []);
+  const applied = new Set<string>(background ? [...on] : live?.mcp?.selection || (live?.mcp?.enabled ? ["internal"] : []));
+  const pending = !background && connected && [...new Set([...on, ...applied])].some(id => on.has(id) !== applied.has(id));
+  const session = background ? backgroundPage?.session : null;
+  const idle = !session || !["busy", "waiting", "starting"].includes(session.status);
+  const skills = offeredSkills(workspaceSkills);
+  const enabledSkills = new Set<string>(session?.skills || []);
+  const statusText = connected ? "Connected" : live?.status === "starting" ? "Starting…" : live?.status ? live.status[0].toUpperCase() + live.status.slice(1) : "Not connected";
+  const body: UiNode[] = [];
+  // Agent
+  body.push(heading("agent-h", "AGENT"), { type: "row", key: "agent", gap: 6, align: "center", children: [
+    { type: "label", key: "state", text: "●", size: "xs", color: connected ? "success" : live?.error ? "danger" : "muted", style: { noShrink: true } },
+    { type: "label", key: "who", text: `${providerName}${modelId ? " · " + modelName : ""}`, size: "sm", weight: "medium", grow: true, wrap: true },
+    chip("kind", background ? "background" : "desktop", tone.info[0], tone.info[1]),
+  ] }, { type: "label", key: "where", text: `${statusText} · ${live?.machineId || view.workspace.machineId} · ${view.workspace.root}`, size: "xs", color: "muted", wrap: true, tooltip: view.workspace.root });
+  // MCP servers
+  body.push({ type: "divider", key: "d-mcp" }, heading("mcp-h", "MCP SERVERS", [...on].filter(id => servers.some(s => s.id === id)).length));
+  for (const sv of servers) {
+    const isOn = on.has(sv.id), isApplied = applied.has(sv.id), open = toolsExpanded.has(toolKey(sv.id));
+    const state = isOn && (isApplied || !connected) ? (connected ? ["connected", tone.ok] : ["enabled", tone.info]) : isOn ? ["reconnect to apply", tone.warn] : isApplied ? ["removing on reconnect", tone.warn] : ["off", tone.off];
+    body.push({ type: "column", key: "mcp-" + sv.id, gap: 4, children: [
+      { type: "row", key: "row", gap: 8, align: "center", children: [
+        { type: "button", key: "expand", text: open ? "▾" : "▸", action: "toggleTools:" + sv.id, variant: "ghost", small: true, tooltip: open ? "Hide tools" : "Show the tools this server exposes" },
+        { type: "column", key: "t", gap: 1, grow: true, children: [
+          { type: "label", key: "n", text: sv.name, size: "sm", weight: "medium" },
+          ...(sv.description ? [{ type: "label", key: "d", text: sv.description, size: "xs", color: "muted", wrap: true } as UiNode] : []),
+        ] },
+        chip("st", String(state[0]), (state[1] as any)[0], (state[1] as any)[1]),
+        { type: "switch", key: "s", label: "", checked: isOn, action: "toggleMcp:" + sv.id, disabled: !!background && !!active.busy,
+          tooltip: background ? "Applies immediately; a connected background agent restarts with the new tools" : "Applies on the next connect" },
+      ] },
+      ...(open ? toolsList(sv.id) : []),
+    ] });
+  }
+  if (pending) body.push({ type: "row", key: "apply", gap: 8, align: "center", style: { background: "#d8962014", radius: 8, paddingX: 8, paddingY: 6 }, children: [
+    { type: "label", key: "t", text: "Reconnect to apply MCP changes", size: "xs", grow: true },
+    { type: "button", key: "b", text: "Reconnect", action: "reconnect", small: true, disabled: active.busy },
+  ] });
+  body.push({ type: "button", key: "manage", text: "Manage MCP servers…", iconSvg: uiIcons["sliders-horizontal"], action: "openMcps", variant: "ghost", small: true, tooltip: "Add servers, sign in to remote ones, and choose what background agents can use" });
+  // Skills
+  body.push({ type: "divider", key: "d-skills" });
+  if (background && session) {
+    body.push(heading("skills-h", "SKILLS", enabledSkills.size),
+      { type: "label", key: "skills-note", text: on.has("internal-remote-mcp") ? "The agent gets each enabled skill's name and description, and reads the full text with Workspace tools when a task needs it. Changing them restarts a connected agent." : "Without Workspace tools, enabled skills are sent in full. Turn Workspace tools on so the agent loads them only when needed. Changing them restarts a connected agent.", size: "xs", color: "muted", wrap: true });
+    const missing = [...enabledSkills].filter(p => !skills.some(k => k.path === p));
+    body.push(...skills.map((k): UiNode => ({ type: "row", key: "skill-" + k.path, gap: 8, align: "center", tooltip: k.description || k.path, children: [
+      { type: "column", key: "t", gap: 1, grow: true, children: [
+        { type: "label", key: "n", text: k.name, size: "sm", weight: enabledSkills.has(k.path) ? "medium" : "normal" },
+        { type: "label", key: "d", text: sourceLabel(k.source) + (k.description ? " · " + k.description : ""), size: "xs", color: "muted", wrap: true },
+      ] },
+      { type: "button", key: "insert", text: "Insert", action: "useSkill", value: k.path, small: true, variant: "ghost", tooltip: "Reference this skill in your message" },
+      { type: "switch", key: "s", label: "", checked: enabledSkills.has(k.path), action: "toggleSkill:" + k.path, disabled: !idle || busy === "skills", tooltip: idle ? "Enable for this agent" : "Wait for the agent to finish its turn" },
+    ] })), ...missing.map((p): UiNode => ({ type: "row", key: "missing-" + p, gap: 8, align: "center", children: [
+      { type: "label", key: "n", text: p, size: "xs", color: "warning", grow: true, wrap: true, tooltip: "Enabled, but no longer offered here (removed, or not available on this machine)" },
+      { type: "switch", key: "s", label: "", checked: true, action: "toggleSkill:" + p, disabled: !idle },
+    ] })));
+    if (!skills.length && !missing.length) body.push({ type: "label", key: "skills-none", text: "No skills here. Add them to .agents/skills or the Library.", size: "xs", color: "muted", wrap: true });
+  } else {
+    body.push(heading("skills-h", "SKILLS", skills.length),
+      { type: "label", key: "skills-note", text: "Desktop chats don't preload skills. Insert one to add its instructions to your message.", size: "xs", color: "muted", wrap: true },
+      ...(skills.length ? skills.map((k): UiNode => ({ type: "row", key: "skill-" + k.path, gap: 8, align: "center", tooltip: k.description || k.path, children: [
+        { type: "column", key: "t", gap: 1, grow: true, children: [
+          { type: "label", key: "n", text: k.name, size: "sm" },
+          { type: "label", key: "d", text: sourceLabel(k.source) + (k.description ? " · " + k.description : ""), size: "xs", color: "muted", wrap: true },
+        ] },
+        { type: "button", key: "insert", text: "Insert", action: "useSkill", value: k.path, small: true, variant: "ghost" },
+      ] })) : [{ type: "label", key: "skills-none", text: skillState?.loading ? "Loading workspace skills…" : skillState?.error ? "Could not load workspace skills: " + skillState.error : "No skills here. Add them to .agents/skills or the Library.", size: "xs", color: "muted", wrap: true } as UiNode]));
+  }
+  // Instructions and agents
+  body.push({ type: "divider", key: "d-agents" }, heading("instr-h", "INSTRUCTIONS & AGENTS"));
+  if (session) {
+    const file = session.agentFile ? (backgroundCatalog?.agentFiles || []).find(f => f.path === session.agentFile)?.name || session.agentFile : null;
+    body.push({ type: "label", key: "agent-file", text: "Instruction file: " + (file || "none") + " · change it in agent settings", size: "xs", wrap: true });
+  } else body.push({ type: "label", key: "agent-file", text: "Instruction file: the provider's own (AGENTS.md / CLAUDE.md in the workspace)", size: "xs", color: "muted", wrap: true });
+  const canAgents = background ? on.has("internal-remote-mcp") || on.has("internal-remote-mcp-local") : false;
+  body.push({ type: "label", key: "agents", size: "xs", wrap: true, color: canAgents ? undefined : "muted",
+    text: canAgents ? "Background agents: this chat can create, prompt and stop background agents in this workspace (Workspace tools)."
+      : background ? "Background agents: not reachable. Enable Workspace tools to let this chat start and control them." : "Background agents: not available to desktop chats. Start a new chat to run it as a background agent." });
+  return { type: "popover", key: "mcp-picker", closeAction: "toggleMcpPicker", bottom: 56, heightFraction: 0.85, maxHeight: 640, style: { ...chatStyle.picker, background: "background" }, children: [
+    { type: "row", key: "head", gap: 8, padding: 10, align: "center", children: [
+      { type: "label", key: "t", text: "Connected to this chat", weight: "semibold", grow: true },
+      { type: "button", key: "close-mcp", text: "", iconSvg: uiIcons.x, action: "toggleMcpPicker", tooltip: "Close", style: chatStyle.iconControl },
+    ] },
+    { type: "divider", key: "d1" },
+    // A bounded height (heightFraction) plus grow lets the body scroll instead of being clipped.
+    { type: "column", key: "body", scroll: true, grow: true, gap: 8, padding: 10, children: body },
+  ] };
+}
+async function loadTools(ctx: ModuleContext, id: string) {
+  const key = toolKey(id);
+  toolLists.set(key, { busy: true }); ctx.ui.invalidate();
+  try {
+    const r = background ? await persistent(ctx, "listMcpTools", { id }) : await ctx.modules.call("ai-sessions", "mcpTools", { serverId: id }, { timeoutMs: 95000 });
+    toolLists.set(key, { busy: false, tools: Array.isArray(r?.tools) ? r.tools : Array.isArray(r) ? r : [] });
+  } catch (e) { toolLists.set(key, { busy: false, error: errMsg(e) }); }
+  ctx.ui.invalidate();
+}
+
 const mod: AppModule = {
   id: "ai",
   moduleApiVersion: 1,
@@ -257,6 +393,9 @@ const mod: AppModule = {
     void restoreComposer(ctx);
     workspaceSkillState = ctx.state.get("files.skills") || null;
     ctx.state.watch("files.skills", (value: any) => { workspaceSkillState = value; ctx.ui.invalidate(); });
+    libraryState = ctx.state.get(LIBRARY_STATE) ?? null;
+    // Library edits change what background agents are offered; refresh their catalog.
+    ctx.state.watch(LIBRARY_STATE, (value: any) => { libraryState = value; if (background) void loadCatalog(ctx); ctx.ui.invalidate(); });
     ctx.state.watch("workspace.selected", (v: any) => { const changed = ws?.id !== v?.id; ws = v; if(changed){void restoreComposer(ctx);publishSettings();if(background)leaveBackground(ctx);const saved=v?.view?.ui?.aiBackgroundSession;if(saved)void openBackground(ctx,{workspaceId:v.id,id:saved});else void load(ctx);} });
     ctx.events.on("persistent-agents.chatResponse",(response:any)=>{
       const pending=requests.get(response?.requestId);if(!pending)return;
@@ -404,9 +543,9 @@ const mod: AppModule = {
           const idle = !["busy", "waiting", "starting"].includes(session.status);
           fields.push({ type: "divider", key: "d-instructions" }, section("instructions", "Instructions", [
             field("agent-file", "Instruction file", { type: "select", key: "agent-file", buttonStyle: chatStyle.fieldControl, action: "setAgentFile", disabled: !idle,
-              options: [{ value: "", label: "None" }, ...files.map(f => ({ value: f.path, label: f.path })), ...(session.agentFile && !files.some(f => f.path === session.agentFile) ? [{ value: session.agentFile, label: session.agentFile }] : [])],
+              options: [{ value: "", label: "None" }, ...files.map(f => ({ value: f.path, label: isLibraryRef(f.path) ? f.name : f.path })), ...(session.agentFile && !files.some(f => f.path === session.agentFile) ? [{ value: session.agentFile, label: session.agentFile }] : [])],
               value: session.agentFile || "" }, "Sent with the first prompt. Changing it restarts a connected agent."),
-            { type: "label", key: "agent-skills", text: "Skills: " + (session.skills.join(", ") || "none") + " · edit them in the Agents panel", size: "xs", color: "muted", wrap: true },
+            { type: "label", key: "agent-skills", text: `Skills: ${session.skills.length || "none"} enabled · manage them from the MCP button below the message box`, size: "xs", color: "muted", wrap: true },
           ]));
         }
         const statusText = connected ? "Connected" : live?.status === "starting" ? "Starting…" : live?.status ? live.status[0].toUpperCase() + live.status.slice(1) : "Not connected";
@@ -457,7 +596,7 @@ const mod: AppModule = {
         composer.push({ type: "row", key: "act", gap: 6, align: "center", style: { noShrink: true }, children: [
           { type: "imagePicker", key: "attach", action: "attachImages", iconSvg: uiIcons.paperclip, style: chatStyle.attach, maxFiles: 4, maxBytes: 5 * 1024 * 1024,
             dialogTitle: "Attach pictures", tooltip: "Attach pictures (PNG, JPEG, WebP or GIF)", disabled: busy === "send" },
-          { type: "button", key: "mcp-toggle", text: `MCP ${(conv.mcpSelection || []).length}`, iconSvg: uiIcons.plug, action: "toggleMcpPicker", style: mcpOpen ? { ...chatStyle.control, borderColor: "primary" } : chatStyle.control, tooltip: "MCP servers and skills for this chat" },
+          { type: "button", key: "mcp-toggle", text: `MCP ${(conv.mcpSelection || []).length}` + (background && backgroundPage ? ` · Skills ${backgroundPage.session.skills.length}` : ""), iconSvg: uiIcons.plug, action: "toggleMcpPicker", style: mcpOpen ? { ...chatStyle.control, borderColor: "primary" } : chatStyle.control, tooltip: "What's connected to this chat: MCP servers and tools, skills, instructions and agents" },
           { type: "label", key: "chat-status", grow: true, text: active.steering ? "Steering…" : active.busy ? "Working…" : connected ? "" : live?.status || conv.status || "Offline", size: "xs", color: "muted", tooltip: `${providerName} · ${live?.status || conv.status || "offline"}` },
           { type: "button", key: "context-usage", text: context.value === null ? "—" : `${Math.round(context.value * 100)}%`, iconSvg: usagePieSvg(context.value), iconSize: 18,
             action: "", variant: "ghost", small: true, tooltip: context.tooltip, style: { height: 32, paddingX: 4, gap: 4, noShrink: true, color: "muted" } },
@@ -472,39 +611,7 @@ const mod: AppModule = {
           tooltip: "Drag the divider above the input to resize it",
         });
       }
-      if (mcpOpen && conv) {
-        const servers: any[] = view.mcpServers || [{ id: "internal", name: "Hato" }];
-        const on = new Set<string>(conv.mcpSelection || []);
-        const applied = new Set<string>(live?.mcp?.selection || (live?.mcp?.enabled ? ["internal"] : []));
-        const pending = !background && connected && [...new Set([...on, ...applied])].some(id => on.has(id) !== applied.has(id));
-        kids.push({ type: "popover", key: "mcp-picker", closeAction: "toggleMcpPicker", bottom: 56, maxHeight: 460, style: { ...chatStyle.picker, background: "background" }, children: [
-          { type: "row", key: "head", gap: 8, padding: 10, align: "center", children: [
-            { type: "label", key: "t", text: "Tools for this chat", weight: "semibold", grow: true },
-            iconButton("close-mcp", "x", "toggleMcpPicker", "Close"),
-          ] },
-          { type: "divider", key: "d1" },
-          { type: "column", key: "body", scroll: true, gap: 10, padding: 10, children: [
-            { type: "label", key: "mcp-h", text: "MCP SERVERS", size: "xs", weight: "semibold", color: "muted" },
-            ...servers.map((sv): UiNode => ({ type: "row", key: "mcp-" + sv.id, gap: 8, align: "center", children: [
-              { type: "column", key: "t", gap: 1, grow: true, children: [
-                { type: "label", key: "n", text: sv.name, size: "sm", weight: "medium" },
-                ...(sv.description ? [{ type: "label", key: "d", text: sv.description, size: "xs", color: "muted", wrap: true } as UiNode] : []),
-              ] },
-              { type: "switch", key: "s", label: "", checked: on.has(sv.id), action: "toggleMcp:" + sv.id, disabled: !!background && !!active.busy,
-                tooltip: background ? "Applies immediately; a connected background agent restarts with the new tools" : undefined },
-            ] })),
-            ...(pending ? [{ type: "row", key: "apply", gap: 8, align: "center", style: { background: "#d8962014", radius: 8, paddingX: 8, paddingY: 6 }, children: [
-              { type: "label", key: "t", text: "Reconnect to apply changes", size: "xs", grow: true },
-              { type: "button", key: "b", text: "Reconnect", action: "reconnect", small: true, disabled: active.busy },
-            ] } as UiNode] : []),
-            { type: "button", key: "manage", text: "Manage MCP servers…", iconSvg: uiIcons["sliders-horizontal"], action: "openMcps", variant: "ghost", small: true, tooltip: "Add servers, sign in to remote ones, and choose what background agents can use" },
-            { type: "divider", key: "d2" },
-            { type: "button", key: "skills-h", text: `${skillsOpen ? "▾" : "▸"} Insert a skill · ${skills.length}`, action: "toggleSkills", variant: "ghost", small: true, tooltip: "Reference a workspace skill from .agents/skills in your message" },
-            ...(skillsOpen ? [{ type: "column", key: "skills-picker", scroll: true, maxHeight: 200, gap: 2, children: skills.length ? skills.map((skill): UiNode => ({ type: "button", key: skill.path, text: skill.name + (skill.description ? " · " + skill.description : ""), tooltip: skill.path, action: "useSkill", value: skill.path, variant: "ghost", style: chatStyle.result }))
-              : [{ type: "label", key: "none", text: skillState?.loading ? "Loading workspace skills…" : skillState?.error ? "Could not load workspace skills: " + skillState.error : "No workspace skills in .agents/skills.", size: "xs", color: "muted", wrap: true } as UiNode] } as UiNode] : []),
-          ] },
-        ] });
-      }
+      if (mcpOpen && conv) kids.push(connectionsPopover(conv, live, active, connected, skills, skillState, providerName, modelName, model.value || ""));
       if (modelsOpen) {
         const filtered = model.options.filter((o) => `${o.label} ${modelDetails(o.value)?.description || ""}`.toLowerCase().includes(modelQuery.toLowerCase()));
         kids.push({ type: "popover", key: "model-picker", closeAction: "toggleModels", style: { ...chatStyle.picker, background: "background" }, children: [
@@ -614,7 +721,7 @@ const mod: AppModule = {
     }
     const backgroundAction=["send","chooseModel","cancel","stopBackground","toggleAuto","setPolicy","setProfile","setAgentFile","reconnect","connect","disconnect",
       "reviewBackgroundPermission","revealOlder","loadOlder","olderMessages","revealNewer","newerMessages","latestMessages","collapseHistory"].includes(ev.action)
-      ||ev.action.startsWith("setConfig:")||ev.action.startsWith("toggleMcp:");
+      ||ev.action.startsWith("setConfig:")||ev.action.startsWith("toggleMcp:")||ev.action.startsWith("toggleSkill:");
     if(background && backgroundAction) {
       const selection=background;
       let actionError:string|null=null;
@@ -633,6 +740,12 @@ const mod: AppModule = {
         }
         else if(ev.action==="setProfile"){if(ev.value!==backgroundPage?.session.profile.id)await updateBackground(ctx,{profileId:String(ev.value)});}
         else if(ev.action==="setAgentFile")await updateBackground(ctx,{agentFile:ev.value?String(ev.value):null});
+        else if(ev.action.startsWith("toggleSkill:")) {
+          const path=ev.action.slice("toggleSkill:".length),current=new Set(backgroundPage?.session.skills||[]);
+          if(ev.value)current.add(path);else current.delete(path);
+          busy="skills";ctx.ui.invalidate();
+          await updateBackground(ctx,{skills:[...current]});
+        }
         else if(ev.action.startsWith("toggleMcp:")) {
           const id=ev.action.slice("toggleMcp:".length),current=new Set(backgroundPage?sessionMcpIds(backgroundPage.session):[]);
           if(ev.value)current.add(id);else current.delete(id);
@@ -670,10 +783,25 @@ const mod: AppModule = {
       if (ev.action === "openMcps") { mcpOpen = false; ctx.events.emit("ai.openMcps", {}); ctx.ui.invalidate(); return; }
       if (ev.action === "toggleSkills") { skillsOpen = !skillsOpen; if (skillsOpen) ctx.events.emit("ai.skillsRequested", {}); ctx.ui.invalidate(); return; }
       if (ev.action === "useSkill") {
-        const skill = workspaceSkillState?.workspaceId === ws?.id && workspaceSkillState.skills?.find((s: any) => s.path === ev.value);
-        if (!skill) return;
-        draft = `Use the workspace skill at ${skill.path}.\n` + (ev.inputs.prompt || draft || "");
+        const path = String(ev.value || ""), current = ev.inputs.prompt || draft || "";
+        if (isLibraryRef(path)) {
+          // Library skills are not workspace files: put their instructions into the message.
+          const item = libraryItemsFor(libraryState, ws, "skill").find(i => i.id === libraryRefId(path));
+          if (!item) return;
+          draft = `Use the Library skill "${item.name}":\n\n${libraryInstructions(item)}\n\n---\n` + current;
+        } else {
+          const skill = workspaceSkillState?.workspaceId === ws?.id && workspaceSkillState.skills?.find((s: any) => s.path === path)
+            || (background && list(backgroundCatalog?.skills).find((s: any) => s.path === path));
+          if (!skill) return;
+          draft = `Use the workspace skill at ${skill.path}.\n` + current;
+        }
         skillsOpen = false; mcpOpen = false; ctx.ui.invalidate(); return;
+      }
+      if (ev.action.startsWith("toggleTools:")) {
+        const id = ev.action.slice("toggleTools:".length), key = toolKey(id);
+        if (toolsExpanded.has(key)) toolsExpanded.delete(key);
+        else { toolsExpanded.add(key); if (!toolLists.get(key)?.tools) void loadTools(ctx, id); }
+        ctx.ui.invalidate(); return;
       }
       if (ev.action === "chooseModel" && conv) {
         const model = selectors(view.active.live, true).find((n) => n.key === "cfg-model") as Extract<UiNode, { type: "select" }>;
@@ -687,7 +815,7 @@ const mod: AppModule = {
         ctx.ui.invalidate(); return;
       }
       if (ev.action === "removeImage") { attachments.splice(Number(ev.value), 1); ctx.ui.invalidate(); return; }
-      if (ev.action === "toggleMcpPicker") { mcpOpen = !mcpOpen; if (mcpOpen) ctx.events.emit("ai.skillsRequested", {}); ctx.ui.invalidate(); return; }
+      if (ev.action === "toggleMcpPicker") { mcpOpen = !mcpOpen; if (mcpOpen) { ctx.events.emit("ai.skillsRequested", {}); if (background) void loadCatalog(ctx); toolLists.clear(); } ctx.ui.invalidate(); return; }
       if (ev.action === "toggleSettings") { settingsOpen = !settingsOpen; ctx.ui.invalidate(); return; }
       if (ev.action === "openAdapters") { ctx.events.emit("settings.open", { category: JSON.stringify([ctx.moduleId, ADAPTERS_SECTION]) }); return; }
       if (ev.action === "toggleProviderAuth") {

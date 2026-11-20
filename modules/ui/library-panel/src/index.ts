@@ -21,6 +21,8 @@ let scope: Scope = "global", workspaceId: string | null = null, entries: any[] =
 let selectedId: string | null = null, selectedFile: string | null = null;
 let query = "", error = "", busy = false, generation = 0;
 let form: null | "new" | "details" = null, name = "", description = "", kind = "skill";
+/** Machines a global entry is offered on; empty = all machines. */
+let onMachines = new Set<string>(), knownMachines: { id: string; label: string }[] = [];
 let adding = false, newPath = "", confirmRemove = false, confirmDeleteFile: string | null = null;
 let expanded = new Set<string>(), collapsedDirs = new Set<string>();
 const opened = new Map<string, Opened>();
@@ -165,6 +167,31 @@ function rows(): TreeRow[] {
   return result;
 }
 
+const machineLabel = (id: string) => knownMachines.find(m => m.id === id)?.label || id;
+function availabilityText(entry: any): string {
+  if (entry.projectId) return "Available in this project's chats and agents on its machine";
+  const list: string[] = entry.machines || [];
+  return list.length ? "Available on: " + list.map(machineLabel).join(", ") : "Available on all machines";
+}
+function availabilityPicker(): UiNode {
+  const machines = [...knownMachines, ...[...onMachines].filter(id => !knownMachines.some(m => m.id === id)).map(id => ({ id, label: id }))];
+  return { type: "column", key: "machines", gap: 4, children: [
+    { type: "label", key: "h", text: "Available on", size: "xs", weight: "semibold", color: "muted" },
+    { type: "row", key: "all", gap: 8, align: "center", children: [
+      { type: "label", key: "t", text: "All machines", size: "sm", grow: true },
+      { type: "switch", key: "s", label: "", checked: !onMachines.size, action: "allMachines" },
+    ] },
+    ...machines.map((m): UiNode => ({ type: "row", key: "m-" + m.id, gap: 8, align: "center", children: [
+      { type: "label", key: "t", text: m.label, size: "sm", grow: true, tooltip: m.id, color: onMachines.size ? undefined : "muted" },
+      { type: "switch", key: "s", label: "", checked: onMachines.has(m.id), action: "toggleMachine:" + m.id },
+    ] })),
+    label("machines-hint", "Machines appear here after you open a project on them. Only chats and agents on selected machines see this entry.", true),
+  ] };
+}
+async function loadMachines(ctx: ModuleContext) {
+  try { knownMachines = await ctx.modules.call("library", "machines", {}); } catch { knownMachines = []; }
+}
+
 function entryActions(entry: any): UiNode[] {
   const out: UiNode[] = [{ type: "row", key: "entry", gap: 4, align: "center", children: [
     { type: "label", key: "name", text: entry.name, grow: true, weight: "semibold", size: "sm" },
@@ -173,6 +200,7 @@ function entryActions(entry: any): UiNode[] {
     btn("remove", "", "askRemove", { icon: uiIcons.trash, tooltip: "Remove this entry" }),
   ] }];
   if (entry.description) out.push(label("entry-description", entry.description, true));
+  if (entry.kind !== "workflow") out.push({ type: "label", key: "availability", text: availabilityText(entry), size: "xs", color: "muted", wrap: true });
   if (adding) out.push({ type: "row", key: "add-row", gap: 6, align: "center", children: [
     { type: "textInput", key: "newPath", value: newPath, changeAction: "newPath", submitAction: "addFile", placeholder: "references/guide.md or scripts/check.sh", grow: true },
     btn("add-confirm", "Add", "addFile", { disabled: !newPath.trim() }),
@@ -220,6 +248,7 @@ const mod: AppModule = {
       opened.delete(key);
       if (item.document) void ctx.host.resources.release(item.document).catch(() => {});
     });
+    await loadMachines(ctx);
     await refresh(ctx);
   },
   snapshot: () => ({ scope, selectedId, selectedFile, expanded: [...expanded], collapsedDirs: [...collapsedDirs], opened: Object.fromEntries(opened) }),
@@ -241,6 +270,7 @@ const mod: AppModule = {
       { type: "select", key: "kind", value: kind, action: "kind", disabled: form === "details", options: [{ value: "skill", label: "Skill · SKILL.md" }, { value: "agent", label: "Agent instructions · AGENT.md" }] },
       { type: "textInput", key: "name", value: name, placeholder: "Name", changeAction: "name", submitAction: "create" },
       { type: "textInput", key: "description", value: description, placeholder: "When should this be used?", changeAction: "description" },
+      ...(scope === "global" && kind !== "workflow" ? [availabilityPicker()] : []),
       { type: "row", key: "create-actions", gap: 6, children: [
         { type: "button", key: "create", text: form === "details" ? "Save details" : "Create", action: "create", small: true, disabled: busy || !name.trim() },
         btn("cancel", "Cancel", "cancelCreate")] },
@@ -253,7 +283,7 @@ const mod: AppModule = {
     ] });
     if (entry) children.push(...entryActions(entry));
     if (!workspaceId) children.push(label("no-workspace", "Select a project or task to open Library files in the editor.", true));
-    children.push(label("footer", "Agents read these files on demand through Library MCP tools. Scripts are stored as text and never run automatically.", true));
+    children.push(label("footer", "Skills and agents show up in chats (Tools → Skills) and in the Agents panel on the machines they are available on. Nested files are read on demand through Library MCP tools; scripts are never run automatically.", true));
     return { type: "column", key: "library", grow: true, padding: 12, gap: 8, children };
   },
   async onEvent(ctx, ev) {
@@ -277,8 +307,10 @@ const mod: AppModule = {
       else if (action === "description") description = text;
       else if (action === "kind") kind = text === "agent" ? "agent" : "skill";
       else if (action === "newPath") newPath = text;
-      else if (action === "details" && current) { form = "details"; name = current.name; description = current.description; kind = current.kind; }
-      else if (action === "new") { form = "new"; name = description = ""; }
+      else if (action === "details" && current) { form = "details"; name = current.name; description = current.description; kind = current.kind; onMachines = new Set(current.machines || []); void loadMachines(ctx).then(() => ctx.ui.invalidate()); }
+      else if (action === "new") { form = "new"; name = description = ""; onMachines = new Set(); void loadMachines(ctx).then(() => ctx.ui.invalidate()); }
+      else if (action === "allMachines") { if (value) onMachines.clear(); else onMachines = new Set(knownMachines.map(m => m.id)); }
+      else if (action.startsWith("toggleMachine:")) { const id = action.slice("toggleMachine:".length); if (value) onMachines.add(id); else onMachines.delete(id); }
       else if (action === "cancelCreate") form = null;
       else if (action === "startAdd" && current) { adding = true; confirmRemove = false; confirmDeleteFile = null; expanded.add(current.id); }
       else if (action === "cancelAdd") { adding = false; newPath = ""; }
@@ -311,7 +343,7 @@ const mod: AppModule = {
         else if (action === "openRoot" && current) await openFile(ctx, current.id, rootOf(current.kind));
         else if (action === "openFile" && current) await openFile(ctx, current.id, text);
         else if (action === "create") {
-          const saved = await ctx.modules.call("library", "save", { ...args(), name, description, kind,
+          const saved = await ctx.modules.call("library", "save", { ...args(), name, description, kind, ...(scope === "global" && kind !== "workflow" ? { machines: [...onMachines] } : {}),
             ...(form === "details" && entry ? { id: entry.id, expectedRevision: entry.revision } : { expectedRevision: null }) });
           const created = form === "new";
           form = null; selectedId = saved.id; expanded.add(saved.id); await refresh(ctx);
