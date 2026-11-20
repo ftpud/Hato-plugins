@@ -10,6 +10,8 @@ import { taskDialog, taskBranchChoice, branchValue } from "./task-dialog";
 import { projectsBranding } from "./branding";
 
 let tree: any[] = [];
+let treeRequest = 0;
+let publishSettings: () => void = () => {};
 let selected: string | null = null;
 let error: string | null = null;
 let treeError: string | null = null;
@@ -94,8 +96,19 @@ function statBadges(workspaceId: string) {
 }
 
 async function reload(ctx: ModuleContext) {
-  try { tree = await ctx.modules.call("projects", "tree"); treeError = null; scheduleStats(ctx); }
-  catch (e) { treeError = errMsg(e); }
+  const request = ++treeRequest;
+  try {
+    const next: any[] = await ctx.modules.call("projects", "tree");
+    if (request !== treeRequest) return;
+    const orderChanged = next.length !== tree.length || next.some((p, i) => p.id !== tree[i].id || p.name !== tree[i].name);
+    tree = next;
+    treeError = null;
+    if (orderChanged) publishSettings();
+    scheduleStats(ctx);
+  } catch (e) {
+    if (request !== treeRequest) return;
+    treeError = errMsg(e);
+  }
   ctx.ui.invalidate();
 }
 
@@ -222,7 +235,9 @@ const mod: AppModule = {
       if (typeof privacy.label === "string" && privacy.label.trim()) remoteLabel = privacy.label.trim();
     }
     const savePrivacy = () => ctx.modules.call("persistence", "settings.set", { key: "projects-panel.remoteAddress", value: { hide: hideRemoteAddress, label: remoteLabel } });
-    exportSettings(ctx, () => [{ key: "projects-panel", title: "Projects", fields: [
+    publishSettings = exportSettings(ctx, () => [{ key: "projects-panel", title: "Projects", fields: [
+      ...(tree.length ? [{ key: "order", label: "Project order", type: "order" as const,
+        items: tree.map(p => ({ id: p.id, label: p.name })), value: JSON.stringify(tree.map(p => p.id)) }] : []),
       { key: "hoverOpacity", label: "Row hover opacity", type: "range", value: String(Math.round(hoverOpacity * 100)), min: 10, max: 100, step: 5, unit: "%",
         description: "How solid the highlight is when the pointer is over a project or task." },
       { key: "hideRemoteAddress", label: "Hide SSH user and host", type: "toggle", value: hideRemoteAddress,
@@ -230,6 +245,11 @@ const mod: AppModule = {
       { key: "remoteLabel", label: "Label for SSH projects", type: "text", value: remoteLabel, placeholder: "Remote",
         description: "Shown instead of the SSH address when it is hidden." },
     ] }], async (_section, key, value) => {
+      if (key === "order") {
+        await ctx.modules.call("projects", "setOrder", { order: value });
+        await reload(ctx);
+        return;
+      }
       if (key === "hideRemoteAddress" && typeof value === "boolean") { hideRemoteAddress = value; await savePrivacy(); ctx.ui.invalidate(); return; }
       if (key === "remoteLabel" && typeof value === "string") { remoteLabel = value.trim().slice(0, 40) || "Remote"; await savePrivacy(); ctx.ui.invalidate(); return; }
       const v = Math.round(Number(value)) / 100;
@@ -251,7 +271,7 @@ const mod: AppModule = {
     if (prev?.diffStats) diffStats = prev.diffStats;
     await reload(ctx);
   },
-  deactivate() { taskRequest++; if (animation) clearInterval(animation); animation = null; if (statsTimer) clearTimeout(statsTimer); statsTimer = null; },
+  deactivate() { taskRequest++; treeRequest++; if (animation) clearInterval(animation); animation = null; if (statsTimer) clearTimeout(statsTimer); statsTimer = null; },
   snapshot: () => ({ taskFormFor, taskQuery, taskBranch, taskBranches, addForm, addSource, sshAuth, addValues, filter, diffStats }),
   render(): UiNode {
     const proj = selectedProject();

@@ -1,11 +1,30 @@
 // projects: registration of local and SSH projects, Git detection on the project's own machine,
 // and the project/task tree model. Persistence goes through the `persistence` service.
 import type { AppModule, ModuleContext } from "@hato/sdk/types";
+import { exportMcpTools } from "@hato/sdk/mcp";
 import { errMsg, sshFromProfile, sshProfileSpec, targetFor, workspaceGrant, wslLocation, type WorkspaceDescriptor } from "@hato/sdk/runtime";
+import { parseOrder } from "@hato/sdk/settings-order";
 
 interface GitInfo { isGit: boolean; topLevel: string | null; hasCommits: boolean; error?: string; checkedAt: number }
+interface Project { id: string; name: string; kind: "local" | "ssh"; rootPath: string; sshProfileId: string | null; expanded: boolean }
 const gitCache = new Map<string, GitInfo>();
 const offline = new Map<string, string>(); // projectId -> last connectivity error
+const ORDER_KEY = "projects.order";
+const TASK_TIMEOUT_MS = 180000;
+let mcp: ReturnType<typeof exportMcpTools>;
+
+async function orderedProjects(ctx: ModuleContext): Promise<Project[]> {
+  const [projects, savedOrder] = await Promise.all([
+    ctx.modules.call<Project[]>("persistence", "projects.list"),
+    ctx.modules.call("persistence", "settings.get", { key: ORDER_KEY }),
+  ]);
+  const positions = new Map<string, number>();
+  if (Array.isArray(savedOrder)) for (const id of savedOrder) {
+    if (typeof id === "string" && !positions.has(id)) positions.set(id, positions.size);
+  }
+  return projects.sort((a, b) => (positions.get(a.id) ?? positions.size) - (positions.get(b.id) ?? positions.size)
+    || a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+}
 
 function projectDesc(p: any, ssh: any): WorkspaceDescriptor {
   return {
@@ -83,18 +102,63 @@ const mod: AppModule = {
     // Background git detection (never blocks activation; SSH projects may be offline).
     const all = await ctx.modules.call("persistence", "projects.list");
     for (const p of all) if (!gitCache.has(p.id)) refreshGit(ctx, p.id);
+    mcp = exportMcpTools(ctx, "Projects", [
+      {
+        name: "list",
+        title: "List projects",
+        description: "List all registered Hato projects and their IDs for creating tasks. Includes the project name, location, root path and whether it contains the session workspace.",
+        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+        annotations: { readOnlyHint: true },
+        async handler(_args, scope) {
+          const current = await ctx.modules.call<WorkspaceDescriptor>("workspace", "resolve", { workspaceId: scope.workspaceId });
+          return (await orderedProjects(ctx)).map(p => ({ id: p.id, name: p.name, kind: p.kind, rootPath: p.rootPath,
+            current: p.id === current.projectId, isGit: gitCache.get(p.id)?.isGit ?? null }));
+        },
+      },
+      {
+        name: "create_task",
+        title: "Create a task in any project",
+        description: "Create a linked Git worktree in a registered Hato project using its ID from projects__list. An optional branch can be existing or new. The user's workspace selection is preserved.",
+        inputSchema: { type: "object", additionalProperties: false, required: ["projectId"], properties: {
+          projectId: { type: "string", description: "Project ID from projects__list." },
+          name: { type: "string", maxLength: 100, description: "Task name. Defaults to the branch name." },
+          branch: { type: "string", maxLength: 200, description: "Branch name. A new branch is generated when omitted." },
+        } },
+        annotations: { destructiveHint: false },
+        timeoutMs: TASK_TIMEOUT_MS,
+        async handler(args, scope) {
+          const projectId = typeof args.projectId === "string" ? args.projectId.trim() : "";
+          const name = typeof args.name === "string" ? args.name.trim() : "";
+          const branch = typeof args.branch === "string" ? args.branch.trim() : "";
+          if (!projectId) throw new Error("Provide a project ID from projects__list");
+          if (!name && !branch) throw new Error("Provide a task name or a branch");
+          await ctx.modules.call("workspace", "resolve", { workspaceId: scope.workspaceId });
+          const task = await ctx.modules.call("git-tasks", "create", { projectId, name, branch, select: false }, { timeoutMs: TASK_TIMEOUT_MS });
+          return { ...task, projectId, workspaceId: `task:${task.id}` };
+        },
+      },
+    ]);
   },
+  canSwap: () => ({ ok: (mcp?.pending() ?? 0) === 0, reason: "A Projects MCP command is running" }),
   snapshot: () => ({ git: Array.from(gitCache.entries()) }),
   methods: {
     health: async (ctx) => { await ctx.modules.call("persistence", "projects.list"); return { ok: true }; },
 
-    /** Tree model consumed by projects-panel. Sorted by name (case-insensitive). */
+    async setOrder(ctx, a) {
+      const projects = await ctx.modules.call<Project[]>("persistence", "projects.list");
+      const value = parseOrder(a.order, projects.map(p => p.id));
+      await ctx.modules.call("persistence", "settings.set", { key: ORDER_KEY, value });
+      ctx.events.emit("projects.changed", { orderChanged: true });
+      return null;
+    },
+
+    /** Tree model consumed by projects-panel, in the user's saved order. */
     async tree(ctx) {
-      const projects = await ctx.modules.call("persistence", "projects.list");
+      const projects = await orderedProjects(ctx);
       const tasks = await ctx.modules.call("persistence", "tasks.list", {});
       const profiles = await ctx.modules.call("persistence", "ssh.list");
       const byProfile = new Map(profiles.map((p: any) => [p.id, p]));
-      const out = projects.map((p: any) => {
+      return projects.map(p => {
         const git = gitCache.get(p.id);
         const ssh: any = p.kind === "ssh" ? byProfile.get(p.sshProfileId) : null;
         return {
@@ -108,8 +172,6 @@ const mod: AppModule = {
           tasks: tasks.filter((t: any) => t.projectId === p.id).map((t: any) => ({ id: t.id, name: t.name, branch: t.branch, worktreePath: t.worktreePath, status: t.status })),
         };
       });
-      out.sort((a: any, b: any) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
-      return out;
     },
 
     /** Remove a project from Hato. Its files stay on disk; tasks must be deleted first. */
