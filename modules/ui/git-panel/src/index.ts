@@ -1,6 +1,7 @@
 import type { AppModule, ModuleContext, UiNode } from "@hato/sdk/types";
 import { errMsg } from "@hato/sdk/runtime";
 import { diffTab } from "@hato/sdk/git";
+import { exportMcpTools } from "@hato/sdk/mcp";
 import { changeBadge, changeTree, type ChangeNode, type Change } from "./model";
 import { exportSettings } from "@hato/sdk/settings";
 import { fileIcons } from "@hato/sdk/file-icons";
@@ -11,20 +12,42 @@ interface Changeset { id: string; name: string; paths: string[]; message: string
 interface Draft { sets: Changeset[]; active: string }
 let ws: any = null, status: any = null;
 let drafts: Record<string, Draft> = {};
-let draftsLoaded = new Set<string>();
+const draftLoads = new Map<string, Promise<void>>();
+const draftWrites = new Map<string, Promise<void>>();
+let mcp: ReturnType<typeof exportMcpTools>;
 let selected = new Set<string>();
 let collapsed = new Set<string>();
 let error = "", notice = "", busy = false, loading = false, dirty = false, visible = false;
 let autoRefresh = true;
 let epoch = 0, query = "", newSet = false;
-const draft = (): Draft => drafts[ws.id] ||= { sets: [{ id: "main", name: "Changes", paths: [], message: "" }], active: "main" };
-const active = () => draft().sets.find(s => s.id === draft().active) || draft().sets[0];
+const emptyDraft = (): Draft => ({ sets: [{ id: "main", name: "Changes", paths: [], message: "" }], active: "main" });
+const draft = (id = ws.id): Draft => drafts[id] ?? emptyDraft();
+const active = (d = draft()) => d.sets.find(s => s.id === d.active) || d.sets[0];
 function files(): Change[] {
   const d = draft(), a = active();
   return (status?.files || []).filter((f: Change) => a.id === "main" ? !d.sets.some(s => s.id !== "main" && s.paths.includes(f.path)) : a.paths.includes(f.path));
 }
-function save(ctx: ModuleContext) {
-  return ctx.modules.call("persistence", "settings.set", { key: `git-panel.changesets.${ws.id}`, value: draft() });
+async function loadDraft(ctx: ModuleContext, id: string) {
+  if (drafts[id]) return;
+  const pending = draftLoads.get(id);
+  if (pending) return pending;
+  const loading = (async () => {
+    const saved = await ctx.modules.call("persistence", "settings.get", { key: `git-panel.changesets.${id}` });
+    drafts[id] = saved?.sets?.[0]?.id === "main" ? saved : emptyDraft();
+  })();
+  draftLoads.set(id, loading);
+  try { await loading; } finally { draftLoads.delete(id); }
+}
+function save(ctx: ModuleContext, id: string, rollback?: () => void) {
+  const d = draft(id);
+  const value = { ...d, sets: d.sets.map(s => ({ ...s, paths: [...s.paths] })) };
+  const write = (draftWrites.get(id) ?? Promise.resolve()).catch(() => {}).then(async () => {
+    try { await ctx.modules.call("persistence", "settings.set", { key: `git-panel.changesets.${id}`, value }); }
+    catch (e) { if (draftWrites.get(id) === write) rollback?.(); throw e; }
+    finally { if (draftWrites.get(id) === write) draftWrites.delete(id); }
+  });
+  draftWrites.set(id, write);
+  return write;
 }
 async function refresh(ctx: ModuleContext) {
   if (!ws) { ctx.state.set("git-panel.panelBadge.git", 0); return; }
@@ -35,14 +58,9 @@ async function refresh(ctx: ModuleContext) {
     const [r] = await Promise.all([
       ctx.modules.call("git", "status", { workspaceId: id }, { timeoutMs: 45000 }),
       loadStashes(ctx, id, () => mine === epoch),
+      loadDraft(ctx, id),
     ]);
     if (mine !== epoch) return;
-    if (!draftsLoaded.has(id)) {
-      const saved = await ctx.modules.call("persistence", "settings.get", { key: `git-panel.changesets.${id}` });
-      if (mine !== epoch) return;
-      if (saved?.sets?.[0]?.id === "main") drafts[id] = saved;
-      draftsLoaded.add(id);
-    }
     status = r; error = "";
     ctx.state.set("git-panel.panelBadge.git", r.files.length);
     selected = new Set([...selected].filter(p => r.files.some((f: Change) => f.path === p)));
@@ -74,7 +92,7 @@ const mod: AppModule = {
   id: "git-panel", moduleApiVersion: 1,
   async activate(ctx, prev) {
     collapsed = new Set(prev?.collapsed || []);
-    drafts = prev?.drafts || {}; draftsLoaded = new Set(Object.keys(drafts)); ws = ctx.state.get("workspace.selected");
+    drafts = prev?.drafts || {}; ws = ctx.state.get("workspace.selected");
     const saved = await ctx.modules.call("persistence", "settings.get", { key: "git-panel.autoRefresh" });
     const old = saved == null ? await ctx.modules.call("persistence", "settings.get", { key: "git-panel.pollSeconds" }) : null;
     autoRefresh = typeof saved === "boolean" ? saved : old !== 0;
@@ -86,6 +104,26 @@ const mod: AppModule = {
       await ctx.modules.call("persistence", "settings.set", { key: "git-panel.autoRefresh", value }); autoRefresh = value;
       if (visible && value) void refresh(ctx);
     });
+    mcp = exportMcpTools(ctx, "Git changes", [{
+      name: "set_commit_message",
+      title: "Set the draft commit message",
+      description: "Replace the active changeset's draft commit message in this session's workspace. Supports multiple lines. An empty string clears the draft. The message is saved for review in the Git changes panel.",
+      inputSchema: { type: "object", additionalProperties: false, required: ["message"], properties: { message: { type: "string", maxLength: 131072 } } },
+      annotations: { idempotentHint: true, destructiveHint: false },
+      async handler(args, scope) {
+        const message = args.message;
+        if (typeof message !== "string" || message.length > 131072 || message.includes("\0")) throw new Error("Provide a commit message of up to 131072 characters without NUL characters");
+        const { id } = await ctx.modules.call("workspace", "resolve", { workspaceId: scope.workspaceId });
+        await loadDraft(ctx, id);
+        if (busy) throw new Error("Wait for the Git operation to finish before editing the draft");
+        const changeset = active(draft(id));
+        const previous = changeset.message;
+        changeset.message = message;
+        try { await save(ctx, id, () => { changeset.message = previous; }); }
+        finally { if (ws?.id === id) ctx.ui.invalidate(); }
+        return { workspaceId: id, changesetId: changeset.id };
+      },
+    }]);
     visible = !!(ctx.state.get("workspace-layout.panels") as any)?.git;
     ctx.state.watch("workspace.selected", (v: any) => {
       if (ws?.id !== v?.id) { epoch++; loading = false; status = null; ctx.state.set("git-panel.panelBadge.git", 0); selected.clear(); query = ""; resetStashes(); error = ""; notice = ""; }
@@ -95,7 +133,7 @@ const mod: AppModule = {
     ctx.events.on("git.changed", (v: any) => { if (v.workspaceId === ws?.id) { dirty = true; if (autoRefresh) void refresh(ctx); } });
     await refresh(ctx);
   },
-  canSwap: () => ({ ok: !busy, reason: "A Git operation is running" }),
+  canSwap: () => ({ ok: !busy && !draftWrites.size && !(mcp?.pending() ?? 0), reason: "A Git operation or draft edit is in progress" }),
   deactivate() { epoch++; }, snapshot: () => ({ drafts, collapsed: [...collapsed] }),
   render(): UiNode {
     if (!ws) return { type: "label", key: "empty", text: "Select a project or task.", color: "muted", padding: 12 };
@@ -182,11 +220,14 @@ const mod: AppModule = {
   },
   async onEvent(ctx, ev) {
     if (!ws || busy) return;
-    const id = ws.id;
+    const id = ws.id, mine = epoch;
+    let ownsGitOperation = false;
     try {
+      if (!drafts[id]) await loadDraft(ctx, id);
+      if (mine !== epoch || busy) return;
       const a = active(), d = draft();
       if (ev.action === "filter") query = String(ev.value ?? "");
-      else if (ev.action === "message") { a.message = String(ev.value ?? ""); await save(ctx); }
+      else if (ev.action === "message") { a.message = String(ev.value ?? ""); await save(ctx, id); }
       else if (ev.action === "folder") { const key = String(ev.value); collapsed.has(key) ? collapsed.delete(key) : collapsed.add(key); }
       else if (ev.action.startsWith("folderCheck:")) {
         const token = ev.action.slice("folderCheck:".length), split = token.indexOf(":"), scope = token.slice(0, split), path = token.slice(split + 1);
@@ -198,7 +239,7 @@ const mod: AppModule = {
       else if (ev.action.startsWith("group:")) {
         const group = files().filter(f => f.path.toLowerCase().includes(query.toLowerCase()) && (f.kind === "untracked") === (ev.action === "group:true"));
         const remove = group.every(f => selected.has(f.path)); for (const f of group) remove ? selected.delete(f.path) : selected.add(f.path);
-      } else if (ev.action === "set") { d.active = String(ev.value ?? ev.rowKey); selected.clear(); await save(ctx); }
+      } else if (ev.action === "set") { d.active = String(ev.value ?? ev.rowKey); selected.clear(); await save(ctx, id); }
       else if (ev.action === "newSet") newSet = true;
       else if (ev.action === "cancelSet") newSet = false;
       else if (ev.action === "createSet" || ev.action === "move") {
@@ -211,18 +252,20 @@ const mod: AppModule = {
         const paths = files().filter(f => selected.has(f.path)).map(f => f.path);
         for (const s of d.sets) s.paths = s.paths.filter(p => !paths.includes(p));
         if (target !== "main") d.sets.find(s => s.id === target)!.paths.push(...paths);
-        d.active = target; selected.clear(); await save(ctx);
-      } else if (ev.action === "removeSet" && a.id !== "main") { d.sets = d.sets.filter(s => s !== a); d.active = "main"; selected.clear(); await save(ctx); }
+        d.active = target; selected.clear(); await save(ctx, id);
+      } else if (ev.action === "removeSet" && a.id !== "main") { d.sets = d.sets.filter(s => s !== a); d.active = "main"; selected.clear(); await save(ctx, id); }
       else if (ev.action === "edit") await ctx.modules.call("workspace", "view.patch", { workspaceId: id, patch: { previewPath: String(ev.value) } });
       else if (ev.action === "diff") await ctx.modules.call("workspace", "view.patch", { workspaceId: id, patch: { previewPath: diffTab(String(ev.value)) } });
       else if (ev.action === "refresh") await refresh(ctx);
       else if (ev.action.startsWith("stash.")) await stashEvent(ctx, ev, stashEnv(ctx, id));
       else {
-        busy = true; error = ""; notice = ""; ctx.ui.invalidate();
+        ownsGitOperation = busy = true; error = ""; notice = ""; ctx.ui.invalidate();
         if (ev.action === "commit" || ev.action === "commitPush") {
           const paths = files().filter(f => selected.has(f.path)).map(f => f.path);
           const r = await ctx.modules.call("git", "commit", { workspaceId: id, paths, message: a.message }, { timeoutMs: 120000 });
-          a.message = ""; if (ws?.id === id) { selected.clear(); await save(ctx); notice = r.output; }
+          a.message = "";
+          await save(ctx, id);
+          if (ws?.id === id) { selected.clear(); notice = r.output; }
           if (ev.action === "commitPush") {
             try { await ctx.modules.call("git", "network", { workspaceId: id, operation: "push" }, { timeoutMs: 120000 }); }
             catch (e) { throw new Error(`Commit succeeded; push failed. Use Push to retry. ${errMsg(e)}`); }
@@ -233,7 +276,7 @@ const mod: AppModule = {
         if (ws?.id === id) await refresh(ctx);
       }
     } catch (e) { if (ws?.id === id) error = errMsg(e); }
-    finally { busy = false; ctx.ui.invalidate(); }
+    finally { if (ownsGitOperation) busy = false; ctx.ui.invalidate(); }
   },
 };
 export default mod;
