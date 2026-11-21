@@ -7,23 +7,28 @@ export const LETTER: Record<string, string> = { modified: "M", added: "A", delet
 export const COLOR: Record<string, TreeRow["iconColor"]> = { added: "success", untracked: "success", deleted: "warning", conflicted: "warning", renamed: "accent", copied: "accent", modified: "accent", typechange: "accent" };
 export const LABEL: Record<string, string> = { modified: "Modified", added: "Added", deleted: "Deleted", renamed: "Renamed", copied: "Copied", untracked: "Untracked", conflicted: "Conflicted", typechange: "Type changed" };
 
-export function changeBadge(c: Change): string {
+type FileChange = Pick<Change, "path" | "kind"> & Partial<Change>;
+export const CHANGE_ROW_HEIGHT = 28;
+export const changeGroups = <T extends FileChange>(files: T[]) => [
+  { title: "Changes", files: files.filter(f => f.kind !== "untracked") },
+  { title: "Untracked", files: files.filter(f => f.kind === "untracked") },
+];
+
+export function changeBadge(c: FileChange): string {
   const counts = c.binary ? "bin" : [c.additions ? `+${c.additions}` : "", c.deletions ? `−${c.deletions}` : ""].filter(Boolean).join(" ");
   return [LETTER[c.kind] || "?", counts].filter(Boolean).join(" ");
 }
 
-export function changeRows(changes: Change[], selected: string | null): TreeRow[] {
-  return changes.slice(0, 5000).map((c) => {
-    const at = c.path.lastIndexOf("/");
-    const dir = at < 0 ? "" : c.path.slice(0, at);
-    const state = [LABEL[c.kind] || c.kind, c.staged && c.unstaged ? "partly staged" : c.staged ? "staged" : ""].filter(Boolean).join(", ");
-    return {
-      key: c.path, label: c.path.slice(at + 1), depth: 0, expandable: false, expanded: false,
-      selected: c.path === selected, badge: changeBadge(c),
-      detail: [c.origPath ? `from ${c.origPath}` : dir, state].filter(Boolean).join(" · "),
-      iconSvg: fileIcons.file, iconColor: COLOR[c.kind] || "muted",
-    };
-  });
+export function changeFileRow(c: FileChange, selected: string | null = null): TreeRow {
+  const at = c.path.lastIndexOf("/");
+  const status = LABEL[c.kind] || c.kind;
+  return {
+    key: c.path, label: c.path.slice(at + 1), depth: 0, expandable: false, expanded: false,
+    selected: c.path === selected, badge: changeBadge(c),
+    detail: at < 0 ? undefined : c.path.slice(0, at),
+    tooltip: c.origPath ? `${c.origPath} → ${c.path}` : `${status} · ${c.path}`,
+    iconSvg: fileIcons.file, iconColor: COLOR[c.kind] || "muted",
+  };
 }
 
 /** Fingerprint so refreshes only notify the viewer when status changes. */

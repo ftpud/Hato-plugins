@@ -1,6 +1,7 @@
 // Declarations (types and methods) of a source file, for per-declaration editor annotations.
 // A lexical scan: no language server needed (they are opt-in per project). Grammars without a
 // scanner get no declarations.
+import { javascriptDeclarations } from "./js-declarations";
 
 export interface Declaration {
   kind: "type" | "method"; name: string;
@@ -91,6 +92,11 @@ export function javaDeclarations(text: string): Declaration[] {
   return out.sort((a, b) => a.line - b.line || (a.kind === b.kind ? a.start - b.start : a.kind === "type" ? -1 : 1));
 }
 
-const scanners: Record<string, (text: string) => Declaration[]> = { java: javaDeclarations };
-export const declarationsFor = (grammar: string | undefined, text: string) => (grammar && scanners[grammar] ? scanners[grammar](text) : []);
-export const hasDeclarations = (grammar: string | undefined) => !!grammar && grammar in scanners;
+const scanners = new Map<string, (text: string) => Declaration[]>([
+  ["java", javaDeclarations],
+  ["javascript", text => javascriptDeclarations(text, true)], // JS, JSX, MJS and CJS
+  ["typescript", javascriptDeclarations],
+  ["tsx", text => javascriptDeclarations(text, true)],
+]);
+export const declarationsFor = (grammar: string | undefined, text: string) => scanners.get(grammar ?? "")?.(text) ?? [];
+export const hasDeclarations = (grammar: string | undefined) => scanners.has(grammar ?? "");

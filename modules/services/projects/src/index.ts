@@ -4,6 +4,7 @@ import type { AppModule, ModuleContext } from "@hato/sdk/types";
 import { exportMcpTools } from "@hato/sdk/mcp";
 import { errMsg, sshFromProfile, sshProfileSpec, targetFor, workspaceGrant, wslLocation, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { parseOrder } from "@hato/sdk/settings-order";
+import { groupTools, pendingGroups, projectGroups } from "./groups";
 
 interface GitInfo { isGit: boolean; topLevel: string | null; hasCommits: boolean; error?: string; checkedAt: number }
 interface Project { id: string; name: string; kind: "local" | "ssh"; rootPath: string; sshProfileId: string | null; expanded: boolean }
@@ -103,6 +104,7 @@ const mod: AppModule = {
     const all = await ctx.modules.call("persistence", "projects.list");
     for (const p of all) if (!gitCache.has(p.id)) refreshGit(ctx, p.id);
     mcp = exportMcpTools(ctx, "Projects", [
+      ...groupTools(ctx),
       {
         name: "list",
         title: "List projects",
@@ -139,10 +141,18 @@ const mod: AppModule = {
       },
     ]);
   },
-  canSwap: () => ({ ok: (mcp?.pending() ?? 0) === 0, reason: "A Projects MCP command is running" }),
+  canSwap: () => ({ ok: (mcp?.pending() ?? 0) === 0 && pendingGroups() === 0, reason: "A Projects command is running" }),
   snapshot: () => ({ git: Array.from(gitCache.entries()) }),
   methods: {
     health: async (ctx) => { await ctx.modules.call("persistence", "projects.list"); return { ok: true }; },
+    "groups.list": ctx => projectGroups(ctx, "list"),
+    "groups.create": (ctx, a) => projectGroups(ctx, "create", a),
+    "groups.rename": (ctx, a) => projectGroups(ctx, "rename", a),
+    "groups.delete": (ctx, a) => projectGroups(ctx, "delete", a),
+    "groups.reorder": (ctx, a) => projectGroups(ctx, "reorder", a),
+    "groups.assign": (ctx, a) => projectGroups(ctx, "assign", a),
+    "groups.unassign": (ctx, a) => projectGroups(ctx, "unassign", a),
+    "groups.set_active": (ctx, a) => projectGroups(ctx, "set_active", a),
 
     async setOrder(ctx, a) {
       const projects = await ctx.modules.call<Project[]>("persistence", "projects.list");
@@ -183,6 +193,7 @@ const mod: AppModule = {
       if (tasks.length) throw new Error(`${project.name} still has ${tasks.length} task(s); delete them first.`);
       await ctx.modules.call("workspace", "forget", { workspaceIds: [`project:${id}:root`] });
       await ctx.modules.call("persistence", "projects.delete", { id });
+      try { await projectGroups(ctx, "list"); } catch (e) { ctx.log.warn("prune project groups", errMsg(e)); }
       gitCache.delete(id); offline.delete(id);
       ctx.events.emit("projects.changed", { projectId: id, removed: true });
       return { removed: true };

@@ -2,7 +2,7 @@ import type { AppModule, ModuleContext, UiNode } from "@hato/sdk/types";
 import { errMsg } from "@hato/sdk/runtime";
 import { diffTab } from "@hato/sdk/git";
 import { exportMcpTools } from "@hato/sdk/mcp";
-import { changeBadge, changeTree, type ChangeNode, type Change } from "./model";
+import { CHANGE_ROW_HEIGHT, changeFileRow, changeGroups, changeTree, type ChangeNode, type Change } from "./model";
 import { exportSettings } from "@hato/sdk/settings";
 import { fileIcons } from "@hato/sdk/file-icons";
 import { uiIcons } from "@hato/sdk/ui-icons";
@@ -163,15 +163,16 @@ const mod: AppModule = {
     if (notice) children.push({ type: "status", key: "notice", text: notice, level: "info" });
     if (loading || busy) children.push({ type: "progress", key: "progress", indeterminate: true });
     const list: UiNode[] = [];
-    for (const untracked of [false, true]) {
-      const group = shown.filter(f => (f.kind === "untracked") === untracked);
+    for (const { title, files: group } of changeGroups(shown)) {
+      const untracked = title === "Untracked";
       if (!group.length) continue;
-      list.push({ type: "toggle", key: `group:${untracked}`, label: `${untracked ? "Untracked" : "Changes"} · ${group.length}`, checked: group.every(f => selected.has(f.path)), action: `group:${untracked}`, disabled: busy });
+      list.push({ type: "toggle", key: `group:${untracked}`, label: `${title} · ${group.length}`, checked: group.every(f => selected.has(f.path)), action: `group:${untracked}`, disabled: busy });
       const scope = untracked ? "untracked" : "tracked";
       const append = (nodes: ChangeNode[], depth: number) => {
         for (const node of nodes) {
           const folder = !node.file, key = `${ws.id}:${scope}:${node.path}`, open = !!query || !collapsed.has(key);
           const f = node.file;
+          const row = f ? changeFileRow(f) : null;
           list.push({ type: "row", key: `${scope}:${node.path}`, gap: 4, align: "center", children: [
             { type: "label", key: "indent", text: "", width: depth * 16, style: { noShrink: true } },
             ...(folder ? [button(`disclose:${scope}:${node.path}`, open ? "▾" : "▸", "folder", {
@@ -180,13 +181,13 @@ const mod: AppModule = {
             { type: "toggle", key: `check:${scope}:${node.path}`, label: "", checked: node.paths.every(p => selected.has(p)),
               action: folder ? `folderCheck:${scope}:${node.path}` : `check:${node.path}`, disabled: busy,
               tooltip: folder ? `Include all changes in ${node.path}` : `Include ${node.path} in commit` },
-            button(`${folder ? "folder" : "file"}:${scope}:${node.path}`, node.name,
+            button(`${folder ? "folder" : "file"}:${scope}:${node.path}`, row?.label ?? node.name,
               folder ? "folder" : "diff", { doubleClickAction: folder ? undefined : "edit", value: folder ? key : node.path,
-                iconSvg: folder ? (open ? fileIcons.folderOpen : fileIcons.folder) : fileIcons.file,
+                iconSvg: folder ? (open ? fileIcons.folderOpen : fileIcons.folder) : row?.iconSvg,
                 style: { justify: "start", paddingX: 4 },
                 tooltip: f?.origPath ? `${f.origPath} → ${node.path}` : node.path }),
             { type: "label", key: "row-space", text: "", grow: true },
-            { type: "label", key: "badge", text: f ? changeBadge(f) : String(node.paths.length), size: "xs",
+            { type: "label", key: "badge", text: row?.badge ?? String(node.paths.length), size: "xs",
               color: f && (f.kind === "untracked" || f.kind === "added") ? "success" : "muted", style: { noShrink: true } },
           ] });
           if (folder && open) append(node.children, depth + 1);
@@ -195,7 +196,7 @@ const mod: AppModule = {
       append(changeTree(group), 0);
     }
     // Uniform rows let the renderer build only the visible part of a long change list.
-    children.push({ type: "column", key: "files", grow: true, scroll: true, gap: 3, ...(list.length ? { itemHeight: 28 } : {}), children: list.length ? list : [{ type: "label", key: "clean", text: !status ? "Loading…" : !status.repo ? "Not a Git repository" : query ? "No matching files" : "No changes in this changeset", color: "muted", padding: 12 }] });
+    children.push({ type: "column", key: "files", grow: true, scroll: true, gap: 3, ...(list.length ? { itemHeight: CHANGE_ROW_HEIGHT } : {}), children: list.length ? list : [{ type: "label", key: "clean", text: !status ? "Loading…" : !status.repo ? "Not a Git repository" : query ? "No matching files" : "No changes in this changeset", color: "muted", padding: 12 }] });
     children.push({ type: "row", key: "selection", gap: 4, wrap: true, children: [
       { type: "label", key: "count", text: `${picked.length} selected`, size: "xs", color: "muted", grow: true },
       { type: "select", key: "move", value: null, placeholder: "Move selected to…", action: "move", disabled: busy || !picked.length,

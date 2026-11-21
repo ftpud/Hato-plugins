@@ -40,6 +40,34 @@ test('task baseline retains committed edits, deletions and untracked files',asyn
  assert.equal((await ops.taskChanges(ctx,{workspaceId:'task:test'})).files.find(f=>f.path==='base').kind,'deleted');
  await assert.rejects(ops.setTaskBase(ctx,{workspaceId:'task:test',id:git('rev-parse','HEAD').trim()}),/fixed baseline/);
 }));
+test('Task Git Changes uses a full-height grouped list and sends preview and open to Viewer in order', async () => {
+ const {default:panel}=await load('../modules/ui/git-task-changes/src/index.ts');
+ const calls=[];
+ const ctx={state:{get:k=>k==='workspace.selected'?{id:'task:test'}:{'git-task-changes':true},watch(){}},
+  events:{on(){}},ui:{invalidate(){}},modules:{call:async(_id,method,args)=>{
+   if(method==='taskChanges')return {base:'a'.repeat(40),files:[
+    {path:'src/a.ts',kind:'modified'},{path:'gone.ts',kind:'deleted'},{path:'extra.ts',kind:'untracked'}]};
+   calls.push([method,args]);
+  }}};
+ await panel.activate(ctx);
+ const children=panel.render().children;
+ const tree=children.find(n=>n.type==='tree');
+ assert.equal(children.some(n=>n.type==='split'||n.type==='diff'),false);
+ assert.equal(tree.grow,true);
+ assert.equal(tree.rowHeight,28);
+ assert.deepEqual(tree.rows.map(row=>[row.label,row.detail,row.badge]),[
+  ['Changes · 2',undefined,undefined],['a.ts','src','M'],['gone.ts',undefined,'D'],
+  ['Untracked · 1',undefined,undefined],['extra.ts',undefined,'U']]);
+ await Promise.all([
+  panel.onEvent(ctx,{action:tree.selectAction,rowKey:'src/a.ts',inputs:{}}),
+  panel.onEvent(ctx,{action:tree.activateAction,rowKey:'src/a.ts',inputs:{}}),
+ ]);
+ await panel.onEvent(ctx,{action:tree.activateAction,rowKey:'gone.ts',inputs:{}});
+ assert.deepEqual(calls.map(([method,args])=>[method,args.path,args.edit]),[
+  ['previewTaskFile','src/a.ts',false],['previewTaskFile','src/a.ts',true],['previewTaskFile','gone.ts',false],
+ ]);
+ panel.deactivate();
+});
 test('stash IDs stay stable and history includes branches and merge parentage',async()=>fixture(async({root,git,ctx,ops})=>{
  await writeFile(join(root,'new'),'stash me');await ops.stash(ctx,{workspaceId:'task:test',operation:'save',message:'saved work'});
  const list=await ops.stashes(ctx,{workspaceId:'task:test'});assert.equal(list.length,1);

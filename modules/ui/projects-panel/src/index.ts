@@ -8,8 +8,10 @@ import { exportSettings } from "@hato/sdk/settings";
 import { addProjectModal, localRequest, sourcesFor, sshRequest, wslRequest, type AddSource, type FieldErrors, type SshAuth } from "./add-project";
 import { taskDialog, taskBranchChoice, branchValue } from "./task-dialog";
 import { projectsBranding } from "./branding";
+import { groupPanel } from "./groups";
 
 let tree: any[] = [];
+const groups = groupPanel();
 let treeRequest = 0;
 let publishSettings: () => void = () => {};
 let selected: string | null = null;
@@ -39,6 +41,7 @@ const taskMenu = (t: any) => [
   { text: "Delete task…", action: "askDeleteTask", value: t.id },
 ];
 const projectMenu = (p: any) => [
+  ...groups.projectMenu(p.id),
   { text: p.tasks.length ? "Remove from Hato (delete its tasks first)" : "Remove from Hato…", action: "askRemoveProject", value: p.id, disabled: p.tasks.length > 0 },
 ];
 // workspaceId -> number of working AI chats (ai-sessions) and background agents (persistent-agents).
@@ -124,10 +127,10 @@ function maskAddress(text: string, p: any): string {
   return text.replace(new RegExp(`(?:[^\\s@]+@)?${escapeRe(host)}(?::\\d+)?`, "g"), remoteLabel);
 }
 
-function rows(): TreeRow[] {
+function rows(projects: any[]): TreeRow[] {
   const out: TreeRow[] = [];
   const query = filter.trim().toLowerCase();
-  for (const p of tree) {
+  for (const p of projects) {
     const key = `project:${p.id}:root`;
     const masked = hideRemoteAddress && p.kind === "ssh" && p.transport !== "wsl";
     const projectMatches = !query || [p.name, p.rootPath, masked ? remoteLabel : p.host].some(value => String(value || "").toLowerCase().includes(query));
@@ -269,13 +272,15 @@ const mod: AppModule = {
     for (const topic of ["git.changed", "git-panel.statusChanged", "files.changed"])
       ctx.events.on(topic, (e: any) => { if (typeof e?.workspaceId === "string") scheduleStats(ctx, e.workspaceId); });
     if (prev?.diffStats) diffStats = prev.diffStats;
-    await reload(ctx);
+    await Promise.all([reload(ctx), groups.activate(ctx)]);
   },
   deactivate() { taskRequest++; treeRequest++; if (animation) clearInterval(animation); animation = null; if (statsTimer) clearTimeout(statsTimer); statsTimer = null; },
   snapshot: () => ({ taskFormFor, taskQuery, taskBranch, taskBranches, addForm, addSource, sshAuth, addValues, filter, diffStats }),
   render(): UiNode {
     const proj = selectedProject();
-    const visibleRows = rows();
+    const activeGroup = groups.active();
+    const projects = activeGroup ? tree.filter(p => activeGroup.projectIds.includes(p.id)) : tree;
+    const visibleRows = rows(projects);
     const children: UiNode[] = [
       { type: "row", key: "hdr", gap: 3, children: [
         { type: "textInput", key: "project-filter", ...filterInput, prefixSvg: uiIcons.search, placeholder: "Filter projects", value: filter, changeAction: "filter", grow: true },
@@ -283,14 +288,17 @@ const mod: AppModule = {
         { type: "button", key: "refresh", text: "", iconSvg: uiIcons["refresh"], action: "refresh", small: true, variant: "ghost", tooltip: "Refresh projects", disabled: !!busy },
       ] },
       { type: "row", key: "summary", gap: 4, children: [
-        { type: "label", key: "count", text: `${tree.length} ${tree.length === 1 ? "project" : "projects"}`, size: "xs", color: "muted", grow: true },
+        { type: "label", key: "count", text: `${projects.length} ${projects.length === 1 ? "project" : "projects"}`, size: "xs", color: "muted", grow: true },
         ...(proj?.isGit && proj.hasCommits !== false ? [{ type: "button", key: "new-task", text: "New task", iconSvg: uiIcons["git-branch"], action: "newTask", small: true, variant: "ghost", tooltip: `Create a worktree in ${proj.name}`, disabled: !!busy } as UiNode] : []),
       ] },
     ];
     if ((error || treeError) && !addForm && !confirm) children.push({ type: "status", key: "err", text: (error || treeError)!, level: "error" });
     if (notice) children.push({ type: "status", key: "notice", text: notice, level: "warn" });
     if (busy) children.push({ type: "progress", key: "busy", indeterminate: true, label: busy });
-    if (!visibleRows.length) children.push({ type: "label", key: "empty", text: filter.trim() ? "No matching projects or tasks." : "Add a project to get started.", size: "sm", color: "muted", padding: 8 });
+    if (!visibleRows.length) {
+      children.push({ type: "label", key: "empty", text: activeGroup && !projects.length ? `No projects in ${activeGroup.name}` : filter.trim() ? "No matching projects or tasks." : "Add a project to get started.", size: "sm", color: "muted", padding: 8 });
+      if (activeGroup && !projects.length) children.push({ type: "button", key: "add-group-projects", text: "Add projects…", action: "groups.checklist", value: activeGroup.id, small: true, variant: "ghost" });
+    }
     children.push({ type: "tree", key: "tree", hoverOpacity: hoverOpacity, rowHeight: 42, rowGap: 0, iconSize: 18, rows: visibleRows, selectAction: "selectWorkspace", expandAction: "toggleExpanded", grow: true });
     if (proj && proj.isGit && proj.hasCommits !== false) {
       if (taskFormFor === proj.id) {
@@ -300,10 +308,12 @@ const mod: AppModule = {
     }
     if (confirm) children.push(confirmModal(confirm));
     if (addForm) children.push(addProjectModal({ windows, source: addSource, sshAuth, values: addValues, errors: fieldErrors, error, busy, distros: wslDistros, distro: wslDistro }));
+    children.push(groups.render(tree));
     return { type: "column", key: "projects-root", gap: 4, padding: 6, grow: true,
       ...(backgroundOpacity > 0 ? { backgroundImage: projectsBranding, backgroundImageStyle: { opacity: backgroundOpacity, width: 960, left: -350, top: -60 } } : {}), children };
   },
   async onEvent(ctx, ev) {
+    if (ev.action.startsWith("groups.")) return groups.event(ctx, ev);
     const run = async (label: string, fn: () => Promise<any>) => {
       busy = label; error = null; ctx.ui.invalidate();
       try { return await fn(); } catch (e) { error = errMsg(e); return null; } finally { busy = null; await reload(ctx); }

@@ -637,6 +637,14 @@ const mod: AppModule = {
     ctx.events.on("terminal-panel.reveal", (event: any) => { if (event.workspaceId === ws?.id) revealPanel(ctx, "terminal"); });
     ctx.events.on("ai.openMcps", () => revealPanel(ctx, "mcps"));
     ctx.events.on("workflows-panel.reveal", () => revealPanel(ctx, "workflows"));
+    const revealRunConfigurations = (event: any) => { if (event?.workspaceId === ws?.id) revealPanel(ctx, "run-configurations"); };
+    ctx.events.on("viewer.runConfiguration", revealRunConfigurations);
+    ctx.events.on("run-bar.editConfiguration", revealRunConfigurations);
+    ctx.events.on("run-configurations-panel.edit", revealRunConfigurations);
+    ctx.events.on("workspace-layout.revealPanel", (event: any) => { if (event?.workspaceId === ws?.id && ["run", "run-configurations"].includes(event.id)) revealPanel(ctx, event.id); });
+    ctx.events.on("run-bar.reveal", (event: any) => { if (event?.workspaceId === ws?.id) revealPanel(ctx, "run"); });
+    ctx.events.on("run.reveal", (event: any) => { if (event?.workspaceId === ws?.id) revealPanel(ctx, "run"); });
+    ctx.events.on("run-panel.openLocation", (event: any) => { if (event?.workspaceId === ws?.id) revealPanel(ctx, "viewer"); });
     ctx.events.on("ai.chatOpened", () => revealPanel(ctx, "ai"));
     ctx.events.on("workspace.viewChanged", (event: any) => {
       if (event?.workspaceId === ws?.id && event?.changed?.includes("previewPath") && event.previewPath) revealPanel(ctx, "viewer");

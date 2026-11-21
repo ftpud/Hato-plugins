@@ -11,6 +11,7 @@ import { listBranches, checkoutBranch, createBranch, renameBranch, deleteBranch,
 import { gitOperations } from "./operations";
 import { fileHistory } from "./file-history";
 import { blame } from "./blame";
+import { taskDiffTab } from "@hato/sdk/git";
 
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const MAX_PATCH_BYTES = 4 * 1024 * 1024;
@@ -298,10 +299,25 @@ const mod: AppModule = {
       return { workspaceId: d.id, path, tracked: true, text: text !== null && text.includes("\u0000") ? null : text };
     },
 
-    /** Patch for one file against HEAD (working tree incl. staged changes) as a document handle. */
+    /** Open a task file or its fixed-baseline patch in the workspace's main viewer. */
+    async previewTaskFile(ctx, a) {
+      if (typeof a.workspaceId !== "string" || !a.workspaceId.startsWith("task:")) throw new Error("Select a task workspace");
+      const path = cleanRel(a.path);
+      return ctx.modules.call("workspace", "view.patch", {
+        workspaceId: a.workspaceId, patch: { previewPath: a.edit === true ? path : taskDiffTab(path) },
+      });
+    },
+
+    /** Patch for one file against HEAD or the selected comparison baseline. */
     async diff(ctx, a) {
       const d = await desc(ctx, a.workspaceId);
       const path = cleanRel(a.path);
+      let comparison = a.base;
+      if (a.taskBaseline === true) {
+        if (!d.id.startsWith("task:")) throw new Error("Select a task workspace");
+        comparison = await ctx.modules.call("persistence", "settings.get", { key: `git.taskBase.${d.id}` });
+        if (!comparison) throw new Error("This task has no fixed baseline");
+      }
       const st = await git(ctx, d, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", path]);
       if (st.code !== 0) fail(st, "git status");
       const change = parseStatus(st.stdout)[0];
@@ -312,15 +328,16 @@ const mod: AppModule = {
         r = await git(ctx, d, ["diff", "--no-index", "--no-ext-diff", "--", "/dev/null", path]);
         if (r.code !== 0 && r.code !== 1) fail(r, "git diff --no-index");
       } else {
-        r = await git(ctx, d, ["diff", "--no-ext-diff", "-M", (a.base ? await checkedBase(ctx, d, a.base) : await base(ctx, d)), "--", ...(orig ? [orig] : []), path]);
+        r = await git(ctx, d, ["diff", "--no-ext-diff", "-M", (comparison ? await checkedBase(ctx, d, comparison) : await base(ctx, d)), "--", ...(orig ? [orig] : []), path]);
         if (r.code !== 0) fail(r, "git diff");
       }
       const text = r.stdout;
-      const key = `${d.id}|${path}`;
+      const key = `${d.id}|${a.taskBaseline === true ? taskDiffTab(path) : path}`;
       const cached = docCache.get(key);
       const document = cached && cached.text === text ? cached.document : await ctx.host.ui.documentOpen(d.id, text, "diff", { path });
       docCache.set(key, { text, document });
-      return { workspaceId: d.id, path, kind: change?.kind || null, document, empty: !text.trim(), truncated: r.truncated };
+      const kind = a.taskBaseline === true && /^deleted file mode /m.test(text) ? "deleted" : change?.kind || null;
+      return { workspaceId: d.id, path, kind, document, empty: !text.trim(), truncated: r.truncated };
     },
 
     /** Only what changed since the previous call (the most recent update), as one patch. */

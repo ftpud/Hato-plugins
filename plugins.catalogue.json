@@ -74,6 +74,26 @@
       ]
     },
     {
+      "id": "run-configurations",
+      "name": "Run Configurations",
+      "type": "Development",
+      "core": false,
+      "author": "Hato contributors",
+      "version": "0.1.0",
+      "coreVersion": "^0.1.0",
+      "description": "Save and detect Java and JavaScript/TypeScript run configurations.",
+      "dependencies": {
+        "foundation": "^0.1.0"
+      },
+      "modules": [
+        "run-configurations",
+        "run-configurations-panel",
+        "run",
+        "run-bar",
+        "run-panel"
+      ]
+    },
+    {
       "id": "claude-acp",
       "name": "Claude",
       "type": "AI providers",

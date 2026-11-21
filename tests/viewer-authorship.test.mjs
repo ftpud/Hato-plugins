@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 const sdk = new URL('../../sdk', import.meta.url).pathname;
 const load = async path => import('data:text/javascript;base64,' + Buffer.from((await build({ entryPoints: [new URL(path, import.meta.url).pathname], bundle: true, format: 'esm', write: false, alias: { '@hato/sdk': sdk } })).outputFiles[0].text).toString('base64'));
-const { javaDeclarations } = await load('../modules/ui/viewer/src/declarations.ts');
+const { javaDeclarations, declarationsFor } = await load('../modules/ui/viewer/src/declarations.ts');
 const { parseBlame, blame } = await load('../modules/services/git/src/blame.ts');
 const authorship = await load('../modules/ui/viewer/src/authorship.ts');
 
@@ -70,6 +70,48 @@ test('porcelain blame maps lines to commits and uncommitted lines to -1', () => 
   assert.deepEqual(r.commits[0], { id: sha, author: 'Ada', email: 'ada@x', time: 1700000000, summary: 'first' });
 });
 
+test('JS and TS scan declarations past comments, templates, regex, JSX and callbacks', () => {
+  const js = [
+    'export default async function* generate() {',
+    '  const literal = `function fake() { ${`nested ${/}/}` } }`;',
+    '  if (literal) /[}]{2}/.test(literal);',
+    '  run(function callback() {}, () => { function insideCallback() {} });',
+    '  if (literal) { function nested() {} } /[}]/.test(literal);',
+    '}',
+    'const named = function* internal() {};',
+    'const arrow = x =>',
+    '  x / 2',
+    'const view = () => <><span>function fake() {{}}</span><b /></>;',
+    'class Counter {',
+    '  constructor() {}',
+    '  get total() { return 0; }',
+    '  set total(value) {}',
+    '  static async *items() {}',
+    '  [Symbol.iterator]() {}',
+    '  task = () => { if (true) {} };',
+    '}',
+    'const after = () => 1;',
+  ].join('\n');
+  assert.deepEqual(declarationsFor('javascript', js).map(({ name, line, start, end }) => [name, line, start, end]), [
+    ['generate', 0, 0, 5], ['nested', 4, 4, 4], ['named', 6, 6, 6], ['arrow', 7, 7, 8], ['view', 9, 9, 9],
+    ['Counter', 10, 10, 17], ['constructor', 11, 11, 11], ['total', 12, 12, 12], ['total', 13, 13, 13],
+    ['items', 14, 14, 14], ['[Symbol.iterator]', 15, 15, 15], ['after', 18, 18, 18],
+  ]);
+  const ts = [
+    'export function wrap<T>(value: T): { value: T } { return { value }; }',
+    'const id: <T>(value: T) => T = <T,>(value: T): T => value;',
+    'abstract class Store<T> extends Base<T> {',
+    '  abstract find<K extends keyof T>(key: K): T[K];',
+    '  private method() { return { function() {} }; }',
+    '}',
+  ].join('\n');
+  for (const grammar of ['typescript', 'tsx']) {
+    assert.deepEqual(declarationsFor(grammar, ts).map(({ name, line }) => [name, line]), [
+      ['wrap', 0], ['id', 1], ['Store', 2], ['find', 3], ['method', 4],
+    ]);
+  }
+});
+
 test('declarations show their newest author, other authors and uncommitted edits', async () => {
   const root = await mkdtemp(join(tmpdir(), 'hato-blame-'));
   const git = (args, env = {}) => execFileSync('git', args, { cwd: root, encoding: 'utf8', env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -77,9 +119,17 @@ test('declarations show their newest author, other authors and uncommitted edits
     git(['init', '-q', '-b', 'main']);
     const as = (name, date) => ({ GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: `${name}@x`, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: `${name}@x`, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
     const v1 = 'class A {\n  void one() {\n    a();\n  }\n  void two() {\n    b();\n  }\n}\n';
-    await writeFile(join(root, 'A.java'), v1); git(['add', '.']); git(['commit', '-q', '-m', 'one'], as('Ada', '2020-01-01T00:00:00Z'));
+    const js = 'export const first = () => {\n  a();\n};\nexport class Store {\n  load() {\n    b();\n  }\n}\n';
+    const ts = js.replace('load()', 'load(): void');
+    await writeFile(join(root, 'A.java'), v1);
+    await writeFile(join(root, 'store.js'), js);
+    await writeFile(join(root, 'store.ts'), ts);
+    git(['add', '.']); git(['commit', '-q', '-m', 'one'], as('Ada', '2020-01-01T00:00:00Z'));
     const v2 = v1.replace('b();', 'c();');
-    await writeFile(join(root, 'A.java'), v2); git(['add', '.']); git(['commit', '-q', '-m', 'two'], as('Bob', '2021-01-01T00:00:00Z'));
+    await writeFile(join(root, 'A.java'), v2);
+    await writeFile(join(root, 'store.js'), js.replace('b();', 'c();'));
+    await writeFile(join(root, 'store.ts'), ts.replace('b();', 'c();'));
+    git(['add', '.']); git(['commit', '-q', '-m', 'two'], as('Bob', '2021-01-01T00:00:00Z'));
 
     const service = blame({
       desc: async () => ({ id: 'ws', rootAbsolutePath: root }),
@@ -95,7 +145,14 @@ test('declarations show their newest author, other authors and uncommitted edits
     assert.deepEqual(shown(edited), ['0: Uncommitted changes', '1: Uncommitted changes', '4: Bob +1, N years ago']);
     // Lines inserted above shift the annotations with the code.
     assert.deepEqual(shown('// header\n' + v2), ['1: Bob +1, N years ago', '2: Ada, N years ago', '5: Bob +1, N years ago']);
-    assert.deepEqual(authorship.declarationAnnotations('ws', 'A.java', 'typescript', v2), []);
+    assert.deepEqual(authorship.declarationAnnotations('ws', 'A.java', 'python', v2), []);
+    for (const [path, grammar, base] of [['store.js', 'javascript', js], ['store.ts', 'typescript', ts]]) {
+      const source = base.replace('b();', 'c();');
+      assert.equal(await authorship.refreshBlame(ctx, 'ws', path, source), true);
+      const labels = text => authorship.declarationAnnotations('ws', path, grammar, text).map(a => [a.line, a.text.replace(/\d+ years? ago/, 'N years ago')]);
+      assert.deepEqual(labels(source), [[0, 'Ada, N years ago'], [3, 'Bob +1, N years ago'], [4, 'Bob +1, N years ago']]);
+      assert.deepEqual(labels(source.replace('c();', 'd();')), [[0, 'Ada, N years ago'], [3, 'Uncommitted changes'], [4, 'Uncommitted changes']]);
+    }
     // Untracked files get no annotations.
     await writeFile(join(root, 'B.java'), 'class B {}\n');
     await authorship.refreshBlame(ctx, 'ws', 'B.java', 'class B {}\n');

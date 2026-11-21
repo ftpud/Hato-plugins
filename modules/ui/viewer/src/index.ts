@@ -10,18 +10,21 @@ import { exportSettings } from "@hato/sdk/settings";
 import { fontOptions } from "@hato/sdk/typography";
 import { errMsg } from "@hato/sdk/runtime";
 import { resolveWorkspaceLink } from "@hato/sdk/links";
-import { diffTabPath } from "@hato/sdk/git";
+import { diffTabPath, isTaskDiffTab } from "@hato/sdk/git";
 import { uiIcons } from "@hato/sdk/ui-icons";
 import { parseVirtualTab, type VirtualShow } from "@hato/sdk/virtual-documents";
 
-import { languageDefinitions, languageForPath, workspacePath, relativeFile, validPosition, type LanguageDefinition } from "@hato/sdk/languages";
+import { fileUri, languageDefinitions, languageForPath, workspacePath, relativeFile, validPosition, type LanguageDefinition } from "@hato/sdk/languages";
 
 import { shellBlocks } from "./markdown";
 import { enclosingType, hoverType, receiverAt, shapeCompletions, shapeHover } from "./assist";
 import { diffLines } from "@hato/sdk/text-diff";
 import { declarationAnnotations, forgetBlames, refreshBlame } from "./authorship";
 import { hasDeclarations } from "./declarations";
+import { exportMcpTools } from "@hato/sdk/mcp";
 import { historyEvent, historySnapshot, historyWindow, mapToCommitted, openHistory, restoreHistory } from "./history";
+import type { OpenLocation } from "@hato/sdk/run";
+import type { RunCandidate } from "@hato/sdk/run-configurations";
 
 // ---- Git change markers -------------------------------------------------------------------
 // HEAD text per open file; hunks are recomputed locally as the buffer changes.
@@ -29,6 +32,40 @@ interface Hunk { line: number; added: number; removed: string[]; current: string
 const heads = new Map<string, { text: string | null; tracked: boolean }>();
 let hunks: Hunk[] = [];
 let hunkView: { index: number; hunk: Hunk } | null = null;
+let runGutter: { workspaceId: string; path: string; candidates: RunCandidate[] } | null = null;
+let runAvailable = false;
+let runMenu: { workspaceId: string; path: string; candidates: RunCandidate[]; y: number } | null = null;
+let runSourceKey = "";
+const runIcon = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="m7 4 14 8-14 8z"/></svg>';
+
+function publishRunSource(ctx: ModuleContext) {
+  const source = current && !current.diff && !current.virtual && !current.binary && !current.truncated
+    ? { workspaceId: current.workspaceId, path: current.relativePath } : null;
+  const key = source ? JSON.stringify(source) : "";
+  if (key === runSourceKey) return;
+  runSourceKey = key; runMenu = null;
+  ctx.state.set("viewer.runSource", source);
+}
+
+async function openRunLocation(ctx: ModuleContext, location: OpenLocation) {
+  if (!location || location.workspaceId !== ws?.id || !Number.isInteger(location.line) || location.line < 0) return;
+  const { workspaceId, line } = location, root = ws.rootAbsolutePath;
+  const character = Number.isInteger(location.character) && location.character! >= 0 ? location.character! : 0;
+  let path = typeof location.path === "string" ? location.path.replace(/\\/g, "/").replace(/^\.\//, "") : null;
+  if (path && (path.startsWith("/") || /^[A-Za-z]:/.test(path))) path = workspacePath(root, fileUri(path));
+  if (!path && typeof location.suffix === "string" && location.suffix.length <= 300 && !location.suffix.split("/").includes("..")) {
+    const suffix = location.suffix.replace(/^\/+/, "");
+    const { entries } = await ctx.modules.call<{ entries: { relativePath: string; kind: string }[] }>("files", "search", { workspaceId, query: suffix.split("/").pop(), hideIgnored: true });
+    const rank = (name: string) => /(^|\/)(src\/main|main)\//.test(name) ? 0 : /(^|\/)(test|tests|src\/test)\//.test(name) ? 2 : 1;
+    path = entries.filter(e => e.kind === "file").map(e => e.relativePath).filter(p => p === suffix || p.endsWith("/" + suffix))
+      .sort((a, b) => rank(a) - rank(b) || a.length - b.length || a.localeCompare(b))[0] ?? null;
+  }
+  if (workspaceId !== ws?.id) return;
+  if (!path || path.split("/").some(segment => segment === ".." || !segment) || /[\r\n\0]/.test(path)) throw new Error("Source location could not be found in this workspace.");
+  navigation = { workspaceId, path, key: crypto.randomUUID(), line, character };
+  await ctx.modules.call("workspace", "view.patch", { workspaceId, patch: { previewPath: path } });
+  ctx.ui.invalidate();
+}
 let gitMarkers = true;
 let declarationAuthors = true;
 const headKey = (workspaceId: string, path: string) => `${workspaceId}|${path}`;
@@ -267,6 +304,7 @@ let navigation: { workspaceId: string; path: string; key: string; line: number; 
 async function refreshLanguages(ctx: ModuleContext) {
   const { plugins } = await ctx.host.plugins.list();
   languages = languageDefinitions(plugins);
+  runAvailable = plugins.some(p => p.id === "run" && p.enabled && !!p.active);
   languageService = plugins.some(p => p.id === "language-service" && p.enabled && !!p.active);
   ctx.ui.invalidate();
   void synchronizeLanguage(ctx);
@@ -281,7 +319,7 @@ async function saveTabs(ctx: ModuleContext) {
 async function load(ctx: ModuleContext, force = false) {
   const path = ws?.view?.previewPath || null;
   const workspaceId = ws?.id;
-  if (!workspaceId || !path) { generation++; loadingPath = null; current = null; projectLanguageEnabled = true; error = null; ctx.ui.invalidate(); return; }
+  if (!workspaceId || !path) { generation++; loadingPath = null; current = null; projectLanguageEnabled = true; error = null; publishRunSource(ctx); ctx.ui.invalidate(); return; }
   if (!tabs.includes(path)) { tabs.push(path); await saveTabs(ctx); }
   if (ws?.id !== workspaceId || ws?.view?.previewPath !== path) return;
   if (!force && current?.workspaceId === workspaceId && current.tab === path || loadingPath === path) return;
@@ -312,7 +350,7 @@ async function load(ctx: ModuleContext, force = false) {
   if (known) void synchronizeLanguage(ctx);
   try {
     const r = diffPath
-      ? { ...(await ctx.modules.call("git", "diff", { workspaceId, path: diffPath }, { timeoutMs: 45000 })), diff: true, relativePath: diffPath }
+      ? { ...(await ctx.modules.call("git", "diff", { workspaceId, path: diffPath, ...(isTaskDiffTab(path) ? { taskBaseline: true } : {}) }, { timeoutMs: 45000 })), diff: true, relativePath: diffPath }
       : await ctx.modules.call("files", "open", { workspaceId, relativePath: path, includeText: true });
     // Keep unsaved edits on screen when the file changed underneath them; saving reports the conflict.
     const keep = known && r.document !== known.document && unsaved(buffers.get(known.document));
@@ -330,6 +368,7 @@ async function load(ctx: ModuleContext, force = false) {
     if (mine === generation) {
       loadingPath = null;
       if (!known || current?.document !== known.document) void synchronizeLanguage(ctx);
+      publishRunSource(ctx);
       void refreshHead(ctx);
       refreshAuthorship(ctx);
     }
@@ -367,6 +406,13 @@ function refreshAuthorship(ctx: ModuleContext) {
   const text = buffers.get(current.document)?.text ?? current.text;
   if (typeof text !== "string") return;
   void refreshBlame(ctx, ws.id, current.relativePath, text).then(changed => { if (changed) ctx.ui.invalidate(); });
+}
+
+async function setDeclarationAuthors(ctx: ModuleContext, enabled: boolean) {
+  await ctx.modules.call("persistence", "settings.set", { key: "viewer.declarationAuthors", value: enabled });
+  declarationAuthors = enabled;
+  if (enabled) refreshAuthorship(ctx);
+  ctx.ui.invalidate();
 }
 
 function tabLabel(tab: string) {
@@ -450,7 +496,7 @@ const mod: AppModule = {
       { key: "gitMarkers", label: "Show Git change bars", type: "toggle", value: gitMarkers,
         description: "Mark added, changed and deleted lines next to the line numbers. Click a bar to review or roll back the change." },
       { key: "declarationAuthors", label: "Show authors next to declarations", type: "toggle", value: declarationAuthors,
-        description: "After each class, interface and method (Java), show who changed it last and when." },
+        description: "Show who last changed a declaration and when in Java, JavaScript and TypeScript." },
       { key: "showMetadata", label: "Show file metadata", type: "toggle", value: showMetadata,
         description: "Display the language and file size in the bottom status bar." },
       { key: "renderMarkdown", label: "Preview Markdown files", type: "toggle", value: renderMarkdown,
@@ -486,7 +532,8 @@ const mod: AppModule = {
         await ctx.modules.call("persistence", "settings.set", { key: "viewer.autosaveDelay", value: ms });
         autosaveDelay = ms; return;
       }
-      if (!["showMetadata", "renderMarkdown", "editable", "autosave", "editorWrap", "viewerWrap", "gitMarkers", "declarationAuthors"].includes(key) || typeof value !== "boolean") throw new Error("Invalid viewer setting");
+      if (key === "declarationAuthors" && typeof value === "boolean") return setDeclarationAuthors(ctx, value);
+      if (!["showMetadata", "renderMarkdown", "editable", "autosave", "editorWrap", "viewerWrap", "gitMarkers"].includes(key) || typeof value !== "boolean") throw new Error("Invalid viewer setting");
       await ctx.modules.call("persistence", "settings.set", { key: `viewer.${key}`, value });
       if (key === "showMetadata") showMetadata = value;
       else if (key === "renderMarkdown") renderMarkdown = value;
@@ -494,17 +541,48 @@ const mod: AppModule = {
       else if (key === "editorWrap") editorWrap = value;
       else if (key === "viewerWrap") viewerWrap = value;
       else if (key === "gitMarkers") { gitMarkers = value; void refreshHead(ctx); }
-      else if (key === "declarationAuthors") { declarationAuthors = value; refreshAuthorship(ctx); }
       else { autosave = value; if (value) scheduleSaves(ctx); }
       ctx.ui.invalidate();
     });
+    exportMcpTools(ctx, "Source editor", [
+      {
+        name: "declaration_authors_get",
+        description: "Read the desktop-wide setting for declaration author annotations in the source editor.",
+        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+        annotations: { readOnlyHint: true },
+        handler: () => ({ enabled: declarationAuthors }),
+      },
+      {
+        name: "declaration_authors_set",
+        description: "Enable or disable declaration author annotations across all workspaces in this desktop editor.",
+        inputSchema: { type: "object", properties: { enabled: { type: "boolean" } }, required: ["enabled"], additionalProperties: false },
+        annotations: { idempotentHint: true },
+        handler: async (args) => {
+          if (typeof args?.enabled !== "boolean") throw new Error("enabled must be a boolean");
+          const enabled = args.enabled;
+          await setDeclarationAuthors(ctx, enabled);
+          publishSettings();
+          return { enabled };
+        },
+      },
+    ]);
+    runSourceKey = "@activate";
+    runGutter = ctx.state.get("run-configurations.gutter") || null;
+    ctx.state.watch("run-configurations.gutter", (value: typeof runGutter) => { runGutter = value; ctx.ui.invalidate(); });
+    const openLocation = (value: OpenLocation) => void openRunLocation(ctx, value).catch(e => { error = errMsg(e); ctx.ui.invalidate(); });
+    ctx.events.on("viewer.openLocation", openLocation);
+    ctx.events.on("run-panel.openLocation", openLocation);
     ws = ctx.state.get("workspace.selected") || null;
     restoreTabs();
     // Keep an open diff current as the working tree changes.
     ctx.events.on("git-panel.statusChanged", (e: any) => {
       if (current?.diff && e?.workspaceId === ws?.id && ws?.view?.previewPath === current.tab) void load(ctx, true);
     });
-    ctx.events.on("git.changed", (e: any) => { if (e?.workspaceId === ws?.id) { heads.clear(); void refreshHead(ctx); forgetBlames(); refreshAuthorship(ctx); } });
+    ctx.events.on("git.changed", (e: any) => {
+      if (e?.workspaceId !== ws?.id) return;
+      heads.clear(); void refreshHead(ctx); forgetBlames(); refreshAuthorship(ctx);
+      if (current?.diff && isTaskDiffTab(current.tab) && ws?.view?.previewPath === current.tab) void load(ctx, true);
+    });
     ctx.events.on("language-service.configurationChanged", () => { void synchronizeLanguage(ctx); });
     ctx.events.on("language-service.changed", () => { void synchronizeLanguage(ctx); });
 
@@ -666,6 +744,8 @@ const mod: AppModule = {
       const language = current ? languageForPath(languages, current.relativePath) : null;
       // Language servers, Git and history only understand workspace files.
       const assist = languageService && !!language?.server && projectLanguageEnabled && !current?.truncated && !current?.virtual;
+      const runLines = runGutter && runGutter.workspaceId === ws?.id && runGutter.path === current?.relativePath
+        ? [...new Set(runGutter.candidates.map(candidate => candidate.line))] : [];
       kids.push({ type: "codeViewer", key: "code", document: current && !current.binary ? current.document : null, placeholder: ws ? "Open a file from the explorer." : "Select a workspace.", grow: true,
         editable: canEdit, changeAction: canEdit ? "edit" : undefined, changeDebounceMs: 250,
         language: language?.grammar, syntaxRules: language?.syntaxRules, softWrap: editorWrap, font: editorFontNode(),
@@ -679,6 +759,8 @@ const mod: AppModule = {
         completionResolveMethod: assist && canEdit ? "editor.resolveCompletion" : undefined,
         lineMarkers: hunks.map((h, index) => ({ line: h.line, endLine: h.line + h.added, color: !h.added ? "danger" : h.removed.length ? "primary" : "success", value: index })),
         lineMarkerAction: "showHunk",
+        gutterMarkers: runLines.map(line => ({ line, iconSvg: runIcon, color: "success", value: line })),
+        gutterMarkerAction: "showRunMenu", gutterTooltip: "Run configuration actions",
         lineAnnotations: declarationAuthors && current && !current.virtual && !current.binary && !current.truncated && ws
           ? declarationAnnotations(ws.id, current.relativePath, language?.grammar, buffers.get(current.document)?.text ?? current.text) : undefined,
         definitionArgs: { workspaceId: ws?.id, path: current?.relativePath }, openLocationAction: "openDefinition",
@@ -711,6 +793,17 @@ const mod: AppModule = {
         { type: "label", key: "lang", text: diff ? (current.truncated ? "diff (truncated)" : "") : current && showMetadata ? `${current.language} · ${current.size} B${current.truncated ? " (truncated)" : ""}` : "", size: "xs", color: "muted" },
       ] }
     );
+    if (runMenu && runMenu.workspaceId === ws?.id && runMenu.path === current?.relativePath) {
+      kids.push({ type: "popover", key: "run-menu", width: 245, top: runMenu.y, left: 24, maxHeight: 155,
+        style: { background: "panel", padding: 6, radius: 6, borderWidth: 1, borderColor: "border" }, closeAction: "closeRunMenu", children: [
+          ...runMenu.candidates.flatMap((candidate, index): UiNode[] => [
+            { type: "button", key: `run:${index}`, text: `Run '${candidate.name}'`, action: "runCandidate", value: index, small: true, variant: "ghost",
+              disabled: !runAvailable, tooltip: runAvailable ? undefined : "Available when the Run service is installed" },
+            { type: "button", key: `debug:${index}`, text: `Debug '${candidate.name}'`, action: "", disabled: true, small: true, variant: "ghost", tooltip: "Available with debugger support" },
+            { type: "button", key: `edit:${index}`, text: "Edit configuration…", action: "editRunCandidate", value: index, small: true, variant: "ghost" },
+          ]),
+        ] });
+    }
     if (hunkView) {
       const h = hunkView.hunk;
       const kind = !h.added ? "Deleted" : h.removed.length ? "Changed" : "Added";
@@ -746,7 +839,16 @@ const mod: AppModule = {
     } catch (e) { error = errMsg(e); ctx.ui.invalidate(); return; }
     if (!ws) return;
     try {
-      if (ev.action === "viewHistory") {
+      if (ev.action === "showRunMenu") {
+        const v = ev.value as { marker?: number; y?: number } | null;
+        if (!runGutter || runGutter.workspaceId !== ws.id || runGutter.path !== current?.relativePath) return;
+        runMenu = { workspaceId: ws.id, path: runGutter.path, candidates: runGutter.candidates.filter(c => c.line === v?.marker), y: Math.max(36, Number(v?.y) + 54 || 36) };
+      } else if (ev.action === "closeRunMenu") runMenu = null;
+      else if (ev.action === "editRunCandidate" || ev.action === "runCandidate") {
+        const c = runMenu?.candidates[Number(ev.value)];
+        runMenu = null;
+        if (c) ctx.events.emit(ev.action === "editRunCandidate" ? "viewer.runConfiguration" : "viewer.startRunCandidate", { ...c, workspaceId: ws.id });
+      } else if (ev.action === "viewHistory") {
         const v: any = ev.value || {};
         if (!current || current.diff || v.document !== current.document) return;
         const path = current.relativePath, workspaceId = ws.id;

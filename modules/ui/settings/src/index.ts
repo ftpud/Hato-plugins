@@ -44,6 +44,7 @@ async function refresh(ctx: ModuleContext) {
 interface Category { key: string; title: string; module?: string; section?: SettingsSection; error?: string | null }
 function categories(ctx: ModuleContext): Category[] {
   const result: Category[] = [{ key: "plugins", title: "Plugins" }];
+  if (ctx.host.env?.info?.().uiNodes?.includes("securityPreferences")) result.push({ key: "security", title: "Security" });
   const seen = new Set<string>();
   for (const module of providers) {
     const contribution = ctx.state.get<SettingsExport>(`${module}.settings`);
@@ -60,7 +61,7 @@ function categories(ctx: ModuleContext): Category[] {
 }
 function categoryGroup(category: Category): string {
   if (category.section?.group) return category.section.group;
-  if (category.key === "plugins") return "Advanced";
+  if (category.key === "plugins" || category.key === "security") return "Advanced";
   if (["appearance", "typography", "tables"].includes(category.section?.key || "")) return "Appearance";
   if (["side-panels", "sidebar-order", "panel-sharing", "workspace-chrome"].includes(category.section?.key || "")) return "Workspace";
   if (["viewer", "git-changes", "git-panel"].includes(category.module || "")) return "Editor & Git";
@@ -128,7 +129,7 @@ const mod: AppModule = {
   async open(ctx, args) {
     open = true;
     if (typeof args?.module === "string" && typeof args?.section === "string") selectedCategory = JSON.stringify([args.module, args.section]);
-    else if (args?.category === "plugins") selectedCategory = args.category;
+    else if (args?.category === "plugins" || args?.category === "security") selectedCategory = args.category;
     if (args?.category || args?.module) query = "";
     ctx.ui.invalidate(); await refresh(ctx);
   } },
@@ -148,6 +149,7 @@ const mod: AppModule = {
       { type: "label", key: "category-title", text: active.title, weight: "semibold" },
     ];
     if (active.key === "plugins") options.push(...pluginsPage());
+    if (active.key === "security") options.push({ type: "securityPreferences", key: "trusted-security" });
     if (active.error) options.push({ type: "status", key: "category-error", text: active.error, level: "error" });
     if (active.section?.description) options.push({ type: "label", key: "category-description", text: active.section.description, size: "sm", color: "muted", wrap: true });
     const env = ctx.host.env?.info?.();

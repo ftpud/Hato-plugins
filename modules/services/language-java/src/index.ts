@@ -1,9 +1,14 @@
 import type { AppModule } from "@hato/sdk/types";
 import { exportSettings } from "@hato/sdk/settings";
 import { defaults, javaFilePresentation, type JavaFileStyle } from "./presentation";
+import { detectJavaRuns, javaRunTypes } from "./run-configs";
 let settings: JavaFileStyle = { ...defaults };
 export default {
   id: "language-java", moduleApiVersion: 1,
+  methods: {
+    "runConfigurations.types": () => javaRunTypes,
+    "runConfigurations.detect": (_ctx, files) => detectJavaRuns(files),
+  },
   async activate(ctx) {
     const saved = await ctx.modules.call("persistence", "settings.get", { key: "language-java.filePresentation" });
     settings = { ...defaults };
