@@ -5,8 +5,15 @@
   "kind": "ui",
   "entry": "src/index.ts",
   "moduleApiVersion": 1,
-  "dependencies": ["run-configurations", "persistence"],
-  "calls": ["run-configurations", "run", "persistence"],
+  "dependencies": [
+    "run-configurations",
+    "persistence"
+  ],
+  "calls": [
+    "run-configurations",
+    "run",
+    "persistence"
+  ],
   "capabilities": [],
   "runsOn": "ui",
   "distribution": "marketplace",
@@ -14,7 +21,13 @@
   "description": "Top-bar configuration picker with Run, Debug, Stop and Restart.",
   "contributes": {
     "barItems": [
-      { "id": "run-bar", "title": "Run / Debug", "bar": "top", "width": 400, "order": 80 }
+      {
+        "id": "run-bar",
+        "title": "Run / Debug",
+        "bar": "top",
+        "width": 400,
+        "order": 80
+      }
     ]
   },
   "author": "Hato contributors",

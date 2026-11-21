@@ -8,7 +8,7 @@
       "type": "System",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.44",
+      "version": "0.1.45",
       "coreVersion": "^0.1.0",
       "description": "Hato essentials services and panels.",
       "dependencies": {},
@@ -57,7 +57,7 @@
       "type": "Development",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.16",
+      "version": "0.1.17",
       "coreVersion": "^0.1.0",
       "description": "Git changes, branch controls, worktree tasks and history panels.",
       "dependencies": {
@@ -83,7 +83,7 @@
       "coreVersion": "^0.1.0",
       "description": "Save and detect Java and JavaScript/TypeScript run configurations.",
       "dependencies": {
-        "foundation": "^0.1.0"
+        "foundation": "^0.1.45"
       },
       "modules": [
         "run-configurations",
@@ -228,7 +228,7 @@
       "type": "Languages",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.10",
+      "version": "0.1.11",
       "coreVersion": "^0.1.0",
       "description": "Java highlighting and Eclipse JDTLS navigation.",
       "dependencies": {
@@ -245,7 +245,7 @@
       "type": "Languages",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "coreVersion": "^0.1.0",
       "description": "JS/TS/JSX/TSX highlighting and language server navigation.",
       "dependencies": {

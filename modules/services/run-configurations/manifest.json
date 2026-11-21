@@ -5,9 +5,21 @@
   "kind": "service",
   "entry": "src/index.ts",
   "moduleApiVersion": 1,
-  "dependencies": ["workspace", "persistence"],
-  "calls": ["workspace", "persistence", "language-java", "language-typescript"],
-  "capabilities": ["fs.scope", "process.scope", "ssh.connect"],
+  "dependencies": [
+    "workspace",
+    "persistence"
+  ],
+  "calls": [
+    "workspace",
+    "persistence",
+    "language-java",
+    "language-typescript"
+  ],
+  "capabilities": [
+    "fs.scope",
+    "process.scope",
+    "ssh.connect"
+  ],
   "runsOn": "ui",
   "distribution": "marketplace",
   "stateVersion": 1,

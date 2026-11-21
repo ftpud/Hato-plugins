@@ -5,9 +5,20 @@
   "kind": "service",
   "entry": "src/index.ts",
   "moduleApiVersion": 1,
-  "dependencies": ["run-configurations", "workspace"],
-  "calls": ["workspace", "run-configurations"],
-  "capabilities": ["process.scope", "fs.scope", "ssh.connect", "approvals.request"],
+  "dependencies": [
+    "run-configurations",
+    "workspace"
+  ],
+  "calls": [
+    "workspace",
+    "run-configurations"
+  ],
+  "capabilities": [
+    "process.scope",
+    "fs.scope",
+    "ssh.connect",
+    "approvals.request"
+  ],
   "runsOn": "ui",
   "distribution": "marketplace",
   "stateVersion": 1,
