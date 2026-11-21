@@ -25,6 +25,7 @@ import { exportMcpTools } from "@hato/sdk/mcp";
 import { historyEvent, historySnapshot, historyWindow, mapToCommitted, openHistory, restoreHistory } from "./history";
 import type { OpenLocation } from "@hato/sdk/run";
 import type { RunCandidate } from "@hato/sdk/run-configurations";
+import { bpEditor, debugAvailable, debugEditorFields, debugTypes, editorEvent, editorPopover, gutterTooltip, hasRunMarker, initDebug, loadDebug, openEditor, toggleBreakpoint } from "./debug-gutter";
 
 // ---- Git change markers -------------------------------------------------------------------
 // HEAD text per open file; hunks are recomputed locally as the buffer changes.
@@ -36,7 +37,6 @@ let runGutter: { workspaceId: string; path: string; candidates: RunCandidate[] }
 let runAvailable = false;
 let runMenu: { workspaceId: string; path: string; candidates: RunCandidate[]; y: number } | null = null;
 let runSourceKey = "";
-const runIcon = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="m7 4 14 8-14 8z"/></svg>';
 
 function publishRunSource(ctx: ModuleContext) {
   const source = current && !current.diff && !current.virtual && !current.binary && !current.truncated
@@ -573,6 +573,12 @@ const mod: AppModule = {
     ctx.events.on("viewer.openLocation", openLocation);
     ctx.events.on("run-panel.openLocation", openLocation);
     ws = ctx.state.get("workspace.selected") || null;
+    initDebug(ctx, {
+      invalidate: () => ctx.ui.invalidate(),
+      currentText: path => current && !current.diff && current.relativePath === path ? (buffers.get(current.document)?.text ?? current.text ?? null) : null,
+      reveal: (path, line) => { if (ws) openLocation({ workspaceId: ws.id, path, line }); },
+    });
+    void loadDebug(ctx, ws?.id || null);
     restoreTabs();
     // Keep an open diff current as the working tree changes.
     ctx.events.on("git-panel.statusChanged", (e: any) => {
@@ -589,6 +595,7 @@ const mod: AppModule = {
     ctx.events.on("files.changed", (e: any) => { if (e?.workspaceId === ws?.id) void refreshFromDisk(ctx); });
     ctx.state.watch("workspace.selected", (v: any) => {
       const changed = ws?.id !== v?.id; ws = v;
+      if (changed) void loadDebug(ctx, v?.id || null);
       if (changed) { projectLanguageEnabled = true; languageError = null; navigation = null; generation++; current = null; loadingPath = null; restoreTabs(); }
       void load(ctx);
     });
@@ -759,10 +766,12 @@ const mod: AppModule = {
         completionResolveMethod: assist && canEdit ? "editor.resolveCompletion" : undefined,
         lineMarkers: hunks.map((h, index) => ({ line: h.line, endLine: h.line + h.added, color: !h.added ? "danger" : h.removed.length ? "primary" : "success", value: index })),
         lineMarkerAction: "showHunk",
-        gutterMarkers: runLines.map(line => ({ line, iconSvg: runIcon, color: "success", value: line })),
-        gutterMarkerAction: "showRunMenu", gutterTooltip: "Run configuration actions",
-        lineAnnotations: declarationAuthors && current && !current.virtual && !current.binary && !current.truncated && ws
-          ? declarationAnnotations(ws.id, current.relativePath, language?.grammar, buffers.get(current.document)?.text ?? current.text) : undefined,
+        // Breakpoints share the gutter lane with run markers; plain files outside the workspace get neither.
+        ...debugEditorFields(current && !current.virtual && !current.binary ? current.relativePath : null, runLines,
+          declarationAuthors && current && !current.virtual && !current.binary && !current.truncated && ws
+            ? declarationAnnotations(ws.id, current.relativePath, language?.grammar, buffers.get(current.document)?.text ?? current.text) : undefined),
+        gutterMarkerAction: "gutterClick", gutterTooltip: gutterTooltip(),
+        ...(debugAvailable && current && !current.virtual && !current.binary ? { gutterClickAction: "gutterClick", gutterContextAction: "gutterMenu" } : {}),
         definitionArgs: { workspaceId: ws?.id, path: current?.relativePath }, openLocationAction: "openDefinition",
         search: editorSearch,
         contextMenu: current && !current.virtual && !current.binary && current.document ? (() => {
@@ -793,16 +802,21 @@ const mod: AppModule = {
         { type: "label", key: "lang", text: diff ? (current.truncated ? "diff (truncated)" : "") : current && showMetadata ? `${current.language} · ${current.size} B${current.truncated ? " (truncated)" : ""}` : "", size: "xs", color: "muted" },
       ] }
     );
-    if (runMenu && runMenu.workspaceId === ws?.id && runMenu.path === current?.relativePath) {
+    const runButtons = (candidates: RunCandidate[]) => candidates.flatMap((candidate, index): UiNode[] => {
+      const debuggable = debugAvailable && debugTypes.includes(candidate.type);
+      return [
+        { type: "button", key: `run:${index}`, text: `Run '${candidate.name}'`, action: "runCandidate", value: index, small: true, variant: "ghost",
+          disabled: !runAvailable, tooltip: runAvailable ? undefined : "Available when the Run service is installed" },
+        { type: "button", key: `debug:${index}`, text: `Debug '${candidate.name}'`, action: "debugCandidate", value: index, small: true, variant: "ghost",
+          disabled: !runAvailable || !debuggable, tooltip: !debugAvailable ? "Available when the Debugger is installed" : debuggable ? undefined : `Debugging isn’t supported for ${candidate.type}` },
+        { type: "button", key: `edit:${index}`, text: "Edit configuration…", action: "editRunCandidate", value: index, small: true, variant: "ghost" },
+      ];
+    });
+    const bp = !diff ? editorPopover(current?.relativePath ?? null, runMenu && runMenu.path === current?.relativePath ? runButtons(runMenu.candidates) : []) : null;
+    if (bp) kids.push(bp);
+    else if (runMenu && runMenu.workspaceId === ws?.id && runMenu.path === current?.relativePath) {
       kids.push({ type: "popover", key: "run-menu", width: 245, top: runMenu.y, left: 24, maxHeight: 155,
-        style: { background: "panel", padding: 6, radius: 6, borderWidth: 1, borderColor: "border" }, closeAction: "closeRunMenu", children: [
-          ...runMenu.candidates.flatMap((candidate, index): UiNode[] => [
-            { type: "button", key: `run:${index}`, text: `Run '${candidate.name}'`, action: "runCandidate", value: index, small: true, variant: "ghost",
-              disabled: !runAvailable, tooltip: runAvailable ? undefined : "Available when the Run service is installed" },
-            { type: "button", key: `debug:${index}`, text: `Debug '${candidate.name}'`, action: "", disabled: true, small: true, variant: "ghost", tooltip: "Available with debugger support" },
-            { type: "button", key: `edit:${index}`, text: "Edit configuration…", action: "editRunCandidate", value: index, small: true, variant: "ghost" },
-          ]),
-        ] });
+        style: { background: "panel", padding: 6, radius: 6, borderWidth: 1, borderColor: "border" }, closeAction: "closeRunMenu", children: runButtons(runMenu.candidates) });
     }
     if (hunkView) {
       const h = hunkView.hunk;
@@ -839,15 +853,32 @@ const mod: AppModule = {
     } catch (e) { error = errMsg(e); ctx.ui.invalidate(); return; }
     if (!ws) return;
     try {
-      if (ev.action === "showRunMenu") {
-        const v = ev.value as { marker?: number; y?: number } | null;
-        if (!runGutter || runGutter.workspaceId !== ws.id || runGutter.path !== current?.relativePath) return;
-        runMenu = { workspaceId: ws.id, path: runGutter.path, candidates: runGutter.candidates.filter(c => c.line === v?.marker), y: Math.max(36, Number(v?.y) + 54 || 36) };
+      if (await editorEvent(ctx, ev.action, ev.value, ev.inputs || {})) return;
+      const runMenuAt = (line: number, y: number) => {
+        if (!runGutter || runGutter.workspaceId !== ws.id || runGutter.path !== current?.relativePath) return false;
+        const candidates = runGutter.candidates.filter(c => c.line === line);
+        if (!candidates.length) return false;
+        runMenu = { workspaceId: ws.id, path: runGutter.path, candidates, y: Math.max(36, y + 54 || 36) };
+        return true;
+      };
+      if (ev.action === "showRunMenu" || ev.action === "gutterClick") {
+        // Older hosts send the run marker's line number; current ones send {kind, line} plus the clicked line.
+        const v = ev.value as { marker?: unknown; line?: number; y?: number } | null;
+        const line = typeof v?.marker === "number" ? v.marker : Number.isInteger((v?.marker as any)?.line) ? (v!.marker as any).line : v?.line;
+        if (!Number.isInteger(line) || !current) return;
+        if (typeof v?.marker === "number" || hasRunMarker(v?.marker)) runMenuAt(line!, Number(v?.y));
+        else await toggleBreakpoint(ctx, current.relativePath, line!);
+      } else if (ev.action === "gutterMenu") {
+        const v = ev.value as { marker?: unknown; line?: number; y?: number } | null;
+        if (!current || !Number.isInteger(v?.line)) return;
+        const runLine = runMenuAt(v!.line!, Number(v?.y));
+        openEditor(current.relativePath, v!.line!, Number(v?.y) || 0, runLine);
       } else if (ev.action === "closeRunMenu") runMenu = null;
-      else if (ev.action === "editRunCandidate" || ev.action === "runCandidate") {
+      else if (ev.action === "editRunCandidate" || ev.action === "runCandidate" || ev.action === "debugCandidate") {
         const c = runMenu?.candidates[Number(ev.value)];
         runMenu = null;
-        if (c) ctx.events.emit(ev.action === "editRunCandidate" ? "viewer.runConfiguration" : "viewer.startRunCandidate", { ...c, workspaceId: ws.id });
+        if (bpEditor) await editorEvent(ctx, "bpClose", null, {});
+        if (c) ctx.events.emit(ev.action === "editRunCandidate" ? "viewer.runConfiguration" : "viewer.startRunCandidate", { ...c, workspaceId: ws.id, mode: ev.action === "debugCandidate" ? "debug" : "run" });
       } else if (ev.action === "viewHistory") {
         const v: any = ev.value || {};
         if (!current || current.diff || v.document !== current.document) return;

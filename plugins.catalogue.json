@@ -8,7 +8,7 @@
       "type": "System",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.45",
+      "version": "0.1.46",
       "coreVersion": "^0.1.0",
       "description": "Hato essentials services and panels.",
       "dependencies": {},
@@ -79,9 +79,9 @@
       "type": "Development",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "coreVersion": "^0.1.0",
-      "description": "Save and detect Java and JavaScript/TypeScript run configurations.",
+      "description": "Run configurations, Run bar and console, and the debugger for Java and JavaScript/TypeScript.",
       "dependencies": {
         "foundation": "^0.1.45"
       },
@@ -90,7 +90,9 @@
         "run-configurations-panel",
         "run",
         "run-bar",
-        "run-panel"
+        "run-panel",
+        "debug",
+        "debug-panel"
       ]
     },
     {
@@ -210,7 +212,7 @@
       "type": "Languages",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.11",
+      "version": "0.1.12",
       "coreVersion": "^0.1.0",
       "description": "Shared language support for local and SSH workspaces.",
       "dependencies": {
@@ -228,7 +230,7 @@
       "type": "Languages",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.11",
+      "version": "0.1.12",
       "coreVersion": "^0.1.0",
       "description": "Java highlighting and Eclipse JDTLS navigation.",
       "dependencies": {

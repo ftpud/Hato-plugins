@@ -106,10 +106,19 @@ function configValue(settings: Record<string, any>, section?: string) {
   if (!section) return settings;
   return section.split(".").reduce((value, key) => value?.[key], settings) ?? null;
 }
+const bundleKey = (server: LanguageServerSpec) => `language-server.${server.id}.bundles`;
+/** Extension bundles (absolute JAR paths on the workspace machine) another module installed, e.g. java-debug. */
+async function extraBundles(ctx: ModuleContext, d: WorkspaceDescriptor, server: LanguageServerSpec): Promise<string[]> {
+  const stored = await scopedGet(ctx, bundleKey(server), d);
+  return Array.isArray(stored?.value) ? stored!.value.filter((p): p is string => typeof p === "string") : [];
+}
 async function start(ctx: ModuleContext, d: WorkspaceDescriptor, server: LanguageServerSpec, key: string): Promise<Session> {
   const configured = await configuredServer(ctx, d, server);
   if (!configured.config.enabled) { report(ctx, d, server, { phase: "disabled", message: "Disabled for this workspace" }); throw new Error(`${server.id} is disabled for this workspace`); }
   server = configured.server;
+  const bundles = await extraBundles(ctx, d, server);
+  if (bundles.length) server = { ...server, initializationOptions: { ...server.initializationOptions,
+    bundles: [...(Array.isArray(server.initializationOptions?.bundles) ? server.initializationOptions.bundles : []), ...bundles] } };
   report(ctx, d, server, { phase: "starting", message: "Starting language server…", capabilities: {}, diagnostics: 0, log: [], importError: null });
   const executableSetting = await scopedGet(ctx, `language-server.${server.id}.executable`, d);
   const executable = typeof executableSetting?.value === "string" && executableSetting.value.trim() ? executableSetting.value.trim() : server.executable;
@@ -381,6 +390,34 @@ const mod: AppModule = {
       const key = sessionKey(d, server), pending = sessions.get(key);
       if (pending) { sessions.delete(key); await pending.then(s => dispose(ctx, s)).catch(() => {}); }
       await sessionFor(ctx, d, server); return statuses.get(key);
+    },
+    /** Debugger-installed extension bundles for a server in this workspace; restarts it when they change. */
+    async "bundles.set"(ctx, a, meta) {
+      if (meta?.caller !== "debug") throw new Error("Only the debugger can add language server bundles");
+      const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
+      const server = servers().find(s => s.id === a.serverId);
+      if (!server) throw new Error("Language server is no longer available");
+      const bundles = Array.isArray(a.bundles) ? a.bundles : [];
+      if (bundles.length > 8 || !bundles.every((p: unknown) => typeof p === "string" && p.startsWith("/") && p.endsWith(".jar") && p.length < 1024 && !p.includes("\n")))
+        throw new Error("Bundles must be absolute JAR paths");
+      const current = await extraBundles(ctx, d, server);
+      if (JSON.stringify(current) === JSON.stringify(bundles)) return { changed: false };
+      await scopedSet(ctx, `workspace:${d.id}`, bundleKey(server), bundles);
+      const key = sessionKey(d, server), pending = sessions.get(key);
+      if (pending) { sessions.delete(key); await pending.then(s => dispose(ctx, s)).catch(() => {}); }
+      return { changed: true };
+    },
+    /** Run an allowlisted `workspace/executeCommand` (see LanguageServerSpec.commands), starting the server if needed. */
+    async executeCommand(ctx, a) {
+      const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
+      const server = servers().find(s => s.id === a.serverId);
+      if (!server) throw new Error("Language server is no longer available");
+      if (typeof a.command !== "string" || !server.commands?.includes(a.command)) throw new Error(`${server.id} does not allow the command ${String(a.command)}`);
+      const session = await sessionFor(ctx, d, server);
+      const operation = session.queue.catch(() => {}).then(() => session.peer.request("workspace/executeCommand",
+        { command: a.command, arguments: Array.isArray(a.arguments) ? a.arguments : [] }, Number.isInteger(a.timeoutMs) ? Math.min(a.timeoutMs, 300000) : 120000));
+      session.queue = operation.catch(() => {});
+      return operation;
     },
     async synchronize(ctx, a) { return documentRequest(ctx, a); },
     async saved(ctx, a) {

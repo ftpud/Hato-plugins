@@ -57,3 +57,20 @@ export async function launchCommand(ctx: ModuleContext, d: WorkspaceDescriptor, 
     default: throw new Error(`Unsupported run configuration type: ${c.type}`);
   }
 }
+
+/** JVMs started for debugging wait (suspend=y) on a free loopback port and print it; java-debug attaches. */
+const JDWP = "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:0";
+export const JDWP_LISTENING = /Listening for transport dt_socket at address: (\d+)/;
+/** Add a JDWP agent to the JVM that runs the user's code (not the build tool's own JVM). Gradle's
+ *  --debug-jvm uses its fixed port 5005 and prints the same line. */
+export function javaDebugLaunch(c: RunConfigDraft, launch: Launch): Launch {
+  const gradle = /gradlew?$/.test(launch.executable);
+  switch (c.type) {
+    case "java-application": return { ...launch, args: [JDWP, ...launch.args] };
+    case "spring-boot": return gradle ? { ...launch, args: [...launch.args, "--debug-jvm"] }
+      : { ...launch, args: [...launch.args.slice(0, 1), `-Dspring-boot.run.jvmArguments=${JDWP}`, ...launch.args.slice(1)] };
+    case "junit": return gradle ? { ...launch, args: [...launch.args, "--debug-jvm"] }
+      : { ...launch, args: [...launch.args, `-Dmaven.surefire.debug=${JDWP}`, "-DforkCount=1"] };
+    default: throw new Error(`Debugging isn't supported for ${c.type}`);
+  }
+}
