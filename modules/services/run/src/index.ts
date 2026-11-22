@@ -3,17 +3,13 @@ import type { RunCandidate, RunConfigDraft } from "@hato/sdk/run-configurations"
 import { exportMcpTools } from "@hato/sdk/mcp";
 import { errMsg, targetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import type { AppModule, Handle, ModuleContext, StreamSubscription } from "@hato/sdk/types";
-import { absoluteCwd, buildTools, javaDebugLaunch, JDWP_LISTENING, launchCommand, launchEnvironment, type Launch } from "./launch";
-import { debugKind } from "@hato/sdk/debug";
+import { absoluteCwd, buildTools, launchCommand, launchEnvironment, type Launch } from "./launch";
 
 type StartArgs = Parameters<RunServiceMethods["start"]>[0];
 type Entry = {
   session: RunSession; args: StartArgs; key: string; chunks: RunOutputChunk[]; size: number; dropped: boolean; seq: number;
   handle: Handle | null; cancelled: boolean; killing: boolean; completion: Promise<void>;
   outputTimer?: ReturnType<typeof setTimeout>;
-  /** Debug runs: Node programs belong to js-debug (ended through debugReport); JVMs belong to this
-   *  entry and java-debug attaches once the JDWP port is printed. */
-  debug?: { kind: "js" | "java"; attached: boolean; scan: string; done?: (code: number | null) => void };
 };
 const entries = new Map<string, Entry>();
 let mcp: ReturnType<typeof exportMcpTools>;
@@ -48,7 +44,7 @@ async function workspace(ctx: ModuleContext, workspaceId: string) {
   if (typeof workspaceId !== "string" || !workspaceId) throw new Error("Select a workspace");
   return ctx.modules.call<WorkspaceDescriptor>("workspace", "resolve", { workspaceId });
 }
-async function command(ctx: ModuleContext, d: WorkspaceDescriptor, e: Entry, launch: Launch, main = false, watch?: (text: string) => void) {
+async function command(ctx: ModuleContext, d: WorkspaceDescriptor, e: Entry, launch: Launch, main = false) {
   const grant = await workspaceGrant(ctx, d, "process");
   const target = await targetFor(ctx, d);
   if (e.cancelled) return null;
@@ -65,7 +61,7 @@ async function command(ctx: ModuleContext, d: WorkspaceDescriptor, e: Entry, lau
       let finish: () => void;
       const eof = new Promise<void>(resolve => { finish = resolve; });
       drained.push(eof);
-      subs.push(await ctx.host.streams.listen(handle, { channel }, text => { append(ctx, e, channel, text); watch?.(text); }, () => finish()));
+      subs.push(await ctx.host.streams.listen(handle, { channel }, text => append(ctx, e, channel, text), () => finish()));
     }
     if (e.cancelled) await ctx.host.process.terminate(handle, e.killing ? "SIGKILL" : "SIGTERM");
     await ctx.host.process.closeStdin(handle).catch(() => {});
@@ -111,48 +107,14 @@ async function execute(ctx: ModuleContext, d: WorkspaceDescriptor, e: Entry, c: 
   if (e.cancelled) return null;
   const launch = await launchCommand(ctx, d, c);
   if (e.cancelled) return null;
-  if (main && e.session.mode === "debug") return debugMain(ctx, d, e, c, launch);
   append(ctx, e, "system", `Starting ${c.name}\n`);
   return command(ctx, d, e, launch, main);
-}
-
-async function debugMain(ctx: ModuleContext, d: WorkspaceDescriptor, e: Entry, c: RunConfigDraft, launch: Launch) {
-  const kind = debugKind(c.type);
-  if (!kind) throw new Error(`Debugging isn't supported for ${c.type}`);
-  append(ctx, e, "system", `Debugging ${c.name}\n`);
-  if (kind === "js") {
-    const ended = new Promise<{ code: number | null; signal: number | null }>(resolve => { e.debug = { kind, attached: true, scan: "", done: code => resolve({ code, signal: null }) }; });
-    e.session.phase = "Starting the debugger…"; changed(ctx, d.id);
-    await ctx.modules.call("debug", "launchJs", { workspaceId: d.id, id: e.session.id, name: c.name, type: c.type, launch }, { timeoutMs: 15 * 60 * 1000 });
-    if (!e.cancelled && e.session.state === "starting") { e.session.state = "running"; delete e.session.phase; changed(ctx, d.id); }
-    return ended;
-  }
-  e.debug = { kind, attached: false, scan: "" };
-  const debugged = javaDebugLaunch(c, launch);
-  try {
-    return await command(ctx, d, e, debugged, true, text => {
-      const dbg = e.debug!;
-      if (dbg.attached) return;
-      dbg.scan = (dbg.scan + text).slice(-400);
-      const port = JDWP_LISTENING.exec(dbg.scan)?.[1];
-      if (!port) return;
-      dbg.attached = true;
-      void ctx.modules.call("debug", "attachJava", { workspaceId: d.id, id: e.session.id, name: c.name, port: Number(port) }, { timeoutMs: 15 * 60 * 1000 })
-        .catch(error => append(ctx, e, "system", `The debugger could not attach: ${errMsg(error)}\n`));
-    });
-  } finally {
-    await ctx.modules.call("debug", "end", { workspaceId: d.id, id: e.session.id }).catch(() => {});
-  }
 }
 
 async function stop(ctx: ModuleContext, e: Entry, force = false) {
   if (!runActive(e.session)) return { ...e.session };
   e.cancelled = true; e.killing ||= force;
   e.session.state = "stopping"; changed(ctx, e.session.workspaceId);
-  if (e.debug) {
-    await ctx.modules.call("debug", "end", { workspaceId: e.session.workspaceId, id: e.session.id }, { timeoutMs: 15000 }).catch(() => {});
-    e.debug.done?.(null);
-  }
   if (e.handle) await ctx.host.process.terminate(e.handle, force ? "SIGKILL" : "SIGTERM").catch(() => {});
   if (!force) {
     await Promise.race([e.completion, pause(2000)]);
@@ -173,7 +135,7 @@ function prune(ctx: ModuleContext, workspaceId: string, keep = 40) {
   changed(ctx, workspaceId);
 }
 async function start(ctx: ModuleContext, d: WorkspaceDescriptor, a: StartArgs) {
-  if (a.mode !== "run" && a.mode !== "debug") throw new Error("Choose run or debug");
+  if (a.mode !== "run") throw new Error("Debugging will be available when the debugger is installed");
   if (!!a.configId === !!a.candidate) throw new Error("Choose one saved or detected configuration");
   const config = await configuration(ctx, d, a);
   const key = a.configId ? `saved:${a.configId}` : JSON.stringify([config.type, config.cwd, config.target]);
@@ -183,11 +145,7 @@ async function start(ctx: ModuleContext, d: WorkspaceDescriptor, a: StartArgs) {
   if (duplicate) throw new Error("This configuration is already running");
   if (byWorkspace(d.id).filter(e => runActive(e.session)).length >= 24) throw new Error("Stop a run before starting another one");
   const session: RunSession = { id: crypto.randomUUID(), workspaceId: d.id, configId: a.configId || null,
-    name: config.name, type: config.type, mode: a.mode, state: "starting", startedAt: Date.now() };
-  if (a.mode === "debug") {
-    if (!debugKind(config.type)) throw new Error(`Debugging isn't supported for ${config.type} configurations`);
-    if (!(await debugAvailable(ctx, d))) throw new Error("Install the Debugger to debug");
-  }
+    name: config.name, type: config.type, mode: "run", state: "starting", startedAt: Date.now() };
   const e: Entry = { session, args: a, key, chunks: [], size: 0, dropped: false, seq: 0, handle: null,
     cancelled: false, killing: false, completion: Promise.resolve() };
   entries.set(session.id, e);
@@ -211,31 +169,10 @@ async function start(ctx: ModuleContext, d: WorkspaceDescriptor, a: StartArgs) {
   return { ...session };
 }
 
-async function debugAvailable(ctx: ModuleContext, d: WorkspaceDescriptor) {
-  return !!(await ctx.modules.call("debug", "capabilities", { workspaceId: d.id }).catch(() => null))?.debug;
-}
-/** Debug service only: console output and pause state of a debug session, and the end of Node sessions. */
-function debugReport(ctx: ModuleContext, d: WorkspaceDescriptor, a: any) {
-  const e = entry(a.id, d.id);
-  if (a.output && typeof a.output.text === "string") append(ctx, e, ["stdout", "stderr", "system"].includes(a.output.stream) ? a.output.stream : "stdout", a.output.text.slice(0, 65536));
-  if (runActive(e.session) && e.session.state !== "stopping") {
-    if (a.state === "paused") {
-      e.session.state = "paused";
-      if (a.pausedAt && typeof a.pausedAt.path === "string" && Number.isInteger(a.pausedAt.line)) e.session.pausedAt = { path: a.pausedAt.path, line: a.pausedAt.line, ...(a.pausedAt.reason ? { reason: String(a.pausedAt.reason) } : {}) };
-      else delete e.session.pausedAt;
-      changed(ctx, d.id);
-    } else if (a.state === "running") { e.session.state = "running"; delete e.session.pausedAt; delete e.session.phase; changed(ctx, d.id); }
-  }
-  if (a.ended && e.debug?.kind === "js") e.debug.done?.(Number.isInteger(a.exitCode) ? a.exitCode : null);
-  return { ok: true };
-}
 type Command = keyof RunServiceMethods;
 async function invoke(ctx: ModuleContext, d: WorkspaceDescriptor, method: Command, a: any) {
   switch (method) {
-    case "capabilities": {
-      const caps = await ctx.modules.call("debug", "capabilities", { workspaceId: d.id }).catch(() => null);
-      return caps?.debug ? { debug: true, debugTypes: caps.debugTypes || [] } : { debug: false, debugTypes: [] };
-    }
+    case "capabilities": return { debug: false, debugTypes: [] };
     case "list": return list(d.id);
     case "start": return start(ctx, d, { ...a, workspaceId: d.id });
     case "stop": return stop(ctx, entry(a.id, d.id), a.force === true);
@@ -286,8 +223,7 @@ const mod: AppModule = {
       if (candidate?.workspaceId !== ctx.state.get<{ id: string }>("workspace.selected")?.id) return;
       try {
         const d = await workspace(ctx, candidate.workspaceId);
-        const { workspaceId: _w, mode, ...picked } = candidate as RunCandidate & { workspaceId: string; mode?: string };
-        await start(ctx, d, { workspaceId: d.id, candidate: picked, mode: mode === "debug" ? "debug" : "run" });
+        await start(ctx, d, { workspaceId: d.id, candidate, mode: "run" });
       } catch (e) { ctx.host.ui.toast("error", errMsg(e)); }
     });
     mcp = exportMcpTools(ctx, "Run sessions", definitions.map(([method, description, properties, required]) => ({
@@ -298,6 +234,7 @@ const mod: AppModule = {
         const d = await workspace(ctx, scope.workspaceId);
         if (d.machineId !== scope.machineId) throw new Error("MCP machine scope does not match this workspace");
         if (method === "start" || method === "restart") {
+          if (method === "start" && a.mode !== "run") throw new Error("Debugging is not available");
           const target = method === "restart" ? entry(a.id, d.id).session.name : String(a.configId || a.candidate?.name || "").slice(0, 120);
           const result = await ctx.host.approvals.request({ operation: `run.${method}`, title: "Allow this agent to run code?", detail: `${d.name}\n${target}`, timeoutMs: 160000 });
           if (result.optionId !== "allow") throw new Error("Run approval was denied or expired");
@@ -311,12 +248,6 @@ const mod: AppModule = {
     for (const e of entries.values()) if (e.outputTimer) clearTimeout(e.outputTimer);
   },
   snapshot: () => [...entries.values()].map(({ session, args, key, chunks, size, dropped, seq }) => ({ session, args, key, chunks, size, dropped, seq })),
-  methods: {
-    ...Object.fromEntries(definitions.map(([method]) => [method, async (ctx: ModuleContext, a: any) => invoke(ctx, await workspace(ctx, a.workspaceId), method, a)])),
-    async debugReport(ctx, a, meta) {
-      if (meta?.caller !== "debug") throw new Error("Only the debugger reports debug state");
-      return debugReport(ctx, await workspace(ctx, a.workspaceId), a);
-    },
-  },
+  methods: Object.fromEntries(definitions.map(([method]) => [method, async (ctx: ModuleContext, a: any) => invoke(ctx, await workspace(ctx, a.workspaceId), method, a)])),
 };
 export default mod;
