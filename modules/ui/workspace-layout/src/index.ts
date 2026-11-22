@@ -645,6 +645,7 @@ const mod: AppModule = {
     ctx.events.on("run-bar.reveal", (event: any) => { if (event?.workspaceId === ws?.id) revealPanel(ctx, "run"); });
     ctx.events.on("run.reveal", (event: any) => { if (event?.workspaceId === ws?.id) revealPanel(ctx, "run"); });
     ctx.events.on("run-panel.openLocation", (event: any) => { if (event?.workspaceId === ws?.id) revealPanel(ctx, "viewer"); });
+    ctx.events.on("debug-panel.reveal", (event: any) => { if (event?.workspaceId === ws?.id) revealPanel(ctx, "debug"); });
     ctx.events.on("ai.chatOpened", () => revealPanel(ctx, "ai"));
     ctx.events.on("workspace.viewChanged", (event: any) => {
       if (event?.workspaceId === ws?.id && event?.changed?.includes("previewPath") && event.previewPath) revealPanel(ctx, "viewer");

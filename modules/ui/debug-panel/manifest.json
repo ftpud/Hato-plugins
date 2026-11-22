@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 2,
+  "id": "debug-panel",
+  "name": "Debug panel",
+  "kind": "ui",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [],
+  "calls": [
+    "debug",
+    "persistence"
+  ],
+  "capabilities": [],
+  "runsOn": "ui",
+  "distribution": "marketplace",
+  "stateVersion": 1,
+  "description": "Debugger controls, threads and frames, variables and watches, debug console and breakpoints.",
+  "contributes": {
+    "panels": [
+      {
+        "id": "debug",
+        "title": "Debug",
+        "defaultHidden": true,
+        "dock": "bottom",
+        "activity": {
+          "side": "left",
+          "order": 46,
+          "title": "Debug",
+          "iconSvg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\"><path d=\"M8 9a4 4 0 0 1 8 0v6a4 4 0 0 1-8 0zM12 9v10M4 13h4m8 0h4M5 7l3 2m11-2-3 2M5 19l3-2m11 2-3-2\"/></svg>"
+        }
+      }
+    ]
+  },
+  "author": "Hato contributors",
+  "version": "0.1.3",
+  "pluginPackage": "run-configurations",
+  "pluginType": "Development"
+}
