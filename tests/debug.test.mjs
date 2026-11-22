@@ -212,7 +212,7 @@ test('paused hover expands a paged row on the same request and rejects a dismiss
   assert.equal(tree().rows.find(r => r.key === rowKey).expanded, true);
   assert.ok(tree().rows.some(r => r.label === '100' && r.value === '42'));
   assert.deepEqual(calls.filter(c => c.method === 'variables').map(c => c.args), [
-    { workspaceId: 'test', id: 's', conn: 2, variablesReference: 10, filter: 'named', count: 300 },
+    { workspaceId: 'test', id: 's', conn: 2, variablesReference: 10, filter: 'named' },
     { workspaceId: 'test', id: 's', conn: 2, variablesReference: 10, filter: 'indexed', start: 100, count: 100 },
   ]);
   delayed = true;
@@ -221,4 +221,53 @@ test('paused hover expands a paged row on the same request and rejects a dismiss
   answer();
   await pending;
   assert.equal(response(), undefined);
+});
+
+test('debug service only sends DAP paging arguments for indexed children', async () => {
+  const workspaceId = 'java-variables', id = 'java-variables-session';
+  let stdout;
+  const requests = [];
+  const receive = event => stdout(JSON.stringify(event) + '\n');
+  const ctx = {
+    events: { emit() {} },
+    modules: { call: async (module, method) => {
+      if (module === 'workspace') return { id: workspaceId, rootAbsolutePath: '/repo', machineId: 'local', location: 'local' };
+      if (module === 'language-service' && method === 'bundles.set') return { changed: false };
+      if (module === 'language-service' && method === 'executeCommand') return 54321;
+      throw Error(`unexpected ${module}.${method}`);
+    } },
+    host: {
+      capabilities: { request: async () => ({ grant: 'test' }) },
+      streams: { listen: async (_, { channel }, callback) => {
+        if (channel === 'stdout') {
+          stdout = callback;
+          receive({ ev: 'ready', port: 54321 });
+        }
+        return { close: async () => {} };
+      } },
+      process: {
+        run: async () => ({ stdout: 'HATO_DEBUG_ADAPTER_RESULT:{"java-debug":"/adapter.jar"}\n' }),
+        spawn: async () => ({ handle: 'relay' }),
+        write: async (_, line) => {
+          const { op, id: conn, msg } = JSON.parse(line);
+          if (op === 'open') { receive({ ev: 'opened', id: conn }); return; }
+          assert.equal(op, 'send');
+          if (msg.command === 'variables') requests.push(msg.arguments);
+          receive({ ev: 'msg', id: conn, msg: { type: 'response', request_seq: msg.seq, success: true,
+            body: { variables: [{ name: 'task', value: 'Task@43', variablesReference: 19 }] } } });
+        },
+      },
+    },
+  };
+  await debug.methods.attachJava(ctx, { workspaceId, id, name: 'Java fixture', port: 54322 }, { caller: 'run' });
+  const args = { workspaceId, id, variablesReference: 10, start: 200, count: 300 };
+  const fields = await debug.methods.variables(ctx, args);
+  assert.equal(fields[0].variablesReference, 19);
+  await debug.methods.variables(ctx, { ...args, filter: 'named' });
+  await debug.methods.variables(ctx, { ...args, filter: 'indexed', count: 50 });
+  assert.deepEqual(requests, [
+    { variablesReference: 10 },
+    { variablesReference: 10, filter: 'named' },
+    { variablesReference: 10, filter: 'indexed', start: 200, count: 50 },
+  ]);
 });

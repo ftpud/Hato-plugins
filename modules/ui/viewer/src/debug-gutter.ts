@@ -95,7 +95,7 @@ async function refreshInline(ctx: ModuleContext) {
   try {
     const scopes: { name: string; variablesReference: number; expensive: boolean }[] = await ctx.modules.call("debug", "scopes", { workspaceId, id: s.id, conn: st.conn, frameId: st.frameId });
     const scope = scopes.find(x => !x.expensive && x.variablesReference > 0);
-    const vars: DebugVariable[] = scope ? await ctx.modules.call("debug", "variables", { workspaceId, id: s.id, conn: st.conn, variablesReference: scope.variablesReference, count: 200 }) : [];
+    const vars: DebugVariable[] = scope ? await ctx.modules.call("debug", "variables", { workspaceId, id: s.id, conn: st.conn, variablesReference: scope.variablesReference }) : [];
     const lineText = text.split("\n")[st.line] || "";
     const value = inlineValues(lineText, vars);
     inline = value ? { key, path: st.path!, line: st.line, text: value } : null;
@@ -329,7 +329,7 @@ async function loadHoverChildren(ctx: ModuleContext, range: ChildRange) {
   if (!h || hoverChildren.has(childKey(range))) return;
   const { variablesReference, start, count, filter } = range;
   const list: ValueVariable[] = await ctx.modules.call("debug", "variables", { workspaceId, id: h.frame.id, conn: h.frame.conn, variablesReference,
-    ...(filter ? { filter } : {}), ...(start !== undefined ? { start, count } : { count: 300 }) }).catch(() => []);
+    ...(filter ? { filter } : {}), ...(start !== undefined ? { start, count } : {}) }).catch(() => []);
   if (hover === h) hoverChildren.set(childKey(range), list || []);
 }
 

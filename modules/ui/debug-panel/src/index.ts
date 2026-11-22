@@ -102,7 +102,7 @@ async function loadChildren(ctx: ModuleContext, s: DebugSessionInfo, range: Chil
   if (mine !== epoch || children.has(key) || !frame) return;
   const { variablesReference, start, count, filter } = range;
   const list = await call<ValueVariable[]>(ctx, "variables", { id: s.id, conn: frame.conn, variablesReference, ...(filter ? { filter } : {}),
-    ...(start !== undefined ? { start, count } : { count: 300 }) });
+    ...(start !== undefined ? { start, count } : {}) });
   if (mine === epoch) children.set(key, list);
 }
 /** Reopens expanded rows level by level after a stop: each pass renders (to learn the new

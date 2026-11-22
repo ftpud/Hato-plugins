@@ -374,8 +374,10 @@ async function operation(ctx: ModuleContext, d: WorkspaceDescriptor, op: Op, a: 
       if (!Number.isInteger(a.variablesReference) || a.variablesReference <= 0) throw new Error("variablesReference is required");
       const body = await s.relay!.request(conn, "variables", { variablesReference: a.variablesReference,
         ...(a.filter === "indexed" || a.filter === "named" ? { filter: a.filter } : {}),
-        ...(Number.isInteger(a.start) && a.start >= 0 ? { start: a.start } : {}),
-        ...(Number.isInteger(a.count) && a.count >= 0 ? { count: Math.min(a.count, 500) } : {}) });
+        // A positive count selects java-debug's array-only path, which rejects plain objects
+        // and out-of-bounds slices. Only send paging arguments for explicit indexed requests.
+        ...(a.filter === "indexed" && Number.isInteger(a.start) && a.start >= 0 ? { start: a.start } : {}),
+        ...(a.filter === "indexed" && Number.isInteger(a.count) && a.count > 0 ? { count: Math.min(a.count, 500) } : {}) });
       return (body?.variables || []).slice(0, 500).map(variable);
     }
     case "evaluate": {
