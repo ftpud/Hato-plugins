@@ -12,6 +12,9 @@ const icons = {
   restart: svg("<path d='M20 12a8 8 0 1 1-2.3-5.6M20 4v5h-5'/>"),
   follow: svg("<path d='M12 4v14m-6-6 6 6 6-6M5 21h14'/>"),
   wrap: svg("<path d='M3 6h18M3 12h15a3 3 0 0 1 0 6h-4m2-2-2 2 2 2M3 18h7'/>"),
+  // Tab glyphs: outline bug for debug sessions, play triangle for runs. Color carries the state.
+  debug: svg("<path d='M9 7.5V6a3 3 0 0 1 6 0v1.5'/><rect x='7' y='7.5' width='10' height='12' rx='5'/><path d='M12 11v8.5M7 12H3.5M17 12h3.5M7.4 16.5 4 18.5M16.6 16.5l3.4 2M7.6 9 5 6.5M16.4 9 19 6.5'/>"),
+  run: svg("<path d='M7.5 5v14l11.5-7z'/>", true),
 };
 
 const MAX_LINES = 20000, LINE_HEIGHT = 18;
@@ -138,9 +141,22 @@ function duration(s: RunSession) {
   const h = Math.floor(total / 3600), m = Math.floor(total / 60) % 60, sec = total % 60;
   return h ? `${h}h ${m}m ${sec}s` : m ? `${m}m ${sec}s` : `${sec}s`;
 }
+/** SIGINT/SIGTERM/SIGKILL exits (130/143/137) come from Stop, not a crash. */
+const stoppedBySignal = (s: RunSession) => s.state === "exited" && (s.exitCode === 130 || s.exitCode === 143 || s.exitCode === 137);
 function tabLabel(s: RunSession) {
-  const mark = s.state === "exited" ? (s.exitCode === 0 ? " ✓" : ` ✗${s.exitCode ?? ""}`) : s.state === "failed" ? " ✗" : s.state === "paused" ? " ⏸" : runActive(s) ? " ●" : "";
-  return `${s.mode === "debug" ? "🐞" : "▶"} ${s.name}${mark}`;
+  const mark = s.state === "exited" ? (s.exitCode === 0 ? " ✓" : stoppedBySignal(s) ? "" : ` ✗ ${s.exitCode ?? ""}`) : s.state === "failed" ? " ✗" : s.state === "paused" ? " ⏸" : "";
+  return `${s.name}${mark}`;
+}
+function tabIcon(s: RunSession) {
+  const color = s.state === "paused" ? "warning" : s.state === "failed" || (s.state === "exited" && s.exitCode !== 0 && !stoppedBySignal(s)) ? "danger"
+    : runActive(s) ? "success" : "muted";
+  return { iconSvg: s.mode === "debug" ? icons.debug : icons.run, iconColor: color };
+}
+function tabTooltip(s: RunSession) {
+  const kind = s.mode === "debug" ? "Debug" : "Run";
+  const state = s.state === "exited" ? (s.exitCode === 0 ? "finished" : stoppedBySignal(s) ? `stopped (exit ${s.exitCode})` : `exited with code ${s.exitCode ?? "?"}`)
+    : s.state === "failed" ? `failed${s.error ? `: ${s.error}` : ""}` : s.state;
+  return `${kind} · ${s.name} · ${state} · ${duration(s)}`;
 }
 
 function lineNode(line: Line, i: number): UiNode {
@@ -232,7 +248,7 @@ const mod: AppModule = {
       { text: "Close all finished", action: "closeEnded", disabled: !ended.length },
     ];
     return { type: "column", key: "run-panel", grow: true, children: [
-      { type: "tabStrip", key: "sessions", tabs: sessions.map(s => ({ key: s.id, label: tabLabel(s), contextMenu: menu(s) })), active: current.id, action: "tab" },
+      { type: "tabStrip", key: "sessions", tabs: sessions.map(s => ({ key: s.id, label: tabLabel(s), ...tabIcon(s), tooltip: tabTooltip(s), contextMenu: menu(s) })), active: current.id, action: "tab" },
       ...(error ? [{ type: "status", key: "error", text: error, level: "error" } as UiNode] : []),
       sessionView(current),
     ] };

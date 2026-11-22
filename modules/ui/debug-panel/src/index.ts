@@ -22,6 +22,7 @@ const icons = {
   watch: svg("<path d='M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z'/><circle cx='12' cy='12' r='3'/>"),
   bp: svg("<circle cx='12' cy='12' r='6.5'/>", true),
   bpOff: svg("<circle cx='12' cy='12' r='6'/>"),
+  bug: svg("<path d='M9 7.5V6a3 3 0 0 1 6 0v1.5'/><rect x='7' y='7.5' width='10' height='12' rx='5'/><path d='M12 11v8.5M7 12H3.5M17 12h3.5M7.4 16.5 4 18.5M16.6 16.5l3.4 2M7.6 9 5 6.5M16.4 9 19 6.5'/>"),
 };
 
 let workspaceId: string | null = null;
@@ -286,7 +287,8 @@ const mod: AppModule = {
       { type: "column", key: "bp", grow: true, children: [breakpointsView()] },
     ] };
     const sessionTabs: UiNode[] = sessions.length > 1 ? [{ type: "tabStrip", key: "sessions", active: s.id, action: "session",
-      tabs: sessions.map(x => ({ key: x.id, label: `${x.state === "paused" ? "⏸" : x.state === "ended" ? "■" : "●"} ${x.name}` })) }] : [];
+      tabs: sessions.map(x => ({ key: x.id, label: x.name, iconSvg: x.state === "paused" ? icons.paused : icons.bug,
+        iconColor: x.state === "paused" ? "warning" : x.state === "ended" ? "muted" : "success", tooltip: `${x.name} · ${x.state}` })) }] : [];
     const smart: UiNode[] = smartTargets ? [{ type: "popover", key: "smart", width: 320, top: 40, left: 120, closeAction: "smartClose", style: { background: "panel", padding: 6, radius: 8, borderWidth: 1, borderColor: "border" },
       children: smartTargets.length ? [{ type: "label", key: "t", text: "Step into which call?", size: "xs", color: "muted" } as UiNode, ...smartTargets.map((t, i): UiNode =>
         ({ type: "button", key: `t${i}`, text: t.label, action: "smartInto", value: t.id, small: true, variant: "ghost", style: { justify: "start", fullWidth: true, font: "mono" } }))]

@@ -8,7 +8,7 @@
       "type": "System",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.49",
+      "version": "0.1.50",
       "coreVersion": "^0.1.0",
       "description": "Hato essentials services and panels.",
       "dependencies": {},
@@ -79,7 +79,7 @@
       "type": "Development",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "coreVersion": "^0.1.0",
       "description": "Run configurations, Run bar and console, and the debugger for Java and JavaScript/TypeScript.",
       "dependencies": {

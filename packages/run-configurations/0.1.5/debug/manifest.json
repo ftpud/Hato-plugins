@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 2,
+  "id": "debug",
+  "name": "Debugger",
+  "kind": "service",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [
+    "workspace",
+    "persistence"
+  ],
+  "calls": [
+    "workspace",
+    "persistence",
+    "run",
+    "language-service"
+  ],
+  "capabilities": [
+    "process.scope",
+    "ssh.connect",
+    "approvals.request"
+  ],
+  "runsOn": "ui",
+  "distribution": "marketplace",
+  "stateVersion": 1,
+  "description": "Debug sessions for JavaScript/TypeScript (js-debug) and Java (java-debug), with project breakpoints.",
+  "author": "Hato contributors",
+  "version": "0.1.5",
+  "pluginPackage": "run-configurations",
+  "pluginType": "Development"
+}
