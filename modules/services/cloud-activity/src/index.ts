@@ -16,9 +16,7 @@ const mod: AppModule = {
   methods: {
     /** `{ items }` — current agent sessions plus recently finished ones (bounded). */
     async snapshot(ctx) {
-      let sessions: RunnerSession[] = [];
-      try { sessions = (await ctx.modules.call("agent-runner", "list", {}, { timeoutMs: 10000 })) ?? []; }
-      catch { /* Runner not active on this machine: report nothing rather than fail. */ }
+      const sessions = await ctx.modules.call<RunnerSession[]>("agent-runner", "list", {}, { timeoutMs: 10000 });
       return { items: activityItems(sessions, remembered, new Date().toISOString()) };
     },
   },

@@ -341,7 +341,20 @@ function connect(ctx: ModuleContext, id: string): Promise<CloudDaemonConnection>
 async function openProject(ctx: ModuleContext, projectId: string) {
   const project = all.projects.find(p => p.id === projectId);
   if (!project) throw new Error("Cloud project not found.");
+  const attempt = epoch;
   const route = await connect(ctx, project.hostId);
+  try {
+    const { plugins } = await ctx.host.daemon.request(route.target, "plugins.list");
+    if (!plugins.some((plugin: { id: string; active: boolean }) => plugin.id === "cloud-activity" && plugin.active)) {
+      const pushed = await ctx.host.daemon.request(route.target, "plugins.push", { id: "cloud-activity" });
+      if (!pushed.active) throw new Error(pushed.error || "Cloud activity module did not activate");
+    }
+  } catch (e) {
+    ctx.log.warn("Could not enable Cloud activity: " + errMsg(e));
+  }
+  if (attempt !== epoch || inactive || routes.get(project.hostId) !== route) {
+    throw new Error("The Cloud session changed while opening the project.");
+  }
   return ctx.modules.call("workspace", "selectCloud", { ...project, machineId: route.machineId });
 }
 

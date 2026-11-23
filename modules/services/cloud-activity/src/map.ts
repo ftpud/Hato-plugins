@@ -5,6 +5,7 @@ export interface RunnerSession {
   status: "starting" | "ready" | "busy" | "waiting" | "stopped" | "interrupted" | "error";
   createdAt?: string;
   updatedAt?: string;
+  error?: string | null;
   workspaceId?: string;
   profile?: { name?: string; provider?: string; label?: string } | null;
   workflow?: unknown;
@@ -37,16 +38,15 @@ function clean(value: unknown, max: number): string | null {
 
 function stateOf(status: RunnerSession["status"], previous: Remembered | undefined): { state: ActivityState; worked: boolean } {
   switch (status) {
-    case "starting":
+    case "starting": return { state: "running", worked: false };
     case "busy": return { state: "running", worked: true };
     case "waiting": return { state: "attention", worked: true };
-    case "error": return { state: "failed", worked: previous?.worked ?? false };
+    case "error": return { state: "failed", worked: false };
     case "stopped":
-    case "interrupted": return { state: "cancelled", worked: previous?.worked ?? false };
+    case "interrupted": return { state: "cancelled", worked: false };
     case "ready":
     default:
-      // An idle session we've seen before has finished its last turn.
-      return { state: "completed", worked: false };
+      return { state: "completed", worked: previous?.worked ?? false };
   }
 }
 
@@ -59,12 +59,11 @@ export function activityItems(sessions: RunnerSession[], remembered: Map<string,
     const id = session.id.slice(0, 120);
     seen.add(id);
     const previous = remembered.get(id);
-    const { state, worked } = stateOf(session.status, previous);
+    // A provider can fail a turn while leaving its ACP session ready for another prompt.
+    const status = session.status === "ready" && session.error ? "error" : session.status;
+    const { state, worked } = stateOf(status, previous);
     // Never-used idle sessions are noise on the overview.
-    if (session.status === "ready" && !previous) {
-      remembered.set(id, { state: "completed", worked: false, at: session.updatedAt ?? now });
-      continue;
-    }
+    if (status === "ready" && !worked) continue;
     const at = state === previous?.state ? previous.at : (session.updatedAt ?? now);
     remembered.set(id, { state, worked, at });
     items.push({
