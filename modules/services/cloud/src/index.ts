@@ -450,7 +450,9 @@ const mod: AppModule = {
       await prepareProject(ctx, String(a.projectId || ""));
     },
     async addProject(ctx, a) {
-      const result = await request(ctx, "/api/projects", "POST", { hostId: a.hostId, name: a.name, path: a.path });
+      const result = await request(ctx, "/api/projects", "POST", {
+        hostId: a.hostId, name: a.name, path: a.path, ...(typeof a.id === "string" ? { id: a.id } : {}),
+      });
       await refresh(ctx);
       return result;
     },

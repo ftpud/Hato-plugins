@@ -8,6 +8,7 @@ import m002 from "../migrations/002_indexes.sql";
 import m003 from "../migrations/003_scoped_settings.sql";
 import m004 from "../migrations/004_ssh_transport.sql";
 import m005 from "../migrations/005_cloud_projects.sql";
+import m006 from "../migrations/006_cloud_root_workspace.sql";
 
 const MIGRATIONS: { version: number; name: string; sql: string }[] = [
   { version: 1, name: "001_init", sql: m001 },
@@ -15,6 +16,7 @@ const MIGRATIONS: { version: number; name: string; sql: string }[] = [
   { version: 3, name: "003_scoped_settings", sql: m003 },
   { version: 4, name: "004_ssh_transport", sql: m004 },
   { version: 5, name: "005_cloud_projects", sql: m005 },
+  { version: 6, name: "006_cloud_root_workspace", sql: m006 },
 ];
 
 let db: Handle | null = null;
@@ -63,7 +65,7 @@ function optStr(v: any): string | null { return typeof v === "string" ? v : null
 const parse = (s: any, d: any) => { try { return s ? JSON.parse(s) : d; } catch { return d; } };
 
 const projectRow = (r: any) => ({ id: r.id, name: r.name, kind: r.kind, rootPath: r.root_path, sshProfileId: r.ssh_profile_id, expanded: !!r.expanded, createdAt: r.created_at,
-  ...(r.kind === "cloud" ? { cloudOrigin: r.cloud_origin, cloudHostId: r.cloud_host_id } : {}),
+  ...(r.kind === "cloud" ? { cloudOrigin: r.cloud_origin, cloudHostId: r.cloud_host_id, ...(r.root_workspace ? { rootWorkspace: true } : {}) } : {}),
 });
 const taskRow = (r: any) => ({ id: r.id, projectId: r.project_id, name: r.name, branch: r.branch, worktreePath: r.worktree_path, status: r.status, createdAt: r.created_at });
 const sshRow = (r: any) => ({ id: r.id, host: r.host, port: r.port, user: r.username, authRef: r.auth_ref, transport: r.transport });
@@ -153,6 +155,29 @@ const mod: AppModule = {
         params: [str(p.id, "id"), str(p.name, "name", 200), str(p.path, "path"), now(), origin, str(p.hostId, "hostId")],
       })));
       return null;
+    },
+    /** Move an SSH project to Hato Cloud in place: same id, same workspace id, so its agents, chats,
+     *  workflows and views stay attached. Machine-scoped settings and agent profiles of the SSH
+     *  machine are copied to the Cloud machine (never removed: the SSH profile may serve others). */
+    "projects.moveToCloud": async (ctx, a, meta) => {
+      if (meta.caller !== "projects") throw new Error("Only Projects may move a project to Hato Cloud");
+      const id = str(a.id, "id"), origin = str(a.origin, "origin"), hostId = str(a.hostId, "hostId");
+      const from = str(a.fromMachineId, "fromMachineId"), to = str(a.toMachineId, "toMachineId");
+      const rows = await q(ctx, "SELECT * FROM projects WHERE id = ? AND kind = 'ssh'", [id]);
+      if (!rows.length) throw new Error("Only SSH projects can be moved to Hato Cloud");
+      await ready;
+      const stamp = now();
+      await ctx.host.db.transaction(db!, [
+        { sql: `UPDATE projects SET kind='cloud', cloud_origin=?, cloud_host_id=?, ssh_profile_id=NULL, root_workspace=1
+                WHERE id=? AND kind='ssh'`, params: [origin, hostId, id] },
+        { sql: `INSERT OR IGNORE INTO scoped_settings(scope,key,value_json,rev,updated_at)
+                SELECT ?, key, value_json, 1, ? FROM scoped_settings WHERE scope = ?`, params: [`machine:${to}`, stamp, `machine:${from}`] },
+        { sql: `INSERT INTO acp_profiles(id,machine_id,project_override_id,provider,name,executable,args_json,env_refs_json,enabled)
+                SELECT lower(hex(randomblob(16))), ?, project_override_id, provider, name, executable, args_json, env_refs_json, enabled
+                FROM acp_profiles WHERE machine_id = ? AND NOT EXISTS (SELECT 1 FROM acp_profiles WHERE machine_id = ?)`, params: [to, from, to] },
+      ]);
+      const moved = await q(ctx, "SELECT * FROM projects WHERE id = ?", [id]);
+      return projectRow(moved[0]);
     },
     "projects.findByRoot": async (ctx, a) => { const r = await q(ctx, "SELECT * FROM projects WHERE kind <> 'cloud' AND root_path = ? AND COALESCE(ssh_profile_id,'') = COALESCE(?, '')", [str(a.rootPath, "rootPath"), optStr(a.sshProfileId)]); return r.length ? projectRow(r[0]) : null; },
     "projects.setExpanded": async (ctx, a) => { await x(ctx, "UPDATE projects SET expanded = ? WHERE id = ?", [a.expanded ? 1 : 0, str(a.id, "id")]); return null; },

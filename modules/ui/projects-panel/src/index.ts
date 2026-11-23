@@ -18,6 +18,7 @@ let selected: string | null = null;
 let error: string | null = null;
 let treeError: string | null = null;
 let notice: string | null = null;
+let noticeLevel: "warn" | "success" = "warn";
 let busy: string | null = null;
 let addForm = false;
 let addSource: AddSource = "local";
@@ -43,7 +44,13 @@ let taskFormFor: string | null = null;
 let taskBranches: any[] = [], taskBranch = "", taskQuery = "";
 let taskBranchLoading = false, taskRequest = 0;
 // Pending destructive/branch action awaiting confirmation in a modal.
-type Confirm = { kind: "merge" | "deleteTask" | "removeProject"; id: string; name: string; deleteBranch: boolean; force: boolean; removeAfter: boolean };
+type Confirm = { kind: "merge" | "deleteTask" | "removeProject" | "moveToCloud"; id: string; name: string; deleteBranch: boolean; force: boolean; removeAfter: boolean };
+/** Cloud host whose name best matches an SSH project's host, else the first online one. */
+function suggestedHost(project: any) {
+  const address = String(project?.host || "").replace(/:\d+$/, "").split("@").pop()?.toLowerCase() || "";
+  const short = address.split(".")[0];
+  return cloudHosts.find(h => h.name.toLowerCase() === address || h.name.toLowerCase() === short)?.id ?? cloudHosts[0]?.id ?? "";
+}
 let confirm: Confirm | null = null;
 const taskMenu = (t: any) => [
   { text: "Merge into project branch…", action: "askMerge", value: t.id, disabled: t.status !== "ready" },
@@ -51,6 +58,7 @@ const taskMenu = (t: any) => [
 ];
 const projectMenu = (p: any) => [
   ...groups.projectMenu(p.id),
+  ...(p.kind === "ssh" && p.transport !== "wsl" ? [{ text: "Move to Hato Cloud…", action: "askMoveToCloud", value: p.id }] : []),
   { text: p.tasks.length ? "Remove from Hato (delete its tasks first)" : "Remove from Hato…", action: "askRemoveProject", value: p.id, disabled: p.tasks.length > 0 },
 ];
 // workspaceId -> number of working AI chats (ai-sessions) and background agents (persistent-agents).
@@ -212,6 +220,25 @@ function confirmModal(c: Confirm): UiNode {
     { type: "toggle", key: "force", label: "Discard uncommitted changes and unmerged commits", checked: c.force, action: "toggleForce" },
     buttons([{ type: "button", key: "delete", text: "Delete task", action: "confirmDeleteTask", variant: "danger", small: true, disabled: !!busy }]),
   ] };
+  if (c.kind === "moveToCloud") {
+    const project = tree.find(p => p.id === c.id);
+    const options = cloudHosts.map(h => ({ value: h.id, label: h.name }));
+    const blocked = !cloudSignedIn ? "Sign in to Hato Cloud from the Cloud panel first."
+      : !options.length ? "No Cloud host is online. Connect this machine from the Cloud panel (Add a host → Via SSH), then try again." : null;
+    return { type: "modal", key: "confirm", title: "Move to Hato Cloud", closeAction: "cancelConfirm", width: 440, children: [
+      { type: "label", key: "text", text: `“${c.name}” will connect through Hato Cloud instead of SSH, so it works from anywhere, even when the machine is behind a firewall.`, size: "sm", wrap: true },
+      { type: "label", key: "keeps", text: "Its agents, chats, workflows, tasks and settings stay with the project.", size: "sm", wrap: true, color: "success" },
+      ...(blocked ? [{ type: "status", key: "blocked", text: blocked, level: "warn" } as UiNode] : [
+        { type: "column", key: "host", gap: 3, children: [
+          { type: "label", key: "l", text: "Cloud host", size: "xs", color: "muted" },
+          { type: "select", key: "cloud-host", options, value: cloudHost || null, action: "moveHost", placeholder: "Choose a host" },
+          { type: "label", key: "hint", text: `Pick the host that is this same machine. ${project?.rootPath ?? "The folder"} must exist there.`, size: "xs", color: "muted", wrap: true },
+        ] } as UiNode,
+      ]),
+      ...errorNode,
+      buttons([{ type: "button", key: "move", text: "Move to Cloud", iconSvg: uiIcons.cloud, action: "confirmMoveToCloud", variant: "primary", small: true, disabled: !!busy || !!blocked || !cloudHost }]),
+    ] };
+  }
   return { type: "modal", key: "confirm", title: "Remove project", closeAction: "cancelConfirm", children: [
     { type: "label", key: "text", text: `Remove “${c.name}” from Hato? Files on disk are not touched; you can add the folder again later.`, size: "sm", wrap: true },
     ...errorNode,
@@ -305,7 +332,7 @@ const mod: AppModule = {
       ] },
     ];
     if ((error || treeError) && !addForm && !confirm) children.push({ type: "status", key: "err", text: (error || treeError)!, level: "error" });
-    if (notice) children.push({ type: "status", key: "notice", text: notice, level: "warn" });
+    if (notice) children.push({ type: "status", key: "notice", text: notice, level: noticeLevel });
     if (busy) children.push({ type: "progress", key: "busy", indeterminate: true, label: busy });
     if (!visibleRows.length) {
       children.push({ type: "label", key: "empty", text: activeGroup && !projects.length ? `No projects in ${activeGroup.name}` : filter.trim() ? "No matching projects or tasks." : "Add a project to get started.", size: "sm", color: "muted", padding: 8 });
@@ -433,13 +460,29 @@ const mod: AppModule = {
           if (!removed) break;
           if (removed.warning) message += ` ${removed.warning}`;
         }
-        confirm = null; notice = message;
+        confirm = null; notice = message; noticeLevel = "warn";
         break;
       }
       case "confirmDeleteTask": {
         const c = confirm; if (!c) break;
         const r = await run("Deleting task…", () => ctx.modules.call("git-tasks", "remove", { taskId: c.id, force: c.force, deleteBranch: c.deleteBranch ? (c.force ? "force" : "merged") : false }, { timeoutMs: 180000 }));
-        if (r) { confirm = null; notice = r.warning || null; }
+        if (r) { confirm = null; notice = r.warning || null; noticeLevel = "warn"; }
+        break;
+      }
+      case "askMoveToCloud": {
+        const project = tree.find((p) => p.id === ev.value);
+        if (!project) break;
+        error = null;
+        confirm = { kind: "moveToCloud", id: project.id, name: project.name, deleteBranch: false, force: false, removeAfter: false };
+        ctx.ui.invalidate();
+        try { await loadCloudHosts(ctx, true); cloudHost = suggestedHost(project); } catch (e) { error = errMsg(e); }
+        break;
+      }
+      case "moveHost": cloudHost = String(ev.value || ""); break;
+      case "confirmMoveToCloud": {
+        const c = confirm; if (!c || !cloudHost) break;
+        const moved = await run("Moving to Hato Cloud…", () => ctx.modules.call("projects", "moveToCloud", { projectId: c.id, hostId: cloudHost }, { timeoutMs: CONNECT_TIMEOUT_MS }));
+        if (moved) { confirm = null; notice = `“${c.name}” now connects through Hato Cloud.`; noticeLevel = "success"; }
         break;
       }
       case "confirmRemoveProject": {

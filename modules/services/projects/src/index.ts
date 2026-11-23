@@ -7,7 +7,7 @@ import { parseOrder } from "@hato/sdk/settings-order";
 import { groupTools, pendingGroups, projectGroups } from "./groups";
 
 interface GitInfo { isGit: boolean; topLevel: string | null; hasCommits: boolean; error?: string; checkedAt: number }
-interface Project { id: string; name: string; kind: "local" | "ssh" | "cloud"; cloudOrigin?: string; cloudHostId?: string; rootPath: string; sshProfileId: string | null; expanded: boolean }
+interface Project { id: string; name: string; kind: "local" | "ssh" | "cloud"; cloudOrigin?: string; cloudHostId?: string; rootWorkspace?: boolean; rootPath: string; sshProfileId: string | null; expanded: boolean }
 const gitCache = new Map<string, GitInfo>();
 const offline = new Map<string, string>(); // projectId -> last connectivity error
 const ORDER_KEY = "projects.order";
@@ -183,6 +183,7 @@ const mod: AppModule = {
         const cloudUnavailable = p.kind === "cloud" && (!host?.online || !cloud?.projectIds.includes(p.id));
         return {
           id: p.id, name: p.name, kind: p.kind, rootPath: p.rootPath, expanded: p.expanded,
+          ...(p.kind === "cloud" && p.rootWorkspace ? { rootWorkspace: true } : {}),
           host: ssh ? (ssh.transport === "wsl" ? ssh.host : `${ssh.user}@${ssh.host}${ssh.port !== 22 ? ":" + ssh.port : ""}`) : host?.name ?? null,
           transport: ssh ? ssh.transport : null,
           auth: ssh?.authRef === "password" ? "password" : null,
@@ -262,6 +263,35 @@ const mod: AppModule = {
       const created = await ctx.modules.call("cloud", "addProject", { hostId: host.id, path: grant.root, name: String(a.name || basename(grant.root)) });
       await refreshGit(ctx, created.id);
       return ctx.modules.call("persistence", "projects.get", { id: created.id });
+    },
+
+    /** Move an SSH project to Hato Cloud in place. It keeps its id and workspace id, so agents,
+     *  chats, workflows, tasks and views stay with it; only the route changes to the Cloud host. */
+    async moveToCloud(ctx, a) {
+      const project = await ctx.modules.call("persistence", "projects.get", { id: String(a.projectId || "") });
+      if (!project) throw new Error("Unknown project");
+      if (project.kind !== "ssh") throw new Error("Only SSH projects can be moved to Hato Cloud.");
+      const { server, signedIn, hosts } = await mod.methods!.cloudHosts(ctx, { refresh: true }, { caller: "projects" });
+      if (!signedIn || !server) throw new Error("Sign in from the Cloud panel first.");
+      const host = hosts.find((h: { id: string }) => h.id === a.hostId);
+      if (!host?.online) throw new Error("Choose an online Cloud host.");
+      // The folder must exist on the chosen Cloud host: this also catches picking the wrong machine.
+      const desc = projectDesc({ ...project, kind: "cloud", rootWorkspace: true, cloudOrigin: server, cloudHostId: host.id }, null);
+      let root: string;
+      try { root = (await workspaceGrant(ctx, desc, "fs")).root; }
+      catch (e) { throw new Error(`${project.rootPath} isn't reachable on ${host.name}. Pick the Cloud host that is this same machine. (${errMsg(e)})`); }
+      const inventory = await ctx.modules.call("cloud", "inventory");
+      const clash = inventory.projects.find((p: { id: string; hostId: string; path: string }) => p.hostId === host.id && p.path === root && p.id !== project.id);
+      if (clash) throw new Error(`This folder is already a separate Cloud project (“${clash.name}”). Remove that one from Hato first, then move this project.`);
+      await ctx.modules.call("cloud", "addProject", { id: project.id, hostId: host.id, name: project.name, path: root });
+      const moved = await ctx.modules.call("persistence", "projects.moveToCloud", {
+        id: project.id, origin: server, hostId: host.id,
+        fromMachineId: `ssh:${project.sshProfileId}`, toMachineId: cloudMachineId(server, host.id),
+      });
+      offline.delete(project.id);
+      await ctx.modules.call("workspace", "refresh", {}).catch(() => {});
+      await refreshGit(ctx, project.id);
+      return moved;
     },
 
     pickFolder: async (ctx) => ctx.host.ui.pickFolder(),
