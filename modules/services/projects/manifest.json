@@ -16,9 +16,12 @@
     "ui.dialog"
   ],
   "stateVersion": 1,
-  "description": "Local and SSH project registration, git detection, project tree.",
+  "description": "Local, SSH and Cloud project registration, Git detection and project tree.",
   "author": "Hato contributors",
   "version": "0.1.50",
   "pluginPackage": "foundation",
-  "pluginType": "System"
+  "pluginType": "System",
+  "calls": [
+    "cloud"
+  ]
 }

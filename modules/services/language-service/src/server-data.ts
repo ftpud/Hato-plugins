@@ -9,7 +9,7 @@ root.mkdir(parents=True,exist_ok=True,mode=0o700)
 print(json.dumps(str(root)))`;
 export async function serverData(ctx: ModuleContext, d: WorkspaceDescriptor, serverId: string, grant: string) {
   const generation = await get(ctx, `language-server.${serverId}.index`, d);
-  const result = await ctx.host.process.run(grant, { target: await targetFor(ctx,d), executable: "python3", args: ["-c", SCRIPT, d.rootAbsolutePath, serverId, String(generation?.value || "1")], cwd: d.rootAbsolutePath, loginShell: d.location === "ssh" }, {timeoutMs:30000});
+  const result = await ctx.host.process.run(grant, { target: await targetFor(ctx,d), executable: "python3", args: ["-c", SCRIPT, d.rootAbsolutePath, serverId, String(generation?.value || "1")], cwd: d.rootAbsolutePath, loginShell: d.location !== "local" }, {timeoutMs:30000});
   if(result.code!==0)throw new Error(`Cannot create language-server data directory on ${d.machineId}: ${result.stderr}`);
   const path=JSON.parse(result.stdout.trim().split(/\r?\n/).pop()!);
   if(typeof path!=="string"||!path.startsWith("/")||/[\r\n\0]/.test(path))throw new Error("Invalid server data directory");

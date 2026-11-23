@@ -110,7 +110,7 @@ async function adapters(ctx: ModuleContext, d: WorkspaceDescriptor, names: Adapt
   const grant = await workspaceGrant(ctx, d, "process");
   const request = { action: install ? "install" : "check", adapters: Object.fromEntries(names.map(n => [n, ADAPTERS[n]])) };
   const r = await ctx.host.process.run(grant.grant, { target: await targetFor(ctx, d), executable: "python3", args: ["-c", INSTALL_SCRIPT, JSON.stringify(request)],
-    cwd: d.rootAbsolutePath, env: {}, loginShell: d.location === "ssh" }, { timeoutMs: install ? 10 * 60 * 1000 : 60000, limitBytes: 65536 });
+    cwd: d.rootAbsolutePath, env: {}, loginShell: d.location !== "local" }, { timeoutMs: install ? 10 * 60 * 1000 : 60000, limitBytes: 65536 });
   const line = (r.stdout || "").split("\n").find(l => l.startsWith(INSTALL_MARKER));
   if (!line) throw new Error(`Python 3 is required on ${d.machineId} to install the debugger. ${(r.stderr || "").slice(-500)}`);
   const result = JSON.parse(line.slice(INSTALL_MARKER.length));

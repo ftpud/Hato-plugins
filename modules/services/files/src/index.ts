@@ -32,11 +32,12 @@ function cleanRel(rel: any): string {
 
 // Write grants are requested lazily (the kernel shows a native approval) and reused per root.
 const writeGrants = new Map<string, Promise<ScopeGrant>>();
-function writeGrant(ctx: ModuleContext, d: WorkspaceDescriptor): Promise<ScopeGrant> {
-  const key = `${d.machineId}|${d.rootAbsolutePath}`;
+async function writeGrant(ctx: ModuleContext, d: WorkspaceDescriptor): Promise<ScopeGrant> {
+  const cloud = d.location === "cloud" ? await targetFor(ctx, d) : null;
+  const key = `${d.machineId}|${d.rootAbsolutePath}${cloud?.kind === "cloud" ? "|" + cloud.connection : ""}`;
   let p = writeGrants.get(key);
   if (!p) {
-    p = (async () => ctx.host.capabilities.request({ kind: "fs", root: d.rootAbsolutePath, target: await targetFor(ctx, d), write: true, purpose: "Save edits and upload files into the workspace." }))();
+    p = (async () => ctx.host.capabilities.request({ kind: "fs", root: d.rootAbsolutePath, target: cloud ?? await targetFor(ctx, d), write: true, purpose: "Save edits and upload files into the workspace." }))();
     writeGrants.set(key, p);
     p.catch(() => writeGrants.delete(key));
   }

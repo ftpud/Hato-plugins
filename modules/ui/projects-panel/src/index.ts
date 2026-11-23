@@ -2,10 +2,10 @@ import { filterInput } from "@hato/sdk/filter-style";
 // projects-panel: left tree of projects and their Git task worktrees.
 // Clicking a row selects a workspace; clicking the chevron expands/collapses (separate events).
 import type { AppModule, ModuleContext, TreeRow, UiNode } from "@hato/sdk/types";
-import { errMsg, wslLocation } from "@hato/sdk/runtime";
+import { errMsg, projectWorkspaceId, wslLocation } from "@hato/sdk/runtime";
 import { uiIcons } from "@hato/sdk/ui-icons";
 import { exportSettings } from "@hato/sdk/settings";
-import { addProjectModal, localRequest, sourcesFor, sshRequest, wslRequest, type AddSource, type FieldErrors, type SshAuth } from "./add-project";
+import { addProjectModal, cloudRequest, localRequest, sourcesFor, sshRequest, wslRequest, type AddSource, type FieldErrors, type SshAuth } from "./add-project";
 import { taskDialog, taskBranchChoice, branchValue } from "./task-dialog";
 import { projectsBranding } from "./branding";
 import { groupPanel } from "./groups";
@@ -22,6 +22,15 @@ let busy: string | null = null;
 let addForm = false;
 let addSource: AddSource = "local";
 let sshAuth: SshAuth = "agent";
+let cloudHosts: { id: string; name: string; online: boolean }[] = [];
+let cloudHost = "";
+let cloudSignedIn = false;
+async function loadCloudHosts(ctx: ModuleContext, refresh = false) {
+  const model = await ctx.modules.call("projects", "cloudHosts", { refresh });
+  cloudSignedIn = model.signedIn;
+  cloudHosts = model.hosts.filter((host: { online: boolean }) => host.online);
+  if (!cloudHosts.some(host => host.id === cloudHost)) cloudHost = cloudHosts[0]?.id ?? "";
+}
 let addValues: Record<string, string> = {};
 let fieldErrors: FieldErrors = {};
 let wslDistros: string[] = [];
@@ -87,7 +96,7 @@ function scheduleStats(ctx: ModuleContext, only?: string) {
     statsTimer = null;
     for (const p of tree) {
       if (!p.isGit || p.offline || p.needsPassword) continue;
-      void refreshStats(ctx, `project:${p.id}:root`);
+      void refreshStats(ctx, projectWorkspaceId(p));
       for (const t of p.tasks) if (t.status === "ready") void refreshStats(ctx, `task:${t.id}`);
     }
   }, 300);
@@ -131,12 +140,12 @@ function rows(projects: any[]): TreeRow[] {
   const out: TreeRow[] = [];
   const query = filter.trim().toLowerCase();
   for (const p of projects) {
-    const key = `project:${p.id}:root`;
+    const key = projectWorkspaceId(p);
     const masked = hideRemoteAddress && p.kind === "ssh" && p.transport !== "wsl";
     const projectMatches = !query || [p.name, p.rootPath, masked ? remoteLabel : p.host].some(value => String(value || "").toLowerCase().includes(query));
     const tasks = projectMatches ? p.tasks : p.tasks.filter((task: any) => [task.name, task.branch].some(value => String(value || "").toLowerCase().includes(query)));
     if (!projectMatches && !tasks.length) continue;
-    const location = masked ? remoteLabel : p.kind === "ssh" ? `${p.transport === "wsl" ? "WSL" : "SSH"} · ${p.host || p.rootPath}` : p.rootPath;
+    const location = p.kind === "cloud" ? `Cloud · ${p.host || p.rootPath}` : masked ? remoteLabel : p.kind === "ssh" ? `${p.transport === "wsl" ? "WSL" : "SSH"} · ${p.host || p.rootPath}` : p.rootPath;
     const offline = p.offline && masked ? maskAddress(String(p.offline), p) : p.offline;
     const open = !!query || p.expanded;
     // A collapsed project also reports activity in its hidden tasks.
@@ -146,8 +155,8 @@ function rows(projects: any[]): TreeRow[] {
       badge: p.needsPassword ? "Connect" : p.offline ? "Offline" : tasks.length ? `${tasks.length} ${tasks.length === 1 ? "task" : "tasks"}` : undefined,
       detail: p.needsPassword ? `Password needed · ${location}` : offline ? `Offline · ${offline}` : busyCount ? `${busyText(busyCount)} · ${location}` : location,
       badges: statBadges(key), contextMenu: projectMenu(p),
-      icon: p.offline ? "warning" : p.kind === "ssh" ? "remote" : "folder",
-      iconSvg: busyCount ? spinnerSvg() : p.offline ? uiIcons.warning : p.kind === "ssh" ? uiIcons.terminal : uiIcons.folder, iconColor: busyCount ? "primary" : "muted", weight: "semibold",
+      icon: p.offline ? "warning" : p.kind !== "local" ? "remote" : "folder",
+      iconSvg: busyCount ? spinnerSvg() : p.offline ? uiIcons.warning : p.kind === "cloud" ? uiIcons.cloud : p.kind === "ssh" ? uiIcons.terminal : uiIcons.folder, iconColor: busyCount ? "primary" : "muted", weight: "semibold",
     });
     if (query || p.expanded) for (const [index, t] of tasks.entries()) {
       const tk = `task:${t.id}`;
@@ -162,8 +171,8 @@ function rows(projects: any[]): TreeRow[] {
 
 function selectedProject() {
   if (!selected) return null;
-  const pm = /^project:(.+):root$/.exec(selected);
-  if (pm) return tree.find((p) => p.id === pm[1]) || null;
+  const project = tree.find(p => projectWorkspaceId(p) === selected);
+  if (project) return project;
   const tm = /^task:(.+)$/.exec(selected);
   if (tm) return tree.find((p) => p.tasks.some((t: any) => t.id === tm[1])) || null;
   return null;
@@ -172,7 +181,7 @@ function selectedProject() {
 function projectOfRow(rowKey: string | undefined) {
   const task = /^task:(.+)$/.exec(rowKey || "");
   if (task) return tree.find((p) => p.tasks.some((t: any) => t.id === task[1])) || null;
-  return tree.find((p) => rowKey === `project:${p.id}:root`) || null;
+  return tree.find((p) => rowKey === projectWorkspaceId(p)) || null;
 }
 
 async function loadDistros(ctx: ModuleContext) {
@@ -266,7 +275,10 @@ const mod: AppModule = {
     ctx.state.watch("ai-sessions.busy", (v: any) => { chatBusy = asCounts(v); updateBusy(ctx); });
     ctx.state.watch("persistent-agents.busy", (v: any) => { agentBusy = asCounts(v); updateBusy(ctx); });
     updateBusy(ctx);
-    ctx.events.on("projects.changed", () => reload(ctx));
+    ctx.events.on("projects.changed", () => {
+      if (addForm && addSource === "cloud") void loadCloudHosts(ctx).catch(() => {});
+      return reload(ctx);
+    });
     ctx.events.on("git-tasks.changed", () => reload(ctx));
     // Keep +/− counts current: git operations and the visible Git panel's status refresh.
     for (const topic of ["git.changed", "git-panel.statusChanged", "files.changed"])
@@ -307,7 +319,7 @@ const mod: AppModule = {
       }
     }
     if (confirm) children.push(confirmModal(confirm));
-    if (addForm) children.push(addProjectModal({ windows, source: addSource, sshAuth, values: addValues, errors: fieldErrors, error, busy, distros: wslDistros, distro: wslDistro }));
+    if (addForm) children.push(addProjectModal({ windows, source: addSource, sshAuth, values: addValues, errors: fieldErrors, error, busy, distros: wslDistros, distro: wslDistro, cloudHosts, cloudHost, cloudSignedIn }));
     children.push(groups.render(tree));
     return { type: "column", key: "projects-root", gap: 4, padding: 6, grow: true,
       ...(backgroundOpacity > 0 ? { backgroundImage: projectsBranding, backgroundImageStyle: { opacity: backgroundOpacity, width: 960, left: -350, top: -60 } } : {}), children };
@@ -325,26 +337,34 @@ const mod: AppModule = {
     const openAdd = async (source: AddSource) => {
       addForm = true; addSource = source; error = null; fieldErrors = {};
       if (source === "wsl") await loadDistros(ctx);
+      if (source === "cloud") await loadCloudHosts(ctx, true);
     };
     switch (ev.action) {
       case "filter": filter = String(ev.value || ""); break;
-      case "refresh": error = null; await reload(ctx); break;
+      case "refresh": error = null; await loadCloudHosts(ctx, true); await reload(ctx); break;
       case "showAdd": await openAdd(sourcesFor(windows).some((source) => source.id === addSource) ? addSource : sourcesFor(windows)[0].id); break;
       case "hideAdd": addForm = false; error = null; fieldErrors = {}; break;
       case "addSource": await openAdd(ev.value as AddSource); break;
       case "selectWorkspace":
         error = null;
-        selected = ev.rowKey || null; ctx.ui.invalidate();
-        // Clicking a project is the gesture that may ask for its password; nothing else prompts.
+        // Clicking a remote project is the user gesture that can show a connection approval.
         {
           const project = projectOfRow(ev.rowKey);
-          if (project?.auth === "password") await run("Connecting…", () => ctx.modules.call("projects", "connect", { projectId: project.id }, { timeoutMs: CONNECT_TIMEOUT_MS }));
+          if (project?.auth === "password" || project?.kind === "cloud") {
+            const connected = await run("Connecting…", async () => {
+              await ctx.modules.call("projects", "connect", { projectId: project.id }, { timeoutMs: CONNECT_TIMEOUT_MS });
+              return true;
+            });
+            if (!connected) break;
+          }
         }
-        try { await ctx.modules.call("workspace", "select", { workspaceId: ev.rowKey }); } catch (e) { error = errMsg(e); }
+        try {
+          await ctx.modules.call("workspace", "select", { workspaceId: ev.rowKey });
+          selected = ev.rowKey || null;
+        } catch (e) { error = errMsg(e); }
         break;
       case "toggleExpanded": {
-        const m = /^project:(.+):root$/.exec(ev.rowKey || "");
-        const p = m && tree.find((x) => x.id === m[1]);
+        const p = tree.find(p => projectWorkspaceId(p) === ev.rowKey);
         if (p) await ctx.modules.call("projects", "setExpanded", { projectId: p.id, expanded: !p.expanded });
         break;
       }
@@ -370,6 +390,13 @@ const mod: AppModule = {
         const parsed = wslRequest({ ...addValues, ...ev.inputs }, wslDistro);
         fieldErrors = parsed.errors;
         if (parsed.request && await run("Connecting to WSL…", () => ctx.modules.call("projects", "addWsl", parsed.request, { timeoutMs: 120000 }))) closeAdd();
+        break;
+      }
+      case "cloudHost": cloudHost = String(ev.value || ""); break;
+      case "addCloud": {
+        const parsed = cloudRequest({ ...addValues, ...ev.inputs }, cloudHost);
+        fieldErrors = parsed.errors;
+        if (parsed.request && await run("Connecting over Cloud…", () => ctx.modules.call("projects", "addCloud", parsed.request, { timeoutMs: CONNECT_TIMEOUT_MS }))) closeAdd();
         break;
       }
       case "showSsh": await openAdd("ssh"); break;
@@ -424,7 +451,9 @@ const mod: AppModule = {
         taskFormFor = selectedProject()?.id || null; notice = null; taskBranch = ""; taskQuery = ""; taskBranches = []; taskBranchLoading = true; error = null; const request = ++taskRequest; ctx.ui.invalidate();
         const id = taskFormFor;
         try {
-          const r = await ctx.modules.call("git", "branches", { workspaceId: `project:${id}:root` });
+          const project = tree.find(p => p.id === id);
+          if (!project) break;
+          const r = await ctx.modules.call("git", "branches", { workspaceId: projectWorkspaceId(project) });
           if (taskRequest === request && taskFormFor === id) taskBranches = [...r.local, ...r.remote.map((b: any) => ({ ...b, remote: true }))];
         } catch (e) { if (taskRequest === request && taskFormFor === id) error = errMsg(e); }
         finally { if (taskRequest === request) taskBranchLoading = false; } break;

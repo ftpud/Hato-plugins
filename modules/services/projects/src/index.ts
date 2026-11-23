@@ -2,12 +2,12 @@
 // and the project/task tree model. Persistence goes through the `persistence` service.
 import type { AppModule, ModuleContext } from "@hato/sdk/types";
 import { exportMcpTools } from "@hato/sdk/mcp";
-import { errMsg, sshFromProfile, sshProfileSpec, targetFor, workspaceGrant, wslLocation, type WorkspaceDescriptor } from "@hato/sdk/runtime";
+import { cloudMachineId, errMsg, projectWorkspaceId, sshFromProfile, sshProfileSpec, targetFor, workspaceGrant, wslLocation, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { parseOrder } from "@hato/sdk/settings-order";
 import { groupTools, pendingGroups, projectGroups } from "./groups";
 
 interface GitInfo { isGit: boolean; topLevel: string | null; hasCommits: boolean; error?: string; checkedAt: number }
-interface Project { id: string; name: string; kind: "local" | "ssh"; rootPath: string; sshProfileId: string | null; expanded: boolean }
+interface Project { id: string; name: string; kind: "local" | "ssh" | "cloud"; cloudOrigin?: string; cloudHostId?: string; rootPath: string; sshProfileId: string | null; expanded: boolean }
 const gitCache = new Map<string, GitInfo>();
 const offline = new Map<string, string>(); // projectId -> last connectivity error
 const ORDER_KEY = "projects.order";
@@ -29,8 +29,9 @@ async function orderedProjects(ctx: ModuleContext): Promise<Project[]> {
 
 function projectDesc(p: any, ssh: any): WorkspaceDescriptor {
   return {
-    id: `project:${p.id}:root`, projectId: p.id, name: p.name, location: p.kind,
-    machineId: p.kind === "ssh" ? `ssh:${p.sshProfileId}` : "local",
+    id: projectWorkspaceId(p), projectId: p.id, name: p.name, location: p.kind,
+    machineId: p.kind === "cloud" ? cloudMachineId(p.cloudOrigin, p.cloudHostId) : p.kind === "ssh" ? `ssh:${p.sshProfileId}` : "local",
+    ...(p.kind === "cloud" ? { cloudHostId: p.cloudHostId } : {}),
     rootAbsolutePath: p.rootPath, connectionRef: p.sshProfileId,
     ssh: ssh ? sshFromProfile(ssh) : null,
   };
@@ -46,7 +47,7 @@ async function describeProject(ctx: ModuleContext, projectId: string) {
 /** `git -C <root> rev-parse --show-toplevel` on the project's machine via the process broker. */
 async function detectGit(ctx: ModuleContext, desc: WorkspaceDescriptor): Promise<GitInfo> {
   const g = await workspaceGrant(ctx, desc, "process");
-  const run = async (args: string[]) => ctx.host.process.run(g.grant, { target: await targetFor(ctx, desc), executable: "git", args: ["-C", desc.rootAbsolutePath, ...args], cwd: desc.rootAbsolutePath, loginShell: desc.location === "ssh" }, { timeoutMs: 20000 });
+  const run = async (args: string[]) => ctx.host.process.run(g.grant, { target: await targetFor(ctx, desc), executable: "git", args: ["-C", desc.rootAbsolutePath, ...args], cwd: desc.rootAbsolutePath, loginShell: desc.location !== "local" }, { timeoutMs: 20000 });
   const top = await run(["rev-parse", "--show-toplevel"]);
   if (top.code !== 0) return { isGit: false, topLevel: null, hasCommits: false, checkedAt: Date.now() };
   const head = await run(["rev-parse", "--verify", "-q", "HEAD"]);
@@ -102,7 +103,11 @@ const mod: AppModule = {
     }
     // Background git detection (never blocks activation; SSH projects may be offline).
     const all = await ctx.modules.call("persistence", "projects.list");
-    for (const p of all) if (!gitCache.has(p.id)) refreshGit(ctx, p.id);
+    for (const p of all) if (p.kind !== "cloud" && !gitCache.has(p.id)) void refreshGit(ctx, p.id);
+    ctx.events.on("cloud.changed", () => ctx.events.emit("projects.changed", {}));
+    ctx.events.on("workspace.selected", async ({ workspaceId }) => {
+      if (typeof workspaceId === "string" && workspaceId.startsWith("cloud:")) await refreshGit(ctx, workspaceId.slice(6));
+    });
     mcp = exportMcpTools(ctx, "Projects", [
       ...groupTools(ctx),
       {
@@ -168,17 +173,22 @@ const mod: AppModule = {
       const tasks = await ctx.modules.call("persistence", "tasks.list", {});
       const profiles = await ctx.modules.call("persistence", "ssh.list");
       const byProfile = new Map(profiles.map((p: any) => [p.id, p]));
+      const cloud = projects.some(p => p.kind === "cloud")
+        ? await mod.methods!.cloudHosts(ctx, {}, { caller: "projects" }) : null;
       return projects.map(p => {
         const git = gitCache.get(p.id);
         const ssh: any = p.kind === "ssh" ? byProfile.get(p.sshProfileId) : null;
+        const host = p.kind === "cloud" && cloud?.server === p.cloudOrigin
+          ? cloud?.hosts.find((h: { id: string }) => h.id === p.cloudHostId) : null;
+        const cloudUnavailable = p.kind === "cloud" && (!host?.online || !cloud?.projectIds.includes(p.id));
         return {
           id: p.id, name: p.name, kind: p.kind, rootPath: p.rootPath, expanded: p.expanded,
-          host: ssh ? (ssh.transport === "wsl" ? ssh.host : `${ssh.user}@${ssh.host}${ssh.port !== 22 ? ":" + ssh.port : ""}`) : null,
+          host: ssh ? (ssh.transport === "wsl" ? ssh.host : `${ssh.user}@${ssh.host}${ssh.port !== 22 ? ":" + ssh.port : ""}`) : host?.name ?? null,
           transport: ssh ? ssh.transport : null,
           auth: ssh?.authRef === "password" ? "password" : null,
           needsPassword: ssh?.authRef === "password" && offline.has(p.id),
           isGit: git ? git.isGit : null, hasCommits: git ? git.hasCommits : null,
-          offline: offline.get(p.id) || null,
+          offline: cloudUnavailable ? "Cloud project or host unavailable" : offline.get(p.id) || null,
           tasks: tasks.filter((t: any) => t.projectId === p.id).map((t: any) => ({ id: t.id, name: t.name, branch: t.branch, worktreePath: t.worktreePath, status: t.status })),
         };
       });
@@ -191,7 +201,8 @@ const mod: AppModule = {
       if (!project) throw new Error("Unknown project");
       const tasks = await ctx.modules.call("persistence", "tasks.list", { projectId: id });
       if (tasks.length) throw new Error(`${project.name} still has ${tasks.length} task(s); delete them first.`);
-      await ctx.modules.call("workspace", "forget", { workspaceIds: [`project:${id}:root`] });
+      if (project.kind === "cloud") await ctx.modules.call("cloud", "removeProject", { projectId: id, origin: project.cloudOrigin });
+      await ctx.modules.call("workspace", "forget", { workspaceIds: [projectWorkspaceId(project)] });
       await ctx.modules.call("persistence", "projects.delete", { id });
       try { await projectGroups(ctx, "list"); } catch (e) { ctx.log.warn("prune project groups", errMsg(e)); }
       gitCache.delete(id); offline.delete(id);
@@ -225,6 +236,34 @@ const mod: AppModule = {
       return ctx.modules.call("persistence", "projects.get", { id });
     },
 
+    async cloudHosts(ctx, a) {
+      try {
+        if (a?.refresh) await ctx.modules.call("cloud", "refresh").catch(() => {});
+        const [status, inventory] = await Promise.all([
+          ctx.modules.call("cloud", "status"), ctx.modules.call("cloud", "inventory"),
+        ]);
+        return { server: status.server, signedIn: status.signedIn, hosts: inventory.hosts,
+          projectIds: inventory.projects.map((p: { id: string }) => p.id) };
+      } catch { return { server: null, signedIn: false, hosts: [], projectIds: [] }; }
+    },
+
+    async addCloud(ctx, a) {
+      const { server, signedIn, hosts } = await mod.methods!.cloudHosts(ctx, {}, { caller: "projects" });
+      if (!signedIn) throw new Error("Sign in from the Cloud panel first.");
+      const host = hosts.find((h: { id: string }) => h.id === a.hostId);
+      if (!host?.online) throw new Error("Choose an online Cloud host.");
+      const path = String(a.remotePath || "").trim();
+      if (!path.startsWith("/")) throw new Error("Enter an absolute path on the Cloud host.");
+      const desc = projectDesc({ id: "pending", name: "pending", kind: "cloud", rootPath: path, cloudOrigin: server, cloudHostId: host.id }, null);
+      const grant = await workspaceGrant(ctx, desc, "fs");
+      const inventory = await ctx.modules.call("cloud", "inventory");
+      const existing = inventory.projects.find((p: { hostId: string; path: string }) => p.hostId === host.id && p.path === grant.root);
+      if (existing) return ctx.modules.call("persistence", "projects.get", { id: existing.id });
+      const created = await ctx.modules.call("cloud", "addProject", { hostId: host.id, path: grant.root, name: String(a.name || basename(grant.root)) });
+      await refreshGit(ctx, created.id);
+      return ctx.modules.call("persistence", "projects.get", { id: created.id });
+    },
+
     pickFolder: async (ctx) => ctx.host.ui.pickFolder(),
 
     /** Register an SSH project. Validates connectivity + remote root on that machine. */
@@ -252,7 +291,8 @@ const mod: AppModule = {
 
     /** Connect a project's machine for a user gesture, which may ask for its password. */
     async connect(ctx, a) {
-      const { desc } = await describeProject(ctx, a.projectId);
+      const { desc, project } = await describeProject(ctx, a.projectId);
+      if (desc.location === "cloud") await ctx.modules.call("cloud", "prepareProject", { projectId: project.id, origin: project.cloudOrigin }, { timeoutMs: 620000 });
       if (desc.ssh) await ctx.host.ssh.connect(sshProfileSpec(desc.ssh), { interactive: true });
       await refreshGit(ctx, a.projectId);
       return null;
@@ -288,8 +328,9 @@ const mod: AppModule = {
     },
 
     async refresh(ctx, a) {
+      if (!a?.projectId) await ctx.modules.call("cloud", "refresh").catch(() => {});
       const all = await ctx.modules.call("persistence", "projects.list");
-      await Promise.all(all.filter((p: any) => !a || !a.projectId || p.id === a.projectId).map((p: any) => refreshGit(ctx, p.id)));
+      await Promise.all(all.filter((p: any) => a?.projectId ? p.id === a.projectId : p.kind !== "cloud" || gitCache.has(p.id)).map((p: any) => refreshGit(ctx, p.id)));
       return null;
     },
   },

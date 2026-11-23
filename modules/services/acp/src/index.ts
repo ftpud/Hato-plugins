@@ -87,8 +87,8 @@ async function probeLimits(ctx: ModuleContext, providerId: LimitProvider, worksp
   const envRemove = await environmentPolicy(ctx, profile);
   for (const key of envRemove) delete env[key];
   const proc = await ctx.host.process.spawn(g.grant, {
-    target: await targetFor(ctx, desc), executable: desc.location === "ssh" ? profile.executable : det.path,
-    args: profile.args || [], cwd: desc.rootAbsolutePath, env, envRemove, loginShell: desc.location === "ssh",
+    target: await targetFor(ctx, desc), executable: desc.location !== "local" ? profile.executable : det.path,
+    args: profile.args || [], cwd: desc.rootAbsolutePath, env, envRemove, loginShell: desc.location !== "local",
   });
   const peer = new JsonRpcPeer((line) => ctx.host.process.write(proc.handle, line + "\n"), 1);
   let text = ""; const updates: any[] = [];
@@ -143,11 +143,11 @@ async function resolveProfile(ctx: ModuleContext, id: string, machineId: string)
 export async function detect(ctx: ModuleContext, desc: WorkspaceDescriptor, executable: string) {
   const g = await workspaceGrant(ctx, desc, "process");
   const target = await targetFor(ctx, desc);
-  if (executable.startsWith("/") && desc.location !== "ssh") {
+  if (executable.startsWith("/") && desc.location === "local") {
     const r = await ctx.host.process.run(g.grant, { target, executable: "test", args: ["-x", executable], cwd: desc.rootAbsolutePath }, { timeoutMs: 15000 });
     return { found: r.code === 0, path: executable, pathEnv: null as string | null };
   }
-  if (desc.location === "ssh") {
+  if (desc.location !== "local") {
     const probe = async (pathEnv: string | null) => {
       const r = await ctx.host.process.run(g.grant, { target, executable: "sh", args: ["-c", 'p=$(command -v -- "$1") || exit; printf "\\n__HATO_EXEC__=%s\\n" "$p"', "hato-detect", executable], cwd: desc.rootAbsolutePath, loginShell: true, ...(pathEnv ? { env: { PATH: pathEnv } } : {}) }, { timeoutMs: 20000 });
       const path = /^__HATO_EXEC__=(.+)$/m.exec(r.stdout)?.[1] || "";
@@ -180,16 +180,16 @@ async function npmRunner(ctx: ModuleContext, desc: WorkspaceDescriptor) {
   const target = await targetFor(ctx, desc);
   const env: Record<string, string> = {};
   if (det.pathEnv) env.PATH = det.pathEnv;
-  const npm = desc.location === "ssh" ? "npm" : det.path;
+  const npm = desc.location !== "local" ? "npm" : det.path;
   const run = (args: string[], timeoutMs: number) => ctx.host.process.run(g.grant, {
-    target, executable: npm, args, cwd: desc.rootAbsolutePath, env, loginShell: desc.location === "ssh",
+    target, executable: npm, args, cwd: desc.rootAbsolutePath, env, loginShell: desc.location !== "local",
   }, { timeoutMs, limitBytes: 1 << 20 });
   /** Where `npm install -g` should go: null for npm's global prefix when this user can write to it,
    *  otherwise `$HOME/.local` (bin in ~/.local/bin) so installing never needs root or sudo. */
   const userPrefix = async (): Promise<string | null> => {
     const script = 'g=$("$1" prefix -g) || exit 1; m="$g/lib/node_modules"; '
       + 'if [ -w "$m" ] || { [ ! -e "$m" ] && [ -w "$g" ]; }; then printf "\\n__HATO_PREFIX__=\\n"; else printf "\\n__HATO_PREFIX__=%s\\n" "$HOME/.local"; fi';
-    const r = await ctx.host.process.run(g.grant, { target, executable: "sh", args: ["-c", script, "hato-npm-prefix", npm], cwd: desc.rootAbsolutePath, env, loginShell: desc.location === "ssh" }, { timeoutMs: 30000 });
+    const r = await ctx.host.process.run(g.grant, { target, executable: "sh", args: ["-c", script, "hato-npm-prefix", npm], cwd: desc.rootAbsolutePath, env, loginShell: desc.location !== "local" }, { timeoutMs: 30000 });
     const m = /^__HATO_PREFIX__=(.*)$/m.exec(r.stdout);
     return r.code === 0 && m && m[1].trim() ? m[1].trim() : null;
   };
@@ -238,19 +238,19 @@ async function start(ctx: ModuleContext, a: any) {
   const envRemove = await environmentPolicy(ctx, profile);
   for (const key of envRemove) delete env[key];
   const preparedMcp = profile.mcpLaunch ? await sessionMcp(ctx, a, desc) : null;
-  let launch = providerMcpLaunch(undefined, desc.location === "ssh" ? profile.executable : det.path, profile.args || [], env, preparedMcp?.servers || []);
+  let launch = providerMcpLaunch(undefined, desc.location !== "local" ? profile.executable : det.path, profile.args || [], env, preparedMcp?.servers || []);
   let spawned;
   try {
     launch = providerMcpLaunch(profile.mcpLaunch, launch.executable, profile.args || [], env, preparedMcp?.servers || []);
     if (launch.wrapped) {
       const node = await detect(ctx, desc, "node");
       if (!node.found) throw new Error("Node.js is required on the workspace machine for this provider's MCP launcher");
-      launch = { ...launch, executable: desc.location === "ssh" ? "node" : node.path,
-        env: { ...launch.env, ...(node.pathEnv ? { PATH: [node.pathEnv, launch.env.PATH].filter(Boolean).join(desc.location === "ssh" || ctx.host.env.info().platform !== "windows" ? ":" : ";") } : {}) } };
+      launch = { ...launch, executable: desc.location !== "local" ? "node" : node.path,
+        env: { ...launch.env, ...(node.pathEnv ? { PATH: [node.pathEnv, launch.env.PATH].filter(Boolean).join(desc.location !== "local" || ctx.host.env.info().platform !== "windows" ? ":" : ";") } : {}) } };
     }
     spawned = await ctx.host.process.spawn(g.grant, {
       target: await targetFor(ctx, desc), executable: launch.executable,
-      args: launch.args, cwd: desc.rootAbsolutePath, env: launch.env, envRemove, loginShell: desc.location === "ssh",
+      args: launch.args, cwd: desc.rootAbsolutePath, env: launch.env, envRemove, loginShell: desc.location !== "local",
     });
   } catch (e) {
     if (preparedMcp && a.mcp) await ctx.modules.call("internal-mcp", "revoke", { conversationId: a.conversationId }).catch(() => {});

@@ -27,7 +27,7 @@ async function git(ctx: ModuleContext, d: WorkspaceDescriptor, args: string[], l
     return ctx.host.process.run(g.grant, {
       target: await targetFor(ctx, d), executable: "git",
       args: [...(args[0] === "stash" ? [] : ["--literal-pathspecs"]), "--no-optional-locks", "-c", "core.quotepath=false", "-c", "color.ui=false", ...args],
-      cwd: d.rootAbsolutePath, loginShell: d.location === "ssh",
+      cwd: d.rootAbsolutePath, loginShell: d.location !== "local",
     }, { timeoutMs: 30000, limitBytes, ...(stdin !== undefined ? { stdin } : {}) });
   });
 }

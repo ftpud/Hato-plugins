@@ -22,6 +22,7 @@
   "pluginType": "AI",
   "calls": [
     "claude-provider",
-    "codex-provider"
+    "codex-provider",
+    "cloud"
   ]
 }

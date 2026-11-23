@@ -1,5 +1,5 @@
 import type { AppModule, CloudDaemonConnection, Handle, ModuleContext, StreamSubscription } from "@hato/sdk/types";
-import { errMsg, sshProfileSpec } from "@hato/sdk/runtime";
+import { cloudMachineId, errMsg, sshProfileSpec } from "@hato/sdk/runtime";
 import { callback, CloudHttpError, DEFAULT_SERVER, eventFrames, jsonResponse, serverOrigin, webPath } from "./protocol";
 
 type User = { email: string; name: string };
@@ -29,7 +29,8 @@ let inventoryFetch: Promise<void> | null = null;
 const routes = new Map<string, CloudDaemonConnection>();
 const dialing = new Map<string, Promise<CloudDaemonConnection>>();
 const probes = new Set<string>();
-const serviceRecipients = new Set(["terminals", "persistent-agents", "workflows", "remote-runtime"]);
+const serviceRecipients = new Set(["terminals", "persistent-agents", "workflows", "remote-runtime",
+  "files", "git", "git-tasks", "projects", "run", "run-configurations", "acp", "debug", "language-service"]);
 const changed = (ctx: ModuleContext) => { if (!inactive) ctx.events.emit("cloud.changed", {}); };
 const settings = (ctx: ModuleContext, key: string) => ctx.modules.call("persistence", "settings.get", { key });
 const save = (ctx: ModuleContext, key: string, value: any) => ctx.modules.call("persistence", "settings.set", { key, value });
@@ -60,9 +61,9 @@ async function clearSession(ctx: ModuleContext, oldServer = server, forget = tru
   inventoryFetch = null;
   if (forget) {
     await ctx.host.cloud.clear(oldServer).catch(() => {});
-    const current = await ctx.modules.call("workspace", "currentId", {}).catch(() => null);
-    if (typeof current === "string" && current.startsWith("cloud:")) {
-      await ctx.modules.call("workspace", "forget", { workspaceIds: [current] }).catch(() => {});
+    const current = await ctx.modules.call("workspace", "current", {}).catch(() => null);
+    if (current?.location === "cloud") {
+      await ctx.modules.call("workspace", "forget", { workspaceIds: [current.id] }).catch(() => {});
     }
   }
   await Promise.all([stopStream(ctx), ...active.map(route => ctx.host.cloud.disconnect(route.target.connection).catch(() => {}))]);
@@ -90,6 +91,8 @@ function refresh(ctx: ModuleContext) {
     const [hosts, projects] = await Promise.all([
       request<{ hosts: Host[] }>(ctx, "/api/hosts"), request<{ projects: Project[] }>(ctx, "/api/projects"),
     ]);
+    if (attempt !== epoch || inactive) return;
+    await ctx.modules.call("persistence", "projects.syncCloud", { origin: server, projects: projects.projects });
     if (attempt !== epoch || inactive) return;
     all = { hosts: hosts.hosts, projects: projects.projects };
     error = null;
@@ -338,7 +341,7 @@ function connect(ctx: ModuleContext, id: string): Promise<CloudDaemonConnection>
   return pending;
 }
 
-async function openProject(ctx: ModuleContext, projectId: string) {
+async function prepareProject(ctx: ModuleContext, projectId: string) {
   const project = all.projects.find(p => p.id === projectId);
   if (!project) throw new Error("Cloud project not found.");
   const attempt = epoch;
@@ -355,7 +358,7 @@ async function openProject(ctx: ModuleContext, projectId: string) {
   if (attempt !== epoch || inactive || routes.get(project.hostId) !== route) {
     throw new Error("The Cloud session changed while opening the project.");
   }
-  return ctx.modules.call("workspace", "selectCloud", { ...project, machineId: route.machineId });
+  return project;
 }
 
 async function sshProfiles(ctx: ModuleContext) {
@@ -438,11 +441,24 @@ const mod: AppModule = {
       return next;
     },
     openWeb: (ctx, a) => ctx.host.ui.openUrl(server + webPath(a.path)),
-    openProject: (ctx, a) => openProject(ctx, String(a.projectId || "")),
+    async openProject(ctx, a) {
+      const project = await prepareProject(ctx, String(a.projectId || ""));
+      return ctx.modules.call("workspace", "select", { workspaceId: `cloud:${project.id}` });
+    },
+    async prepareProject(ctx, a, meta) {
+      if (meta.caller !== "projects" || a.origin !== server) throw new Error("Sign into the project's Cloud server first.");
+      await prepareProject(ctx, String(a.projectId || ""));
+    },
     async addProject(ctx, a) {
       const result = await request(ctx, "/api/projects", "POST", { hostId: a.hostId, name: a.name, path: a.path });
       await refresh(ctx);
       return result;
+    },
+    async removeProject(ctx, a, meta) {
+      if (meta.caller !== "projects" || a.origin !== server || !user) throw new Error("Sign into the project's Cloud server first.");
+      try { await request(ctx, "/api/projects/" + encodeURIComponent(a.projectId), "DELETE"); }
+      catch (e) { if (!(e instanceof CloudHttpError) || e.status !== 404) throw e; }
+      await refresh(ctx);
     },
     sshProfiles,
     addHostViaSsh: addHost,
@@ -451,7 +467,9 @@ const mod: AppModule = {
     async denyEnrollment(ctx, a) { await request(ctx, "/api/enrol/deny", "POST", { userCode: a.userCode }); changed(ctx); },
     async target(ctx, a, meta) {
       if (!serviceRecipients.has(meta.caller)) throw new Error("Cloud daemon routes are available to workspace services only.");
-      const route = await connect(ctx, String(a.hostId || ""));
+      const id = String(a.hostId || "");
+      if (a.machineId && a.machineId !== cloudMachineId(server, id)) throw new Error("This project belongs to another Cloud server.");
+      const route = await connect(ctx, id);
       return ctx.host.cloud.share(route.target.connection, meta.caller);
     },
   },

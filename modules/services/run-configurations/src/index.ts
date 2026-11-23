@@ -268,7 +268,7 @@ const mod: AppModule = {
         const grant = await workspaceGrant(ctx, d, "process");
         return ctx.host.process.run(grant.grant, { target: await targetFor(ctx, d), cwd: d.rootAbsolutePath,
           executable: java ? "java" : "node", args: java ? ["-XshowSettings:properties", "-version"] : ["--version"],
-          loginShell: d.location === "ssh",
+          loginShell: d.location !== "local",
         }, { timeoutMs: 4000, limitBytes: 32 * 1024 });
       }).catch(() => null);
       if (version?.code === 0) {

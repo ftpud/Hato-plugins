@@ -29,7 +29,7 @@ export class Relay {
     const grant = await workspaceGrant(ctx, d, "process");
     const { handle } = await ctx.host.process.spawn(grant.grant, {
       target: await targetFor(ctx, d), executable: "python3", args: ["-c", RELAY_SCRIPT, JSON.stringify(config)],
-      cwd: d.rootAbsolutePath, env: {}, loginShell: d.location === "ssh",
+      cwd: d.rootAbsolutePath, env: {}, loginShell: d.location !== "local",
     });
     const relay = new Relay(ctx, handle, handlers);
     const ready = new Promise<number>((resolve, reject) => { relay.ready = { resolve, reject }; });

@@ -12,7 +12,8 @@
   "calls": [
     "workspace",
     "run-configurations",
-    "debug"
+    "debug",
+    "cloud"
   ],
   "capabilities": [
     "process.scope",

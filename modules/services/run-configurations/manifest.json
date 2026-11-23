@@ -13,7 +13,8 @@
     "workspace",
     "persistence",
     "language-java",
-    "language-typescript"
+    "language-typescript",
+    "cloud"
   ],
   "capabilities": [
     "fs.scope",

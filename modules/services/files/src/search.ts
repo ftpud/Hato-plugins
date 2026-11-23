@@ -44,7 +44,7 @@ async function gitIndex(ctx: ModuleContext, desc: WorkspaceDescriptor, index: In
     const target = await targetFor(ctx, desc);
     const run = (args: string[]) => ctx.host.process.run(grant.grant, {
       target, executable: "git", args: ["--no-optional-locks", "ls-files", "-z", ...args],
-      cwd: desc.rootAbsolutePath, loginShell: desc.location === "ssh",
+      cwd: desc.rootAbsolutePath, loginShell: desc.location !== "local",
     }, { timeoutMs: 30000, limitBytes: 32 << 20 });
     const [files, deleted] = await Promise.all([run(["--cached", "--others", "--exclude-standard", "--stage"]), run(["--deleted"])]);
     if (index.cancelled) return true;

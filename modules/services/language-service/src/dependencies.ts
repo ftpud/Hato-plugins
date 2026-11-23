@@ -68,7 +68,7 @@ export class LanguageDependencies {
       let result;
       try {
         result = await this.ctx.host.process.run(scope.grant, { target, executable: python,
-          args: ["-c", DEPENDENCY_SCRIPT, JSON.stringify(request)], cwd: workspace.rootAbsolutePath, loginShell: workspace.location === "ssh" },
+          args: ["-c", DEPENDENCY_SCRIPT, JSON.stringify(request)], cwd: workspace.rootAbsolutePath, loginShell: workspace.location !== "local" },
           { timeoutMs: install ? 15 * 60 * 1000 : 60000, limitBytes: 65536 });
       } catch (error) {
         if (["ENOENT", "ENOTFOUND", "ENOEXEC"].includes((error as any)?.code)) { diagnostic = errMsg(error); continue; }

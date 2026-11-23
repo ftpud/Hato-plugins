@@ -52,7 +52,7 @@ async function command(ctx: ModuleContext, d: WorkspaceDescriptor, e: Entry, lau
   const grant = await workspaceGrant(ctx, d, "process");
   const target = await targetFor(ctx, d);
   if (e.cancelled) return null;
-  const { handle } = await ctx.host.process.spawn(grant.grant, { ...launch, target, loginShell: d.location === "ssh" });
+  const { handle } = await ctx.host.process.spawn(grant.grant, { ...launch, target, loginShell: d.location !== "local" });
   e.handle = handle;
   if (main && !e.cancelled) {
     e.session.state = "running";

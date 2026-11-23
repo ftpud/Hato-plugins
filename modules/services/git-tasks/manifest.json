@@ -19,5 +19,8 @@
   "author": "Hato contributors",
   "version": "0.1.17",
   "pluginPackage": "git",
-  "pluginType": "Development"
+  "pluginType": "Development",
+  "calls": [
+    "cloud"
+  ]
 }

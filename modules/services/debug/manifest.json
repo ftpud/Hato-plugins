@@ -13,7 +13,8 @@
     "workspace",
     "persistence",
     "run",
-    "language-service"
+    "language-service",
+    "cloud"
   ],
   "capabilities": [
     "process.scope",

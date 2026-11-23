@@ -4,7 +4,7 @@
 import type { UiNode } from "@hato/sdk/types";
 import { uiIcons } from "@hato/sdk/ui-icons";
 
-export type AddSource = "local" | "wsl" | "ssh";
+export type AddSource = "local" | "wsl" | "ssh" | "cloud";
 export type SshAuth = "agent" | "key" | "password";
 export type FieldErrors = Record<string, string>;
 type Values = Record<string, string | undefined>;
@@ -19,6 +19,9 @@ export interface AddProjectView {
   busy: string | null;
   distros: string[];
   distro: string;
+  cloudHosts?: { id: string; name: string; online: boolean }[];
+  cloudHost?: string;
+  cloudSignedIn?: boolean;
 }
 
 /** On Windows, projects live in WSL or on a Linux host; there are no local Windows projects. */
@@ -28,6 +31,7 @@ export function sourcesFor(windows: boolean): { id: AddSource; title: string; de
       ? { id: "wsl", title: "WSL", description: "A Linux distribution on this PC" }
       : { id: "local", title: "Local folder", description: "A folder on this computer" },
     { id: "ssh", title: "SSH host", description: "A folder on another machine" },
+    { id: "cloud", title: "Cloud host", description: "A folder on an enrolled Hato Cloud host" },
   ];
 }
 
@@ -55,6 +59,13 @@ export function wslRequest(values: Values, distro: string) {
   const remotePath = text(values, "wsl-path");
   if (!remotePath.startsWith("/")) errors["wsl-path"] = "Enter an absolute Linux path, like /home/you/project.";
   return { errors, request: remotePath.startsWith("/") ? { distro, remotePath, name: optional(values, "wsl-name") } : null };
+}
+
+export function cloudRequest(values: Values, hostId: string) {
+  const remotePath = text(values, "cloud-path");
+  const errors: FieldErrors = {};
+  if (!remotePath.startsWith("/")) errors["cloud-path"] = "Enter an absolute path on the Cloud host.";
+  return { errors, request: hostId && !errors["cloud-path"] ? { hostId, remotePath, name: optional(values, "cloud-name") } : null };
 }
 
 export function sshRequest(values: Values, auth: SshAuth) {
@@ -140,15 +151,29 @@ function sshForm(view: AddProjectView): UiNode[] {
   ];
 }
 
+function cloudForm(view: AddProjectView): UiNode[] {
+  if (!view.cloudHosts?.length) return [{
+    type: "status", key: "no-cloud-host", level: "warn",
+    text: view.cloudSignedIn ? "Bring an enrolled Cloud host online first." : "Sign in from the Cloud panel first.",
+  }];
+  return [
+    { type: "select", key: "cloud-host", value: view.cloudHost ?? null, action: "cloudHost",
+      options: view.cloudHosts.map(host => ({ value: host.id, label: host.name })), buttonStyle: { height: 32, fullWidth: true } },
+    field(view, "cloud-path", "Remote folder", { placeholder: "/home/you/project", submit: "addCloud" }),
+    nameField(view, "cloud-name", "addCloud", "The folder’s name"),
+  ];
+}
+
 const FORMS: Record<AddSource, { form: (view: AddProjectView) => UiNode[]; submit: string; label: string; intro: (windows: boolean) => string }> = {
   local: { form: localForm, submit: "addLocalPath", label: "Add project", intro: () => "Files, Git, terminals and agents run on this computer." },
   wsl: { form: wslForm, submit: "addWsl", label: "Add project", intro: () => "Files, Git, terminals and agents run inside the distribution." },
   ssh: { form: sshForm, submit: "addSsh", label: "Connect & add", intro: (windows) => `Files, Git, terminals and agents run on that machine. Its host key is checked against known_hosts${windows ? " in your default WSL distribution" : ""}.` },
+  cloud: { form: cloudForm, submit: "addCloud", label: "Connect & add", intro: () => "Files, Git, terminals and agents run on the enrolled host." },
 };
 
 export function addProjectModal(view: AddProjectView): UiNode {
   const { form, submit, label, intro } = FORMS[view.source];
-  const unavailable = view.source === "wsl" && !view.distros.length;
+  const unavailable = (view.source === "wsl" && !view.distros.length) || (view.source === "cloud" && !view.cloudHosts?.length);
   return { type: "modal", key: "add-modal", title: "Add project", width: 720, closeAction: "hideAdd", children: [
     { type: "row", key: "add-content", height: 430, gap: 14, align: "stretch", children: [
       { type: "column", key: "sources", width: 190, gap: 4, borderSide: "right", children: sourcesFor(view.windows).map((source): UiNode => ({

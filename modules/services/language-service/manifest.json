@@ -25,6 +25,7 @@
   "distribution": "marketplace",
   "calls": [
     "workspace",
-    "persistence"
+    "persistence",
+    "cloud"
   ]
 }

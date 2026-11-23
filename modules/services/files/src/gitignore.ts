@@ -6,7 +6,7 @@ import { targetFor, withWorkspace, workspaceGrant, type WorkspaceDescriptor } fr
 async function run(ctx: ModuleContext, d: WorkspaceDescriptor, executable: string, args: string[], stdin?: string, limitBytes = 4 << 20, timeoutMs = 30000): Promise<RunResult> {
   return withWorkspace(ctx, d, async () => {
     const g = await workspaceGrant(ctx, d, "process");
-    return ctx.host.process.run(g.grant, { target: await targetFor(ctx, d), executable, args, cwd: d.rootAbsolutePath, loginShell: d.location === "ssh" },
+    return ctx.host.process.run(g.grant, { target: await targetFor(ctx, d), executable, args, cwd: d.rootAbsolutePath, loginShell: d.location !== "local" },
       { timeoutMs, limitBytes, ...(stdin !== undefined ? { stdin } : {}) });
   });
 }

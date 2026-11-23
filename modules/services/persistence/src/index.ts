@@ -7,12 +7,14 @@ import m001 from "../migrations/001_init.sql";
 import m002 from "../migrations/002_indexes.sql";
 import m003 from "../migrations/003_scoped_settings.sql";
 import m004 from "../migrations/004_ssh_transport.sql";
+import m005 from "../migrations/005_cloud_projects.sql";
 
 const MIGRATIONS: { version: number; name: string; sql: string }[] = [
   { version: 1, name: "001_init", sql: m001 },
   { version: 2, name: "002_indexes", sql: m002 },
   { version: 3, name: "003_scoped_settings", sql: m003 },
   { version: 4, name: "004_ssh_transport", sql: m004 },
+  { version: 5, name: "005_cloud_projects", sql: m005 },
 ];
 
 let db: Handle | null = null;
@@ -60,7 +62,9 @@ function scopeName(v: any): string {
 function optStr(v: any): string | null { return typeof v === "string" ? v : null; }
 const parse = (s: any, d: any) => { try { return s ? JSON.parse(s) : d; } catch { return d; } };
 
-const projectRow = (r: any) => ({ id: r.id, name: r.name, kind: r.kind, rootPath: r.root_path, sshProfileId: r.ssh_profile_id, expanded: !!r.expanded, createdAt: r.created_at });
+const projectRow = (r: any) => ({ id: r.id, name: r.name, kind: r.kind, rootPath: r.root_path, sshProfileId: r.ssh_profile_id, expanded: !!r.expanded, createdAt: r.created_at,
+  ...(r.kind === "cloud" ? { cloudOrigin: r.cloud_origin, cloudHostId: r.cloud_host_id } : {}),
+});
 const taskRow = (r: any) => ({ id: r.id, projectId: r.project_id, name: r.name, branch: r.branch, worktreePath: r.worktree_path, status: r.status, createdAt: r.created_at });
 const sshRow = (r: any) => ({ id: r.id, host: r.host, port: r.port, user: r.username, authRef: r.auth_ref, transport: r.transport });
 const viewRow = (r: any, id: string) => r ? ({ workspaceId: r.workspace_id, explorerDir: r.explorer_relative_dir, previewPath: r.preview_relative_path, terminalKey: r.terminal_key, activeConversationId: r.active_conversation_id, ui: parse(r.ui_state_json, {}) })
@@ -135,13 +139,30 @@ const mod: AppModule = {
         [str(p.id, "id"), str(p.name, "name", 200), p.kind === "ssh" ? "ssh" : "local", str(p.rootPath, "rootPath"), optStr(p.sshProfileId), 1, now()]);
       return null;
     },
-    "projects.findByRoot": async (ctx, a) => { const r = await q(ctx, "SELECT * FROM projects WHERE root_path = ? AND COALESCE(ssh_profile_id,'') = COALESCE(?, '')", [str(a.rootPath, "rootPath"), optStr(a.sshProfileId)]); return r.length ? projectRow(r[0]) : null; },
+    "projects.syncCloud": async (ctx, a, meta) => {
+      if (meta.caller !== "cloud") throw new Error("Cloud inventory may only be saved by Cloud");
+      const origin = str(a.origin, "origin");
+      const projects: Array<{ id: string; name: string; path: string; hostId: string }> = a.projects;
+      if (!projects.length) return null;
+      await ready;
+      await ctx.host.db.transaction(db!, projects.map(p => ({
+        sql: `INSERT INTO projects(id,name,kind,root_path,expanded,created_at,cloud_origin,cloud_host_id)
+              VALUES(?,?,'cloud',?,1,?,?,?) ON CONFLICT(id) DO UPDATE SET
+              name=excluded.name, root_path=excluded.root_path, cloud_host_id=excluded.cloud_host_id
+              WHERE projects.kind='cloud' AND projects.cloud_origin=excluded.cloud_origin`,
+        params: [str(p.id, "id"), str(p.name, "name", 200), str(p.path, "path"), now(), origin, str(p.hostId, "hostId")],
+      })));
+      return null;
+    },
+    "projects.findByRoot": async (ctx, a) => { const r = await q(ctx, "SELECT * FROM projects WHERE kind <> 'cloud' AND root_path = ? AND COALESCE(ssh_profile_id,'') = COALESCE(?, '')", [str(a.rootPath, "rootPath"), optStr(a.sshProfileId)]); return r.length ? projectRow(r[0]) : null; },
     "projects.setExpanded": async (ctx, a) => { await x(ctx, "UPDATE projects SET expanded = ? WHERE id = ?", [a.expanded ? 1 : 0, str(a.id, "id")]); return null; },
     /** Unregister a project that has no tasks left. Files on disk are never touched. */
     "projects.delete": async (ctx, a) => {
       const id = str(a.id, "id");
       if ((await q(ctx, "SELECT id FROM tasks WHERE project_id = ?", [id])).length) throw new Error("Delete the project's tasks first");
       await x(ctx, "DELETE FROM workspace_views WHERE workspace_id = ?", [`project:${id}:root`]);
+      await x(ctx, "DELETE FROM workspace_views WHERE workspace_id = ?", [`cloud:${id}`]);
+      await x(ctx, "DELETE FROM settings WHERE key = ?", [`workspace.cloud:${id}`]);
       await x(ctx, "DELETE FROM projects WHERE id = ?", [id]);
       return null;
     },

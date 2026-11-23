@@ -1,22 +1,23 @@
 // workspace: the sole resolver of WorkspaceDescriptors (project root or task worktree), active
 // selection and per-workspace view state. The kernel never constructs or parses descriptors.
 import type { AppModule, ModuleContext } from "@hato/sdk/types";
-import { sshFromProfile, type WorkspaceDescriptor } from "@hato/sdk/runtime";
+import { cloudMachineId, projectWorkspaceId, sshFromProfile, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 
 let selectedId: string | null = null;
 
 async function resolve(ctx: ModuleContext, workspaceId: string): Promise<WorkspaceDescriptor> {
   if (typeof workspaceId !== "string") throw new Error("workspaceId required");
-  if (/^cloud:[0-9a-f-]+$/.test(workspaceId)) {
-    const item: WorkspaceDescriptor | null = await ctx.modules.call("persistence", "settings.get", { key: `workspace.${workspaceId}` });
-    if (item?.location !== "cloud" || item.id !== workspaceId) throw new Error("Unknown Cloud workspace.");
-    return item;
-  }
   let project: any;
   let task: any = null;
-  const m = /^project:([0-9a-f-]+):root$/.exec(workspaceId);
-  if (m) {
-    project = await ctx.modules.call("persistence", "projects.get", { id: m[1] });
+  const cloud = /^cloud:([0-9a-f-]+)$/.exec(workspaceId);
+  const root = /^project:([0-9a-f-]+):root$/.exec(workspaceId);
+  if (cloud || root) {
+    project = await ctx.modules.call("persistence", "projects.get", { id: (cloud || root)![1] });
+    if (cloud && !project) {
+      const item: WorkspaceDescriptor | null = await ctx.modules.call("persistence", "settings.get", { key: `workspace.${workspaceId}` });
+      if (item?.location === "cloud" && item.id === workspaceId) return item;
+    }
+    if (cloud && project?.kind !== "cloud") throw new Error("Unknown Cloud workspace.");
   } else {
     const t = /^task:([0-9a-f-]+)$/.exec(workspaceId);
     if (!t) throw new Error(`malformed workspace id ${workspaceId}`);
@@ -32,12 +33,14 @@ async function resolve(ctx: ModuleContext, workspaceId: string): Promise<Workspa
     ssh = sshFromProfile(p);
   }
   return {
-    id: task ? `task:${task.id}` : `project:${project.id}:root`,
+    id: task ? `task:${task.id}` : projectWorkspaceId(project),
     projectId: project.id,
     taskId: task ? task.id : null,
     name: task ? `${project.name} / ${task.name}` : project.name,
     location: project.kind,
-    machineId: project.kind === "ssh" ? `ssh:${project.sshProfileId}` : "local",
+    machineId: project.kind === "cloud" ? cloudMachineId(project.cloudOrigin, project.cloudHostId)
+      : project.kind === "ssh" ? `ssh:${project.sshProfileId}` : "local",
+    ...(project.kind === "cloud" ? { cloudHostId: project.cloudHostId } : {}),
     rootAbsolutePath: task ? task.worktreePath : project.rootPath,
     connectionRef: project.kind === "ssh" ? project.sshProfileId : null,
     ssh,
@@ -74,22 +77,6 @@ const mod: AppModule = {
       const d = await resolve(ctx, a.workspaceId); // validates
       selectedId = d.id;
       await ctx.modules.call("persistence", "settings.set", { key: "workspace.selected", value: d.id });
-      await publish(ctx);
-      ctx.events.emit("workspace.selected", { workspaceId: d.id });
-      return d;
-    },
-    async selectCloud(ctx, a, meta) {
-      if (meta.caller !== "cloud") throw new Error("Only Cloud can select a Cloud workspace.");
-      if (!/^[0-9a-f-]{36}$/.test(a.id) || !/^[0-9a-f-]{36}$/.test(a.hostId) || !/^cloud:[a-f0-9]{64}$/.test(a.machineId) ||
-          typeof a.path !== "string" || !a.path.startsWith("/") || a.path.split("/").some((part: string) => part === "." || part === "..") ||
-          a.path.includes("\\") || /[\x00-\x1f\x7f]/.test(a.path) || typeof a.name !== "string") throw new Error("Invalid Cloud workspace.");
-      const d: WorkspaceDescriptor = {
-        id: `cloud:${a.id}`, projectId: a.id, name: a.name, location: "cloud", cloudHostId: a.hostId,
-        machineId: a.machineId, rootAbsolutePath: a.path, status: "ready",
-      };
-      await ctx.modules.call("persistence", "settings.set", { key: `workspace.${d.id}`, value: d });
-      await ctx.modules.call("persistence", "settings.set", { key: "workspace.selected", value: d.id });
-      selectedId = d.id;
       await publish(ctx);
       ctx.events.emit("workspace.selected", { workspaceId: d.id });
       return d;

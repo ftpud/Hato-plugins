@@ -48,7 +48,7 @@ function sections(): SettingsSection[] {
       description: "Reuse language servers and their indexes when switching workspaces. Closed servers retain their on-disk cache." },
   ] }, ...servers().map((server): SettingsSection => ({ key: server.id, title: server.id, group: "Languages", fields: [
     { key: "executable", label: "Language server executable", type: "text", value: paths.get(server.id) || server.executable,
-      description: `${selected?.location === "ssh" ? "Remote" : "Local"} executable for this workspace. Press Enter to apply. ${server.installHint}` },
+      description: `${selected && selected.location !== "local" ? "Remote" : "Local"} executable for this workspace. Press Enter to apply. ${server.installHint}` },
     ...(dependencies?.fields(server) || []),
   ] }))];
 }
@@ -128,7 +128,7 @@ async function start(ctx: ModuleContext, d: WorkspaceDescriptor, server: Languag
     const data = server.args.some(arg => arg.includes("$SERVER_DATA")) ? await serverData(ctx, d, server.id, grant.grant) : "";
     if(data)report(ctx,d,server,{dataDirectory:data});
     const args = server.args.map(arg => arg.replace(/\$WORKSPACE/g, d.rootAbsolutePath).replace(/\$SERVER_DATA/g, data));
-    handle = (await ctx.host.process.spawn(grant.grant, { target: await targetFor(ctx, d), executable, args, cwd: d.rootAbsolutePath, loginShell: d.location === "ssh" })).handle;
+    handle = (await ctx.host.process.spawn(grant.grant, { target: await targetFor(ctx, d), executable, args, cwd: d.rootAbsolutePath, loginShell: d.location !== "local" })).handle;
   } catch (error) { throw new Error(`${server.id} on ${d.machineId}: ${errMsg(error)}. ${server.installHint}`); }
   const peer = new LspPeer(frame => ctx.host.process.write(handle, frame));
   const s: Session = { key, workspace: d, server, handle, peer, subscriptions: [], documents: new Map(), closing: false, initialized: false, capabilities: {}, queue: Promise.resolve(), stderr: "" };

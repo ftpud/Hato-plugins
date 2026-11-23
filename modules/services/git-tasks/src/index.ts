@@ -15,7 +15,7 @@ async function git(ctx: ModuleContext, desc: WorkspaceDescriptor, args: string[]
   const g = await workspaceGrant(ctx, desc, "process");
   return ctx.host.process.run(g.grant, {
     target: await targetFor(ctx, desc),
-    executable: "git", args, cwd: desc.rootAbsolutePath, loginShell: desc.location === "ssh",
+    executable: "git", args, cwd: desc.rootAbsolutePath, loginShell: desc.location !== "local",
   }, { timeoutMs });
 }
 
@@ -39,6 +39,15 @@ function parsePorcelain(out: string) {
 }
 
 async function remoteStateDir(ctx: ModuleContext, desc: WorkspaceDescriptor) {
+  if (desc.location === "cloud") {
+    const grant = await workspaceGrant(ctx, desc, "process");
+    const result = await ctx.host.process.run(grant.grant, {
+      target: await targetFor(ctx, desc), executable: "sh", args: ["-c", 'printf "%s" "$HOME"'],
+      cwd: grant.root,
+    }, { timeoutMs: 10000 });
+    if (result.code !== 0 || !result.stdout.startsWith("/")) throw new Error("cannot determine Cloud host home directory");
+    return `${result.stdout.replace(/\/+$/, "")}/.local/state/hato`;
+  }
   const c = await ctx.host.ssh.connect(sshProfileSpec(desc.ssh!));
   if (!c.home) throw new Error("cannot determine remote home directory");
   return `${c.home.replace(/\/+$/, "")}/.local/state/hato`;
@@ -103,7 +112,7 @@ async function mergeTask(ctx: ModuleContext, a: { taskId: string; target?: strin
       : `git merge failed (exit ${r.code}): ${(r.stderr || r.stdout).trim().slice(0, 800)}`);
   }
   if (a.squash) must(await git(ctx, desc, ["-C", root, "commit", "--no-edit", "-m", `Task ${task.name} (${task.branch})`]), "git commit");
-  ctx.events.emit("git.changed", { workspaceId: `project:${proj.id}:root` });
+  ctx.events.emit("git.changed", { workspaceId: desc.id });
   ctx.events.emit("git-tasks.changed", { projectId: proj.id, taskId: task.id, merged: true });
   return { merged: true, target, branch: task.branch, commits: ahead, squash: !!a.squash };
 }
@@ -171,7 +180,7 @@ const mod: AppModule = {
       // 1. Resolve authorized machine/root and verify Git project.
       const proj = await ctx.modules.call("projects", "get", { projectId: a.projectId });
       const desc: WorkspaceDescriptor = proj.desc;
-      const root = desc.rootAbsolutePath;
+      const root = desc.location === "cloud" ? (await workspaceGrant(ctx, desc, "process")).root : desc.rootAbsolutePath;
       const top = await git(ctx, desc, ["-C", root, "rev-parse", "--show-toplevel"]);
       if (top.code !== 0) throw new Error("project root is not a Git working tree");
       if (top.stdout.trim() !== root) throw new Error(`project root must be the repository top level (${top.stdout.trim()})`);
