@@ -3,7 +3,7 @@
 // (manifest `runsOn: "workspace"`, pushed automatically when enabled), and exposes status and
 // controls to UI plugins. Changes here hot reload like any module.
 import type { AppModule, DaemonTarget, ModuleContext, PluginInfo } from "@hato/sdk/types";
-import { daemonTargetFor, errMsg, type WorkspaceDescriptor } from "@hato/sdk/runtime";
+import { daemonTargetFor, errMsg, sshFromProfile, sshProfileSpec, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { syncScope } from "@hato/sdk/scoped-settings";
 import { exportSettings } from "@hato/sdk/settings";
 
@@ -141,7 +141,8 @@ const mod: AppModule = {
       if (!daemon) return { ...base, running: false };
       try {
         const hello = await ctx.host.daemon.request(target, "hello");
-        return { ...base, running: true, version: hello.version, pid: hello.pid, stale: !!daemon.status?.stale, resources: hello.resources, plugins: hello.plugins };
+        const stale = !!daemon.status?.stale || (d.location === "cloud" && !hello.features?.includes("fs"));
+        return { ...base, running: true, version: hello.version, pid: hello.pid, stale, resources: hello.resources, plugins: hello.plugins };
       } catch (e) {
         return { ...base, running: false, error: errMsg(e) };
       }
@@ -182,6 +183,37 @@ const mod: AppModule = {
       ctx.events.emit("remote-runtime.changed", { machineId: d.machineId });
       ctx.events.emit("remote-runtime.updated", { machineId: d.machineId, plugins: results.filter((r) => r.reloaded).map((r) => r.id) });
       return { machineId: d.machineId, plugins: results };
+    },
+    async upgradeProfiles(ctx) {
+      const profiles: Array<{ id: string; host: string; user: string; port: number; transport?: string }> =
+        await ctx.modules.call("persistence", "ssh.list");
+      return profiles.filter(p => p.transport !== "wsl")
+        .map(p => ({ id: p.id, label: `${p.user}@${p.host}:${p.port}` }));
+    },
+    async forceUpgrade(ctx, a) {
+      const d = await ctx.modules.call<WorkspaceDescriptor>("workspace", "resolve", { workspaceId: a.workspaceId });
+      try {
+        let ssh = d.ssh;
+        let cloud: Extract<DaemonTarget, { kind: "cloud" }> | undefined;
+        if (d.location === "cloud") {
+          const profile = await ctx.modules.call("persistence", "ssh.get", { id: String(a.profileId || "") });
+          if (!profile || profile.transport === "wsl") throw new Error("Choose an SSH profile for the enrolled Cloud host.");
+          ssh = sshFromProfile(profile);
+          const target = await daemonTargetFor(ctx, d);
+          if (target.kind !== "cloud") throw new Error("Invalid Cloud host route.");
+          cloud = target;
+        } else if (d.location !== "ssh") {
+          throw new Error("Select an SSH or Cloud workspace.");
+        }
+        if (!ssh) throw new Error("Missing SSH profile.");
+        const { connection } = await ctx.host.ssh.connect(sshProfileSpec(ssh), { interactive: true });
+        const upgraded = await ctx.host.daemon.forceUpgrade({ kind: "ssh", connection }, cloud);
+        lastError.delete(d.machineId);
+        ctx.events.emit("remote-runtime.updated", { machineId: d.machineId, plugins: [] });
+        return upgraded;
+      } finally {
+        ctx.events.emit("remote-runtime.changed", { machineId: d.machineId });
+      }
     },
     async disable(ctx, a) {
       const { target } = await resolve(ctx, String(a.workspaceId));

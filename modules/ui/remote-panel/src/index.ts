@@ -14,11 +14,20 @@ let localPort = "", remoteHost = "localhost", remotePort = "";
 /** Force update asks for a second click: it replaces running plugins and stops what they hold. */
 let confirmUpdate = false;
 let updateNote: string | null = null;
+let upgrade: { workspaceId: string; profiles: { id: string; label: string }[]; profileId: string } | null = null;
 
 async function refresh(ctx: ModuleContext) {
   if (!ws) { status = null; ctx.ui.invalidate(); return; }
-  try { status = await ctx.modules.call("remote-runtime", "status", { workspaceId: ws.id }, { timeoutMs: 60000 }); error = null; tunnels = await ctx.modules.call("remote-runtime", "tunnels", { workspaceId: ws.id }); }
-  catch (e) { error = errMsg(e); }
+  const workspaceId = ws.id;
+  try {
+    const next = await ctx.modules.call("remote-runtime", "status", { workspaceId }, { timeoutMs: 60000 });
+    const forwards = await ctx.modules.call("remote-runtime", "tunnels", { workspaceId });
+    if (ws?.id !== workspaceId) return;
+    status = next; error = null; tunnels = forwards;
+  } catch (e) {
+    if (ws?.id !== workspaceId) return;
+    error = errMsg(e);
+  }
   ctx.ui.invalidate();
 }
 
@@ -122,7 +131,10 @@ const mod: AppModule = {
     ws = ctx.state.get("workspace.selected") || null;
     ctx.state.watch("workspace.selected", (v: any) => {
       const changed = ws?.id !== v?.id; ws = v;
-      if (changed) void refresh(ctx); else ctx.ui.invalidate();
+      if (changed) {
+        status = null; confirmUpdate = false; upgrade = null; updateNote = null;
+        void refresh(ctx);
+      } else ctx.ui.invalidate();
     });
     ctx.events.on("remote-runtime.changed", () => { void refresh(ctx); });
     timer = setInterval(() => { if ((ctx.state.get("workspace-layout.panels") as any)?.remote) void refresh(ctx); }, 5000);
@@ -137,19 +149,34 @@ const mod: AppModule = {
       ...(status?.running ? [{ type: "button", key: "force-update", text: confirmUpdate ? "Confirm update" : "Force update", action: confirmUpdate ? "forceUpdate" : "askForceUpdate",
         small: true, variant: confirmUpdate ? "danger" : "ghost", disabled: !!busy,
         tooltip: confirmUpdate ? "Replaces every daemon plugin now. Running background agents and workflow runs stop and must reconnect." : "Send this desktop's current build of all daemon plugins, even while they are busy" } as UiNode] : []),
+      ...(status?.running && (status.location === "ssh" || status.location === "cloud") ? [{
+        type: "button", key: "force-upgrade", text: "Force upgrade", action: "prepareUpgrade", small: true,
+        disabled: !!busy, variant: "ghost", tooltip: "Replace the native daemon over SSH and restart it after confirmation",
+      } as UiNode] : []),
       ...(confirmUpdate ? [{ type: "button", key: "cancel-update", text: "Cancel", action: "cancelForceUpdate", small: true, variant: "ghost" } as UiNode] : []),
       { type: "button", key: "refresh", text: "", iconSvg: uiIcons.refresh, action: "refresh", small: true, variant: "ghost", tooltip: "Refresh" },
     ] });
     if (updateNote) kids.push({ type: "status", key: "update-note", text: updateNote, level: "success" });
     if (busy) kids.push({ type: "progress", key: "busy", indeterminate: true, label: busy });
     if (error || status?.error) kids.push({ type: "status", key: "err", text: error || status.error, level: "error" });
+    if (upgrade && upgrade.workspaceId === ws.id) kids.push({ type: "column", key: "upgrade-options", gap: 6, children: [
+      { type: "label", key: "title", text: "SSH profile for this Cloud host", size: "sm", weight: "semibold" },
+      ...(upgrade.profiles.length ? [{
+        type: "select", key: "upgrade-profile", value: upgrade.profileId || null, action: "upgradeProfile",
+        options: upgrade.profiles.map(p => ({ label: p.label, value: p.id })),
+      } as UiNode] : [{ type: "label", key: "no-profile", text: "Add an SSH profile for the enrolled host first.", size: "xs", color: "muted", wrap: true } as UiNode]),
+      { type: "row", key: "actions", gap: 6, children: [
+        { type: "button", key: "cancel-upgrade", text: "Cancel", action: "cancelUpgrade", small: true, disabled: !!busy },
+        { type: "button", key: "confirm-upgrade", text: "Continue", action: "forceUpgrade", small: true, variant: "primary", disabled: !!busy || !upgrade.profileId },
+      ] },
+    ] });
     if (!status) return { type: "column", key: "root", padding: 8, gap: 6, children: kids };
     if (!status.running) {
       kids.push({ type: "label", key: "off", text: "The Hato daemon is not running on this machine. Terminals and plugins stop when the connection drops.", size: "sm", color: "muted", wrap: true });
       kids.push({ type: "button", key: "start", text: "Start daemon", action: "ensure", variant: "primary", small: true, disabled: !!busy });
     }
     if (status.running) {
-    kids.push({ type: "label", key: "ver", text: `daemon ${status.version} · pid ${status.pid}${status.stale ? " · older build (restarts when idle)" : ""}`, size: "xs", color: status.stale ? "warning" : "muted" });
+    kids.push({ type: "label", key: "ver", text: `daemon ${status.version} · pid ${status.pid}${status.stale ? " · older build" : ""}`, size: "xs", color: status.stale ? "warning" : "muted" });
     const ptys: any[] = status.resources?.ptys || [], procs: any[] = status.resources?.procs || [];
     kids.push({ type: "label", key: "h-res", text: `Held on the server (${ptys.length + procs.length})`, weight: "semibold", size: "sm" });
     for (const p of ptys) kids.push(row(`pty:${p.key}`, p.key, `terminal · ${p.exit ? `exited (${p.exit})` : p.attached ? "attached" : "detached"} · ${p.cwd}`, [
@@ -176,6 +203,12 @@ const mod: AppModule = {
   async onEvent(ctx, ev) {
     const workspaceId = ws?.id;
     if (!workspaceId) return;
+    const forceUpgrade = (profileId?: string) => run(ctx, "Upgrading native daemon…", async () => {
+      const result = await ctx.modules.call("remote-runtime", "forceUpgrade", { workspaceId, profileId }, { timeoutMs: 620000 });
+      if (ws?.id !== workspaceId) return;
+      upgrade = null;
+      updateNote = `Native daemon restarted (PID ${result.status.pid}).`;
+    });
     switch (ev.action) {
       case "tunnelInput":
         if (ev.key === "fwdLocalPort") localPort = String(ev.value ?? ev.inputs?.fwdLocalPort ?? "");
@@ -190,6 +223,23 @@ const mod: AppModule = {
       case "refresh": return refresh(ctx);
       case "askForceUpdate": confirmUpdate = true; updateNote = null; ctx.ui.invalidate(); return;
       case "cancelForceUpdate": confirmUpdate = false; ctx.ui.invalidate(); return;
+      case "prepareUpgrade": {
+        if (busy) return;
+        updateNote = null; confirmUpdate = false;
+        if (ws.location === "ssh") return forceUpgrade();
+        if (ws.location !== "cloud") return;
+        return run(ctx, "Loading SSH profiles…", async () => {
+          const profiles = await ctx.modules.call("remote-runtime", "upgradeProfiles");
+          if (ws?.id === workspaceId) upgrade = { workspaceId, profiles, profileId: profiles.length === 1 ? profiles[0].id : "" };
+        });
+      }
+      case "upgradeProfile":
+        if (upgrade && upgrade.workspaceId === workspaceId && upgrade.profiles.some(p => p.id === ev.value)) upgrade.profileId = String(ev.value);
+        ctx.ui.invalidate(); return;
+      case "cancelUpgrade": upgrade = null; ctx.ui.invalidate(); return;
+      case "forceUpgrade":
+        if (!busy && upgrade && upgrade.workspaceId === workspaceId && upgrade.profileId) return forceUpgrade(upgrade.profileId);
+        return;
       case "forceUpdate": confirmUpdate = false; return run(ctx, "Updating daemon plugins…", async () => {
         const r: any = await ctx.modules.call("remote-runtime", "forceUpdate", { workspaceId }, { timeoutMs: 600000 });
         const reloaded = (r?.plugins || []).filter((p: any) => p.reloaded).map((p: any) => p.id);
