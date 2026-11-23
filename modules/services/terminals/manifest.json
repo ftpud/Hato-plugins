@@ -18,5 +18,10 @@
   "author": "Hato contributors",
   "version": "0.1.50",
   "pluginPackage": "foundation",
-  "pluginType": "System"
+  "pluginType": "System",
+  "calls": [
+    "workspace",
+    "persistence",
+    "cloud"
+  ]
 }

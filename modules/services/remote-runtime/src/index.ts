@@ -3,7 +3,7 @@
 // (manifest `runsOn: "workspace"`, pushed automatically when enabled), and exposes status and
 // controls to UI plugins. Changes here hot reload like any module.
 import type { AppModule, DaemonTarget, ModuleContext, PluginInfo } from "@hato/sdk/types";
-import { errMsg, sshConnect, type WorkspaceDescriptor } from "@hato/sdk/runtime";
+import { daemonTargetFor, errMsg, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { syncScope } from "@hato/sdk/scoped-settings";
 import { exportSettings } from "@hato/sdk/settings";
 
@@ -33,7 +33,7 @@ function sync(ctx: ModuleContext, machineId: string, target: DaemonTarget) {
 
 async function resolve(ctx: ModuleContext, workspaceId: string): Promise<{ d: WorkspaceDescriptor; target: DaemonTarget }> {
   const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId });
-  const target: DaemonTarget = d.location === "ssh" ? { kind: "ssh", connection: (await sshConnect(ctx, d)).connection } : { kind: "local" };
+  const target = await daemonTargetFor(ctx, d);
   return { d, target };
 }
 

@@ -7,6 +7,11 @@ let selectedId: string | null = null;
 
 async function resolve(ctx: ModuleContext, workspaceId: string): Promise<WorkspaceDescriptor> {
   if (typeof workspaceId !== "string") throw new Error("workspaceId required");
+  if (/^cloud:[0-9a-f-]+$/.test(workspaceId)) {
+    const item: WorkspaceDescriptor | null = await ctx.modules.call("persistence", "settings.get", { key: `workspace.${workspaceId}` });
+    if (item?.location !== "cloud" || item.id !== workspaceId) throw new Error("Unknown Cloud workspace.");
+    return item;
+  }
   let project: any;
   let task: any = null;
   const m = /^project:([0-9a-f-]+):root$/.exec(workspaceId);
@@ -69,6 +74,22 @@ const mod: AppModule = {
       const d = await resolve(ctx, a.workspaceId); // validates
       selectedId = d.id;
       await ctx.modules.call("persistence", "settings.set", { key: "workspace.selected", value: d.id });
+      await publish(ctx);
+      ctx.events.emit("workspace.selected", { workspaceId: d.id });
+      return d;
+    },
+    async selectCloud(ctx, a, meta) {
+      if (meta.caller !== "cloud") throw new Error("Only Cloud can select a Cloud workspace.");
+      if (!/^[0-9a-f-]{36}$/.test(a.id) || !/^[0-9a-f-]{36}$/.test(a.hostId) || !/^cloud:[a-f0-9]{64}$/.test(a.machineId) ||
+          typeof a.path !== "string" || !a.path.startsWith("/") || a.path.split("/").some((part: string) => part === "." || part === "..") ||
+          a.path.includes("\\") || /[\x00-\x1f\x7f]/.test(a.path) || typeof a.name !== "string") throw new Error("Invalid Cloud workspace.");
+      const d: WorkspaceDescriptor = {
+        id: `cloud:${a.id}`, projectId: a.id, name: a.name, location: "cloud", cloudHostId: a.hostId,
+        machineId: a.machineId, rootAbsolutePath: a.path, status: "ready",
+      };
+      await ctx.modules.call("persistence", "settings.set", { key: `workspace.${d.id}`, value: d });
+      await ctx.modules.call("persistence", "settings.set", { key: "workspace.selected", value: d.id });
+      selectedId = d.id;
       await publish(ctx);
       ctx.events.emit("workspace.selected", { workspaceId: d.id });
       return d;

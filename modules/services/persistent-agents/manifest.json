@@ -29,5 +29,15 @@
   "author": "Hato contributors",
   "version": "0.1.11",
   "pluginPackage": "agents",
-  "pluginType": "Automation"
+  "pluginType": "Automation",
+  "calls": [
+    "workspace",
+    "persistence",
+    "agent-runner",
+    "internal-local-mcp",
+    "internal-remote-mcp",
+    "git-tasks",
+    "mcp-auth",
+    "cloud"
+  ]
 }

@@ -1,6 +1,6 @@
 import { providerProfiles } from "@hato/sdk/agent-providers";
 import type { AppModule, ModuleContext, DaemonTarget } from "@hato/sdk/types";
-import { sshConnect, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
+import { daemonTargetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { workspaceSkills } from "../../files/src/skills";
 import { agentActivity, agentSettings, autoAgentName, isAutoAgentName, relativeAgentPath, type AgentMcp, type AgentSpec } from "@hato/sdk/persistent-agents";
 import { imageAttachments } from "@hato/sdk/images";
@@ -16,7 +16,7 @@ async function target(ctx:ModuleContext,workspaceId:string):Promise<DaemonTarget
   let pending=prepared.get(d.machineId);
   if(!pending) {
     pending=(async()=>{
-      const t:DaemonTarget=d.location==="ssh"?{kind:"ssh",connection:(await sshConnect(ctx,d)).connection}:{kind:"local"};
+      const t=await daemonTargetFor(ctx,d);
       const info=await ctx.host.daemon.ensure(t);daemonInfo.set(d.machineId,{bin:info.bin,dir:info.dir});
       const result=await ctx.host.daemon.request(t,"plugins.list");
       const mcp=result.plugins.find((p:any)=>p.id==="internal-remote-mcp");
@@ -82,19 +82,22 @@ async function catalog(ctx:ModuleContext,workspaceId:string) {
     libraryText.set(libraryRef(i.id),libraryInstructions(i));
     return {name:i.name,description:i.description,path:libraryRef(i.id),source:i.projectId?"library-project":"library-global"};
   });
-  const skills=[...(await workspaceSkills(ctx,d)).map(s=>({...s,source:"workspace"})),...fromLibrary("skill")];
-  const grant=await workspaceGrant(ctx,d,"fs");
+  const workspaceEntries=d.location==="cloud"?[]:await workspaceSkills(ctx,d);
+  const skills=[...workspaceEntries.map(s=>({...s,source:"workspace"})),...fromLibrary("skill")];
   const agentFiles:{name:string;path:string}[]=[];
-  try {if((await ctx.host.fs.stat(grant.grant,"AGENTS.md")).kind==="file")agentFiles.push({name:"AGENTS.md",path:"AGENTS.md"});}catch{}
-  for(const dir of [".agents/agents",".claude/agents"]) {
-    let entries;try{entries=(await ctx.host.fs.list(grant.grant,dir)).entries;}catch{continue;}
-    for(const e of entries)if(e.kind==="file"&&e.name.endsWith(".md"))agentFiles.push({name:e.name,path:`${dir}/${e.name}`});
+  if(d.location!=="cloud") {
+    const grant=await workspaceGrant(ctx,d,"fs");
+    try {if((await ctx.host.fs.stat(grant.grant,"AGENTS.md")).kind==="file")agentFiles.push({name:"AGENTS.md",path:"AGENTS.md"});}catch{}
+    for(const dir of [".agents/agents",".claude/agents"]) {
+      let entries;try{entries=(await ctx.host.fs.list(grant.grant,dir)).entries;}catch{continue;}
+      for(const e of entries)if(e.kind==="file"&&e.name.endsWith(".md"))agentFiles.push({name:e.name,path:`${dir}/${e.name}`});
+    }
   }
   agentFiles.push(...fromLibrary("agent").map(a=>({name:`Library · ${a.name}`,path:a.path})));
   return {workspace:d,profiles,skills,agentFiles,libraryText,mcps:[
     {id:"internal-remote-mcp",name:"Workspace tools (background agents and terminals)"},
     ...(d.location==="local"?[{id:"internal-remote-mcp-local",name:"Workspace tools · local desktop terminals (online only)"}]:[]),
-    {id:"internal-local-mcp",name:"Desktop tools (requires desktop online)"},...(await mcps(ctx)).filter(m=>m.enabled!==false)]};
+    ...(d.location==="cloud"?[]:[{id:"internal-local-mcp",name:"Desktop tools (requires desktop online)"}]),...(await mcps(ctx)).filter(m=>m.enabled!==false)]};
 }
 function libraryInline(c:Awaited<ReturnType<typeof catalog>>,paths:(string|null)[]) {
   const inline:Record<string,string>={};

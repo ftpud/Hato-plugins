@@ -5,7 +5,7 @@
 import { exportMcpTools } from "@hato/sdk/mcp";
 import { terminalTools } from "./tools";
 import type { AppModule, ModuleContext } from "@hato/sdk/types";
-import { errMsg, sshConnect, workspaceGrant, withWorkspace, type WorkspaceDescriptor } from "@hato/sdk/runtime";
+import { daemonTargetFor, errMsg, workspaceGrant, withWorkspace, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { exportSettings } from "@hato/sdk/settings";
 import type { DaemonTarget } from "@hato/sdk/types";
 
@@ -17,8 +17,9 @@ const ensured = new Map<string, Promise<unknown>>();
 const daemonKey = (stable: string) => stable.replace(/[^A-Za-z0-9\-_.:@/]/g, "_");
 
 async function daemonTarget(ctx: ModuleContext, d: WorkspaceDescriptor): Promise<DaemonTarget | null> {
+  if (d.location === "cloud") return daemonTargetFor(ctx, d);
   if (d.location === "ssh" ? !keepRemote : !keepLocal) return null;
-  const target: DaemonTarget = d.location === "ssh" ? { kind: "ssh", connection: (await sshConnect(ctx, d)).connection } : { kind: "local" };
+  const target = await daemonTargetFor(ctx, d);
   let p = ensured.get(d.machineId);
   if (!p) {
     p = ctx.host.daemon.ensure(target);
@@ -44,9 +45,27 @@ async function attach(ctx: ModuleContext, a: any, forceNew = false) {
   if (existing && !forceNew) {
     const info: any = await ctx.host.pty.info(existing);
     // An exited shell stays visible (with its exit status) until the user restarts it explicitly.
-    return { pty: existing, machineId: info.machineId, cwd: info.cwd, exited: info.exit, reattached: true };
+    if (d.location !== "cloud" || info.exit !== "exited (Cloud connection closed)") {
+      return { pty: existing, machineId: info.machineId, cwd: info.cwd, exited: info.exit, reattached: true };
+    }
+    await ctx.host.resources.release(existing);
   }
   if (existing && forceNew) await ctx.host.pty.close(existing).catch(() => {});
+  if (d.location === "cloud") {
+    const target = await daemonTargetFor(ctx, d);
+    if (target.kind !== "cloud") throw new Error("Invalid Cloud terminal route.");
+    if (forceNew) {
+      await ctx.host.daemon.request(target, "pty.kill", { key: daemonKey(stable) }).catch(e => {
+        if (!/no terminal/.test(errMsg(e))) throw e;
+      });
+    }
+    const r = await ctx.host.daemon.cloudOpenTerminal(target, {
+      cwd: d.rootAbsolutePath, key: daemonKey(stable), columns: a.columns || 120, rows: a.rows || 30,
+    });
+    await ctx.host.resources.retainForWorkspace(r.handle, stable);
+    ctx.events.emit("terminals.changed", { workspaceId: d.id });
+    return { pty: r.handle, machineId: r.machineId, cwd: r.cwd, exited: null, reattached: false };
+  }
   return withWorkspace(ctx, d, async () => {
     const g = await workspaceGrant(ctx, d, "pty");
     const target = await daemonTarget(ctx, d);

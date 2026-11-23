@@ -306,6 +306,17 @@
         "library",
         "library-panel"
       ]
+    },
+    {
+      "id": "cloud",
+      "name": "Hato Cloud",
+      "type": "Connectivity",
+      "author": "Hato contributors",
+      "version": "0.1.0",
+      "coreVersion": "^0.1.0",
+      "description": "Connect to Hato Cloud hosts and projects.",
+      "dependencies": { "foundation": "^0.1.50" },
+      "modules": ["cloud", "cloud-panel"]
     }
   ]
 }
