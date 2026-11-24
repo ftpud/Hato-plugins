@@ -8,7 +8,7 @@
       "type": "System",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.57",
+      "version": "0.1.58",
       "coreVersion": "^0.1.0",
       "description": "Hato essentials services and panels.",
       "dependencies": {},
@@ -330,7 +330,7 @@
       "type": "Automation",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "coreVersion": "^0.1.0",
       "description": "Persistent headless browser sessions with a live, interactive preview, agent MCP commands and workflow browser blocks.",
       "dependencies": {

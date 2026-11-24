@@ -178,7 +178,7 @@ function preview(s: BrowserSessionView): UiNode {
   const placeholder = s.status === "starting" ? (s.progress || "Starting browser…") : s.status === "error" ? "" : s.status === "stopped" ? "The browser is stopped." : "Waiting for the first frame…";
   return { type: "surface", key: `surface:${s.id}`, surface: s.surface, placeholder, grow: true,
     pointerAction: "ptr", wheelAction: "wheel", keyAction: "key", resizeAction: "resize",
-    cursorSvg: icons.pointer, cursorLabel: "Agent", cursorColor: "#6d5dfc", style: { background: "#ffffff" } };
+    cursorSvg: icons.pointer, cursorLabel: "Agent", cursorColor: "#6d5dfc", style: { background: s.status === "running" ? "#ffffff" : "background" } };
 }
 
 const statusColor = (e: BrowserNetworkEntry) => e.failed || (e.status ?? 0) >= 400 ? "danger" : (e.status ?? 0) >= 300 ? "warning" : e.status ? "success" : muted;
