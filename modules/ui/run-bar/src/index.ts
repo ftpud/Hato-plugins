@@ -209,8 +209,8 @@ const mod: AppModule = {
     const noTarget = !t;
     const chipText = !workspaceId ? "No workspace" : t ? t.name : detecting ? "Scanning…" : "Add configuration…";
     const children: UiNode[] = [
-      { type: "dropdown", key: "picker", text: `${chipText}  ⌄`, iconSvg: t ? typeIcon(t.type) : icons.config, variant: "ghost", action: "toggle", open,
-        disabled: !workspaceId, width: 190, menuWidth: 360, maxHeight: 560,
+      { type: "dropdown", key: "picker", text: `${chipText.length > 24 ? chipText.slice(0, 23) + "…" : chipText}  ⌄`, iconSvg: t ? typeIcon(t.type) : icons.config, variant: "ghost", action: "toggle", open,
+        disabled: !workspaceId, grow: true, minWidth: 0, menuWidth: 360, maxHeight: 560,
         tooltip: t ? `${t.name}${t.candidate ? " (detected)" : ""}\nChoose a run configuration` : "Choose or create a run configuration",
         style: { background: "transparent", borderWidth: 0 }, children: [{ type: "column", key: "menu", gap: 6, padding: 10, scroll: true, children: menu(t) }] },
       live && live.state !== "stopping"
@@ -232,7 +232,13 @@ const mod: AppModule = {
       const n = sessions.filter(runActive).length;
       if (n) children.push({ type: "button", key: "others", text: `${n} running`, action: "toggle", value: true, variant: "ghost", small: true, tooltip: "Other configurations are running. Open the menu to manage them.", style: { color: "muted", fontSize: 11 } });
     }
-    return { type: "row", key: "run-bar", gap: 2, align: "center", children };
+    // Lives in the Workspace rail's RUN section (about 220 px): the picker gets the full width and
+    // truncates; run/debug/stop and the live status share the line below.
+    const [picker, ...controls] = children;
+    return { type: "column", key: "run-bar", gap: 2, grow: true, minWidth: 0, children: [
+      { type: "row", key: "picker-row", grow: true, minWidth: 0, style: { fullWidth: true }, children: [{ ...picker, grow: true, minWidth: 0, style: { ...(picker as any).style, fullWidth: true, maxWidth: 220 } } as UiNode] },
+      { type: "row", key: "controls", gap: 2, align: "center", children: [...controls.slice(0, 3), { type: "spacer", key: "sp" } as UiNode, ...controls.slice(3)] },
+    ] };
   },
   async onEvent(ctx, ev) {
     switch (ev.action) {

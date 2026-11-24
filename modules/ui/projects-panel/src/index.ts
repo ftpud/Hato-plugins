@@ -11,7 +11,7 @@ import { projectsBranding } from "./branding";
 import { groupPanel } from "./groups";
 
 let tree: any[] = [];
-const groups = groupPanel();
+const groups = groupPanel((ctx) => publishRail(ctx));
 let treeRequest = 0;
 let publishSettings: () => void = () => {};
 let selected: string | null = null;
@@ -77,9 +77,27 @@ function updateBusy(ctx: ModuleContext) {
   const working = Object.values(aiBusy).some((n) => n > 0);
   if (working && !animation) animation = setInterval(() => { frame = (frame + 1) % 12; ctx.ui.invalidate(); }, 80);
   else if (!working && animation) { clearInterval(animation); animation = null; }
+  publishRail(ctx);
   ctx.ui.invalidate();
 }
 const asCounts = (v: any): Record<string, number> => (v && typeof v === "object" ? v : {});
+
+/** The Halo rail's project switcher reads `projects-panel.rail` and selects through the
+ *  `selectWorkspace` method, so connection prompts and errors keep one owner. */
+let railTimer: ReturnType<typeof setTimeout> | null = null;
+function publishRail(ctx: ModuleContext) {
+  if (railTimer) return;
+  railTimer = setTimeout(() => {
+    railTimer = null;
+    const stat = (id: string) => diffStats[id] ? { added: diffStats[id].added, removed: diffStats[id].removed } : null;
+    const g = groups.snapshot();
+    ctx.state.set("projects-panel.rail", { selected, activeGroup: g.active, groups: g.groups, projects: tree.map((p) => {
+      const id = projectWorkspaceId(p);
+      return { id, projectId: p.id, name: p.name, kind: p.kind, offline: !!p.offline, needsPassword: !!p.needsPassword, busy: aiBusy[id] || 0, stats: stat(id),
+        tasks: p.tasks.map((t: any) => ({ id: `task:${t.id}`, name: t.name, branch: t.branch || "", status: t.status, busy: aiBusy[`task:${t.id}`] || 0, stats: stat(`task:${t.id}`) })) };
+    }) } as any);
+  }, 60);
+}
 
 // workspaceId -> uncommitted line counts against HEAD (git status numstat).
 let diffStats: Record<string, { added: number; removed: number }> = {};
@@ -94,7 +112,7 @@ async function refreshStats(ctx: ModuleContext, workspaceId: string) {
     for (const f of r?.files || []) { added += Number(f.additions) || 0; removed += Number(f.deletions) || 0; }
     diffStats = { ...diffStats, [workspaceId]: { added, removed } };
   } catch { const { [workspaceId]: _, ...rest } = diffStats; diffStats = rest; }
-  finally { statsInflight.delete(workspaceId); ctx.ui.invalidate(); }
+  finally { statsInflight.delete(workspaceId); publishRail(ctx); ctx.ui.invalidate(); }
 }
 /** Refresh stats for every reachable Git workspace (debounced); offline projects are skipped. */
 function scheduleStats(ctx: ModuleContext, only?: string) {
@@ -124,6 +142,7 @@ async function reload(ctx: ModuleContext) {
     tree = next;
     treeError = null;
     if (orderChanged) publishSettings();
+    publishRail(ctx);
     scheduleStats(ctx);
   } catch (e) {
     if (request !== treeRequest) return;
@@ -260,7 +279,7 @@ const mod: AppModule = {
     }
     const sel: any = ctx.state.get("workspace.selected");
     selected = sel ? sel.id : null;
-    ctx.state.watch("workspace.selected", (v: any) => { selected = v ? v.id : null; ctx.ui.invalidate(); });
+    ctx.state.watch("workspace.selected", (v: any) => { selected = v ? v.id : null; publishRail(ctx); ctx.ui.invalidate(); });
     const updateBackground = (value: any) => {
       backgroundOpacity = typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0.12;
       ctx.ui.invalidate();
@@ -307,13 +326,30 @@ const mod: AppModule = {
       return reload(ctx);
     });
     ctx.events.on("git-tasks.changed", () => reload(ctx));
+    // Halo rail project switcher (rails hold no call grants, so they send events).
+    for (const rail of ["left-sidebar", "sidebar"]) {
+      ctx.events.on(`${rail}.selectWorkspace`, (e: any) => { if (typeof e?.workspaceId === "string" && projectOfRow(e.workspaceId)) void mod.onEvent!(ctx, { action: "selectWorkspace", rowKey: e.workspaceId } as any); });
+      ctx.events.on(`${rail}.addProject`, () => { void mod.onEvent!(ctx, { action: "showAdd" } as any); });
+      ctx.events.on(`${rail}.selectGroup`, (e: any) => { if (typeof e?.id === "string") void groups.event(ctx, { action: "groups.tab", value: e.id } as any).then(() => publishRail(ctx)); });
+    }
     // Keep +/− counts current: git operations and the visible Git panel's status refresh.
     for (const topic of ["git.changed", "git-panel.statusChanged", "files.changed"])
       ctx.events.on(topic, (e: any) => { if (typeof e?.workspaceId === "string") scheduleStats(ctx, e.workspaceId); });
     if (prev?.diffStats) diffStats = prev.diffStats;
     await Promise.all([reload(ctx), groups.activate(ctx)]);
   },
-  deactivate() { taskRequest++; treeRequest++; if (animation) clearInterval(animation); animation = null; if (statsTimer) clearTimeout(statsTimer); statsTimer = null; },
+  methods: {
+    /** Select a project or task workspace; remote projects connect first (this call is the user gesture). */
+    selectWorkspace: async (ctx, a) => {
+      const id = String(a?.workspaceId || "");
+      if (!projectOfRow(id)) throw new Error("Unknown project or task");
+      await mod.onEvent!(ctx, { action: "selectWorkspace", rowKey: id } as any);
+      return { selected };
+    },
+    /** Open the add-project form (the rail also reveals this panel). */
+    showAdd: async (ctx) => { await mod.onEvent!(ctx, { action: "showAdd" } as any); return true; },
+  },
+  deactivate() { if (railTimer) clearTimeout(railTimer); railTimer = null; taskRequest++; treeRequest++; if (animation) clearInterval(animation); animation = null; if (statsTimer) clearTimeout(statsTimer); statsTimer = null; },
   snapshot: () => ({ taskFormFor, taskQuery, taskBranch, taskBranches, addForm, addSource, sshAuth, addValues, filter, diffStats }),
   render(): UiNode {
     const proj = selectedProject();

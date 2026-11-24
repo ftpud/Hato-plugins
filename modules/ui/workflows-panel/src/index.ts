@@ -18,17 +18,27 @@ let timer: ReturnType<typeof setInterval> | null = null, tick = 0, polling = fal
 
 // ---------------------------------------------------------------- loading
 
+/** Lightweight sidebar navigation stays available while the panel is hidden. */
+function publishRail(ctx: ModuleContext) {
+  ctx.state.set("workflows-panel.panelChildren.workflows", [
+    ...S.list.slice(0, 50).map(w => ({ id: `workflow:${w.id}`, label: w.name, count: w.blocks, selected: S.visible && S.maximized === w.id })),
+  ]);
+}
+
 async function setup(ctx: ModuleContext) {
   const mine = ++S.epoch;
   Object.assign(S, { catalog: null, list: [], recent: [], error: null });
   S.details.clear();
   S.chatHistory.clear();
+  publishRail(ctx);
   ctx.ui.invalidate();
-  if (!S.ws || (!S.visible && !S.designerOpen)) return;
+  if (!S.ws) return;
   try {
+    if (!S.visible && !S.designerOpen) { await refreshList(ctx); return; }
     const [c, l, r] = await Promise.all([call(ctx, "catalog"), call(ctx, "list"), call(ctx, "runs")]);
     if (mine !== S.epoch) return;
     Object.assign(S, { catalog: c, list: l, recent: r });
+    publishRail(ctx);
     if (c.templates?.length && !c.templates.some((t: any) => t.id === S.newTemplate)) S.newTemplate = c.templates.find((t: any) => t.id === "multi-agent-setup")?.id || c.templates[0].id;
     // Open the first workflow on first use so its preview is visible.
     if (!S.open.size && l[0]) S.open.add(l[0].id);
@@ -37,7 +47,7 @@ async function setup(ctx: ModuleContext) {
   } catch (e) { if (mine === S.epoch) S.error = errMsg(e); }
   ctx.ui.invalidate();
 }
-async function refreshList(ctx: ModuleContext) { S.list = await call(ctx, "list"); }
+async function refreshList(ctx: ModuleContext) { S.list = await call(ctx, "list"); publishRail(ctx); }
 async function refreshRuns(ctx: ModuleContext) { S.recent = await call(ctx, "runs"); }
 /** Load definitions of shown cards and details of the runs they display (active ones every poll). */
 async function refreshDetails(ctx: ModuleContext) {
@@ -131,20 +141,42 @@ const mod: AppModule = {
       S.startText.clear(); S.chatDrafts.clear(); S.answers.clear();
       S.designerOpen = false; void setup(ctx); schedule(ctx);
     });
-    ctx.state.watch("workspace-layout.panels", (panels: any) => { const was = S.visible; S.visible = !!panels?.workflows; schedule(ctx); if (S.visible && !was && !S.catalog) void setup(ctx); });
+    ctx.state.watch("workspace-layout.panels", (panels: any) => { const was = S.visible; S.visible = !!panels?.workflows; publishRail(ctx); schedule(ctx); if (S.visible && !was && !S.catalog) void setup(ctx); });
     ctx.events.on("workflows.changed", (e: any) => {
       if (e?.workspaceId !== S.ws?.id) return;
       void (async () => {
         try {
-          await refreshList(ctx); await refreshRuns(ctx);
+          await refreshList(ctx);
+          if (!S.visible && !S.designerOpen) return;
+          await refreshRuns(ctx);
           if (e.workflowId) { S.defs.delete(e.workflowId); if (e.workflowId === S.selectedId && !S.dirty) await openDraft(ctx, e.workflowId); }
           await refreshDetails(ctx);
         } catch (err) { if (e.workspaceId === S.ws?.id) S.error = errMsg(err); }
         ctx.ui.invalidate();
       })();
     });
+    for (const rail of ["left-sidebar", "sidebar"]) ctx.events.on(`${rail}.panelChild`, (e: any) => {
+      if (e?.panel !== "workflows") return;
+      const workflow = S.list.find(w => `workflow:${w.id}` === e.child);
+      if (!workflow) return;
+      if (S.visible && S.maximized === workflow.id) {
+        S.maximized = null;
+        S.open.delete(workflow.id);
+        publishRail(ctx);
+        ctx.events.emit("workflows-panel.close", { workspaceId: S.ws?.id });
+        ctx.ui.invalidate();
+        return;
+      }
+      S.maximized = workflow.id;
+      S.open.add(workflow.id);
+      S.filter = "";
+      publishRail(ctx);
+      ctx.events.emit("workflows-panel.reveal", {});
+      if (S.catalog) void act(ctx, () => refreshDetails(ctx));
+      ctx.ui.invalidate();
+    });
     schedule(ctx);
-    if (S.visible || S.designerOpen) await setup(ctx);
+    await setup(ctx);
   },
   deactivate() { S.epoch++; if (animationTimer) clearInterval(animationTimer); animationTimer = null; clearTransfers(); if (timer) clearInterval(timer); timer = null; },
   snapshot,
@@ -297,9 +329,11 @@ const mod: AppModule = {
         case "openDesigner": {
           const wf = value || ev.rowKey || S.selectedId; if (!wf) return;
           if (S.dirty && S.selectedId !== wf) { S.error = "Save the open designer's changes first."; ctx.ui.invalidate(); return; }
+          const mine = S.epoch;
           await act(ctx, async () => {
             // Providers and MCP servers change outside the panel; offer the current ones in the designer.
             const catalog = await call(ctx, "catalog").catch(() => null);
+            if (mine !== S.epoch) return;
             if (catalog) { S.catalog = catalog; if (S.draft) S.issues = validateWorkflow(S.draft, { profiles: catalog.profiles, mcps: catalog.mcps }); }
             if (S.selectedId !== wf || !S.draft) await openDraft(ctx, wf); S.designerOpen = true; schedule(ctx); await refreshDetails(ctx);
           });

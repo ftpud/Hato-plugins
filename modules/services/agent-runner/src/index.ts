@@ -6,7 +6,7 @@ import type { AppModule, ModuleContext, Handle, ChatMessage, StreamSubscription 
 import { JsonRpcPeer, errMsg, rpcError } from "@hato/sdk/runtime";
 import { advertisedChoices } from "@hato/sdk/workflow-provider-options";
 import { agentExecutable } from "@hato/sdk/agent-executable";
-import { modelChoices, relativeAgentPath, agentPolicy, agentSettings, LOW_RISK_TOOL_KINDS, type AgentSpec, type AgentSession, type AgentPermission } from "@hato/sdk/persistent-agents";
+import { modelChoices, relativeAgentPath, agentPolicy, agentSettings, LOW_RISK_TOOL_KINDS, agentProgress, PROGRESS_INSTRUCTION, PROGRESS_MARKER_INSTRUCTION, scanProgressChunk, stripProgressMarkers, type AgentSpec, type AgentSession, type AgentPermission } from "@hato/sdk/persistent-agents";
 import { imageAttachments } from "@hato/sdk/images";
 import { isLibraryRef, textDigest } from "@hato/sdk/library";
 import { reportedUsage } from "@hato/sdk/context-usage";
@@ -16,6 +16,8 @@ interface Live {
   session: AgentSession; peer: JsonRpcPeer; process: Handle; subscriptions: StreamSubscription[];
   permissions: Map<string, { value: AgentPermission; resolve:(v:any)=>void }>;
   queued: string[]; cancelSent: boolean; stopping: boolean; context: string; firstPrompt: boolean;
+  /** Last reply characters, so a progress marker split across chunks is still found. */
+  progressTail?: string;
   /** Agent supports `_session/steering`: follow-ups join the running turn instead of cancelling it. */
   steering: boolean;
   loadSession?: boolean;
@@ -105,7 +107,7 @@ function update(ctx:ModuleContext,c:Live,u:any) {
   if(kind==="async_task_spawned" && u.taskType==="turn" && typeof u.asyncTaskId==="string" && c.session.status==="ready") {
     c.providerTurn={id:u.asyncTaskId,output:""};
     c.turn=Math.max(c.turn+1,Date.now());
-    c.cancelSent=false;c.session.status="busy";c.session.error=null;
+    c.cancelSent=false;c.session.status="busy";c.session.error=null;c.session.progress=null;c.progressTail="";
     emitProviderTurn(ctx,c,{phase:"started",turnId:u.asyncTaskId});
     void persist(ctx,c.session);
     return;
@@ -118,6 +120,11 @@ function update(ctx:ModuleContext,c:Live,u:any) {
     if(u.content?.type==="text") {
       const text=String(u.content.text||"");
       if(kind==="agent_message_chunk" && c.providerTurn) c.providerTurn.output=(c.providerTurn.output+text).slice(-200_000);
+      if(kind==="agent_message_chunk") {
+        // Agents without workspace tools report progress as a reply marker (see PROGRESS_MARKER_INSTRUCTION).
+        const scan=scanProgressChunk(c.progressTail||"",text);c.progressTail=scan.tail;
+        if(scan.progress)c.session.progress=scan.progress;
+      }
       void message(ctx,c.session,kind==="agent_thought_chunk"?"thought":"assistant",text).catch(e=>ctx.log.error(errMsg(e)));
     }
   } else if(kind==="tool_call" || kind==="tool_call_update") {
@@ -142,7 +149,7 @@ function finishProviderTurn(ctx:ModuleContext,c:Live,state:string,error?:string)
   if(!turn)return;
   c.providerTurn=undefined;
   c.session.status="ready";c.session.error=error??null;
-  emitProviderTurn(ctx,c,{phase:"finished",turnId:turn.id,state,output:turn.output.trim(),error});
+  emitProviderTurn(ctx,c,{phase:"finished",turnId:turn.id,state,output:stripProgressMarkers(turn.output).trim(),error});
   void persist(ctx,c.session);
 }
 /** One instruction file or skill as the agent receives it, with a fingerprint of its text. */
@@ -368,10 +375,11 @@ async function prompt(ctx:ModuleContext,c:Live,text:string,images:ImageAttachmen
   const instructions=instructionContext(s,await readInstructions(ctx,s));
   const handoff = s.handoffPending ? chatHandoff((await ctx.host.db.query<any>(db,"SELECT role,text FROM messages WHERE session_id=? AND role IN ('user','assistant') ORDER BY seq DESC LIMIT 12",[s.id])).reverse()) : "";
   if(s.status!=="ready" || c.stopping)throw new Error("Agent is not idle");
-  c.turn=Math.max(c.turn+1,Date.now());c.cancelSent=false;s.status="busy";s.error=null;
+  c.turn=Math.max(c.turn+1,Date.now());c.cancelSent=false;s.status="busy";s.error=null;s.progress=null;c.progressTail="";
   const turn=c.turn;
   await message(ctx,s,"user",text,undefined,undefined,images);await persist(ctx,s);
-  const context=[instructions.preamble,handoff].filter(Boolean).join("\n\n"); s.handoffPending=false; c.firstPrompt=false;s.contextSent=true;s.sentDigests=instructions.digests;await persist(ctx,s);
+  // The first prompt of a session with Hato's workspace tools also carries the progress instruction.
+  const context=[!s.contextSent?(s.workspaceMcp?PROGRESS_INSTRUCTION:PROGRESS_MARKER_INSTRUCTION):"",instructions.preamble,handoff].filter(Boolean).join("\n\n"); s.handoffPending=false; c.firstPrompt=false;s.contextSent=true;s.sentDigests=instructions.digests;await persist(ctx,s);
   // The fingerprint index goes only with messages that (re)send instructions: the first one and
   // after a skill is switched on/off or its text changes. Other messages are sent as typed.
   const body=(context?`${context}\n\nUser request:\n${text}`:text)+(instructions.preamble&&instructions.index?`\n\n${instructions.index}`:"");
@@ -412,6 +420,12 @@ const mod:AppModule={
   },
   canSwap:()=>({ok:live.size===0,reason:"Stop persistent agents before replacing their runtime"}),
   methods:{
+    /** report_progress from the agent's workspace MCP endpoint. Sidebar state only: no message is recorded. */
+    setProgress:(ctx:ModuleContext,a:any,meta:any)=>{
+      if(!["internal-remote-mcp","daemon-client"].includes(meta?.caller))throw new Error("Only workspace endpoints report progress");
+      const s=sessions.get(String(a?.sessionId));if(!s)throw new Error("Unknown agent session");
+      s.progress=agentProgress(a);return {percent:s.progress.percent};
+    },
     health:()=>({ok:true,reasoning:true,mcpActivity:true,toolTitles:true,chatSettings:true,images:true,policy:true,workflowTurnBoundaries:true,connected:live.size}),
     async fork(ctx,a,meta) {
       if(!["internal-remote-mcp","daemon-client"].includes(meta.caller))throw new Error("Only workspace controllers can create child agents");

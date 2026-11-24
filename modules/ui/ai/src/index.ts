@@ -200,7 +200,35 @@ async function load(ctx: ModuleContext) {
     }
   }
   catch (e) { error = errMsg(e); }
+  publishRail(ctx);
   ctx.ui.invalidate();
+}
+
+/** A working agent clicked in the Assistant rail: show it and switch to its project. */
+async function openAgentFromRail(ctx: ModuleContext, e: any) {
+  const workspaceId = typeof e?.workspaceId === "string" ? e.workspaceId : null;
+  if (!workspaceId || typeof e?.id !== "string") return;
+  const here = ws?.id === workspaceId;
+  if (e.kind === "chat") {
+    if (background) leaveBackground(ctx);
+    await ctx.modules.call("ai-sessions", "select", { workspaceId, conversationId: e.id });
+    if (here) { await ctx.modules.call("workspace", "view.patch", { workspaceId, patch: { ui: { aiBackgroundSession: null } } }); await load(ctx); }
+  } else if (e.kind === "agent") {
+    // Saved per workspace: the AI panel reopens it when the workspace becomes current.
+    await ctx.modules.call("workspace", "view.patch", { workspaceId, patch: { ui: { aiBackgroundSession: e.id } } });
+    if (here) await openBackground(ctx, { workspaceId, id: e.id });
+  }
+  if (!here) await ctx.modules.call("workspace", "select", { workspaceId });
+}
+
+/** The Assistant rail lists this workspace's chats from `ai.rail` and drives them via methods. */
+function publishRail(ctx: ModuleContext) {
+  const profiles: any[] = view?.profiles || [];
+  ctx.state.set("ai.rail", view && ws ? {
+    workspaceId: ws.id, activeId: view.activeId || null, background: !!background,
+    conversations: (view.conversations || []).slice(0, 40).map((c: any) => ({ id: c.id, title: c.title || "New chat",
+      provider: (profiles.find((p: any) => p.id === c.acpProfileId)?.name || "Agent").replace(/\s*\([^)]*\)$/, ""), status: c.status || "saved" })),
+  } : null);
 }
 
 const POLICIES = [
@@ -362,7 +390,7 @@ function connectionsPopover(conv: any, live: any, active: any, connected: boolea
   body.push({ type: "label", key: "agents", size: "xs", wrap: true, color: canAgents ? undefined : "muted",
     text: canAgents ? "Background agents: this chat can create, prompt and stop background agents in this workspace (Workspace tools)."
       : background ? "Background agents: not reachable. Enable Workspace tools to let this chat start and control them." : "Background agents: not available to desktop chats. Start a new chat to run it as a background agent." });
-  return { type: "popover", key: "mcp-picker", transition: anchoredAboveMotion, closeAction: "toggleMcpPicker", bottom: 56, heightFraction: 0.85, maxHeight: 640, style: { ...chatStyle.picker, background: "background" }, children: [
+  return { type: "popover", key: "mcp-picker", transition: anchoredAboveMotion, closeAction: "toggleMcpPicker", bottom: 56, left: 8, width: 420, anchorScope: "container", heightFraction: 0.85, maxHeight: 640, style: { ...chatStyle.picker, background: "background" }, children: [
     { type: "row", key: "head", gap: 8, padding: 10, align: "center", children: [
       { type: "label", key: "t", text: "Connected to this chat", weight: "semibold", grow: true },
       { type: "button", key: "close-mcp", text: "", iconSvg: uiIcons.x, action: "toggleMcpPicker", tooltip: "Close", style: chatStyle.iconControl },
@@ -383,9 +411,21 @@ async function loadTools(ctx: ModuleContext, id: string) {
 }
 
 const mod: AppModule = {
+  methods: {
+    newChat: async (ctx) => { await mod.onEvent!(ctx, { action: "newChat" } as any); return true; },
+    selectConversation: async (ctx, a) => { await mod.onEvent!(ctx, { action: "selectConv", value: String(a?.id || "") } as any); return true; },
+    openHistory: async (ctx) => { historyOpen = true; ctx.ui.invalidate(); return true; },
+  },
   id: "ai",
   moduleApiVersion: 1,
   async activate(ctx, prev) {
+    // Assistant rail requests (rails hold no call grants, so they send events).
+    for (const rail of ["left-sidebar", "sidebar"]) {
+      ctx.events.on(`${rail}.newChat`, () => { void mod.onEvent!(ctx, { action: "newChat" } as any); });
+      ctx.events.on(`${rail}.selectConversation`, (e: any) => { if (typeof e?.id === "string") void mod.onEvent!(ctx, { action: "selectConv", value: e.id } as any); });
+      ctx.events.on(`${rail}.openHistory`, () => { void mod.onEvent!(ctx, { action: "openHistory" } as any); });
+      ctx.events.on(`${rail}.openAgent`, (e: any) => { void openAgentFromRail(ctx, e).catch((err) => { error = errMsg(err); ctx.ui.invalidate(); }); });
+    }
     if (prev?.composerFractions) for (const [id, value] of prev.composerFractions) composerFractions.set(id, clampComposerFraction(value));
     if (prev?.attachments) attachments = imageAttachments(prev.attachments);
     if (prev && typeof prev.draft === "string") draft = prev.draft;
@@ -446,20 +486,12 @@ const mod: AppModule = {
     const advertised = (modelOption?.options || []).flatMap((o: any) => o.options || [o]);
     const modelDetails = (id: string) => advertised.find((o: any) => String(o.value) === id) || live?.models?.availableModels?.find((o: any) => o.modelId === id);
     const iconButton = (key: string, icon: "sliders-horizontal" | "message-square" | "plus" | "x", action: string, tooltip: string): UiNode => ({ type: "button", key, text: "", iconSvg: uiIcons[icon], action, tooltip, style: chatStyle.iconControl, disabled: !ws });
-    const header: UiNode = { type: "row", key: "hdr", style: chatStyle.toolbar, padding: 8, gap: 6, align: "center", children: [
-      { type: "column", key: "provider-field", grow: true, minWidth: 100, gap: 0, children: [
-        { type: "select", key: "agent", height: 32, buttonStyle: { ...chatStyle.fieldControl, height: 32 }, tooltip: active?.busy || live?.status === "starting" ? "Wait for the agent to finish or stop its turn before switching providers" : "Switch provider · recent dialogue carries over once; earlier history is available through MCP", options: (view?.profiles || []).map((p: any) => ({ value: p.id, label: p.name.replace(/\s*\([^)]*\)$/, "") })), value: conv?.acpProfileId || null, action: "setProfile", disabled: !conv || !!active?.busy || live?.status === "starting" || live?.status === "busy", placeholder: "Choose provider" },
-      ] },
-      { type: "column", key: "model-field", grow: true, minWidth: 100, gap: 0, children: [
-        { type: "button", key: "cfg-model", style: { ...chatStyle.control, fullWidth: true }, text: modelName.replace(/\s*\((recommended|default)\)$/i, "") + "  ⌄", action: "toggleModels", disabled: model.disabled, tooltip: `Model: ${modelName}`, grow: true },
-      ] },
-      { type: "switch", key: "auto", style: { radius: 8, color: "muted" }, label: "Auto", checked: conv?.approvalPolicy === "autopilot", action: "toggleAuto", disabled: !conv, tooltip: "Automatically approve agent tool permissions. Module changes still require native approval." },
-      iconButton("settings-toggle", "sliders-horizontal", "toggleSettings", "Agent settings"),
-      iconButton("new", "plus", "newChat", "New chat"),
-      iconButton("history-toggle", "message-square", "toggleHistory", "Chat history"),
-    ] };
-    if(background)header.children=header.children.map(n=>n.key==="auto"?{...n,tooltip:"Autopilot: approve this background agent's tool permissions and Git task creation automatically, even while Hato is closed."}:n);
-    const kids: UiNode[] = [header];
+    // No toolbar: provider, model, Auto and agent settings sit in the composer row; new chat and
+    // history live in the Assistant rail (methods newChat / selectConversation / openHistory).
+    const providerLocked = !conv || !!active?.busy || live?.status === "starting" || live?.status === "busy";
+    const autoTooltip = background ? "Autopilot: approve this background agent's tool permissions and Git task creation automatically, even while Hato is closed."
+      : "Automatically approve agent tool permissions. Module changes still require native approval.";
+    const kids: UiNode[] = [];
     if(background) {
       kids.push({type:"row",key:"background-session",padding:8,gap:6,children:[
         {type:"label",key:"name",text:conv?.title||"Background agent",grow:true,weight:"semibold"},
@@ -593,12 +625,31 @@ const mod: AppModule = {
           { type: "image", key: "preview", image, width: 80, height: 64 },
           { type: "button", key: "remove", text: "× " + image.name, action: "removeImage", value: index, small: true, tooltip: "Remove picture" },
         ] })) });
-        composer.push({ type: "textInput", key: "prompt", style: { ...chatStyle.textarea, minHeight: 72 }, changeAction:"draftChanged", pasteImageAction: "attachImages", maxFiles: 4, maxBytes: 5 * 1024 * 1024, placeholder: active.busy ? "Steer " + providerName + "…" : "Ask " + providerName + "…", multiline: true, fillHeight: true, grow: true, rows: 2, submitAction: "send", value: draft });
-        composer.push({ type: "row", key: "act", gap: 6, align: "center", style: { noShrink: true }, children: [
+        composer.push({ type: "textInput", key: "prompt", style: { ...chatStyle.textarea, minHeight: 56 }, changeAction:"draftChanged", pasteImageAction: "attachImages", maxFiles: 4, maxBytes: 5 * 1024 * 1024, placeholder: active.busy ? "Steer " + providerName + "…" : "Ask " + providerName + "…", multiline: true, fillHeight: true, grow: true, rows: 2, submitAction: "send", value: draft });
+        // Two fixed rows that fit any panel width: what the chat uses (attachments, tools, model),
+        // then how it runs (Auto, settings, context, send). The composer's minimum height fits both.
+        const chipStatus = active.steering ? "Steering · " : active.busy ? "Working · " : connected ? "" : `${live?.status || conv.status || "Offline"} · `;
+        const clip = (t: string, n: number) => t.length > n ? t.slice(0, n - 1) + "…" : t;
+        const modelChevron = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
+        composer.push({ type: "row", key: "chat-tools", gap: 6, align: "center", style: { noShrink: true }, children: [
           { type: "imagePicker", key: "attach", action: "attachImages", iconSvg: uiIcons.paperclip, style: chatStyle.attach, maxFiles: 4, maxBytes: 5 * 1024 * 1024,
             dialogTitle: "Attach pictures", tooltip: "Attach pictures (PNG, JPEG, WebP or GIF)", disabled: busy === "send" },
-          { type: "button", key: "mcp-toggle", text: `MCP ${(conv.mcpSelection || []).length}` + (background && backgroundPage ? ` · Skills ${backgroundPage.session.skills.length}` : ""), iconSvg: uiIcons.plug, action: "toggleMcpPicker", style: mcpOpen ? { ...chatStyle.control, borderColor: "primary" } : chatStyle.control, tooltip: "What's connected to this chat: MCP servers and tools, skills, instructions and agents" },
-          { type: "label", key: "chat-status", grow: true, text: active.steering ? "Steering…" : active.busy ? "Working…" : connected ? "" : live?.status || conv.status || "Offline", size: "xs", color: "muted", tooltip: `${providerName} · ${live?.status || conv.status || "offline"}` },
+          { type: "button", key: "mcp-toggle", text: String((conv.mcpSelection || []).length), iconSvg: uiIcons.plug, action: "toggleMcpPicker",
+            style: { ...(mcpOpen ? { ...chatStyle.control, borderColor: "primary" } : chatStyle.control), paddingX: 9, noShrink: true },
+            tooltip: `MCP ${(conv.mcpSelection || []).length}${background && backgroundPage ? ` · Skills ${backgroundPage.session.skills.length}` : ""}\nWhat's connected to this chat: MCP servers and tools, skills, instructions and agents` },
+          // A clickable row, not a button: the label stays left-aligned and truncates; chevron on the right.
+          { type: "row", key: "cfg-model", grow: true, minWidth: 0, gap: 6, align: "center", action: "toggleModels", value: null,
+            hoverStyle: { background: "hover" }, tooltip: `Provider and model\n${providerName} · ${modelName} · ${live?.status || conv.status || "offline"}`,
+            style: { height: 32, radius: 8, paddingX: 12, borderWidth: 1, borderColor: modelsOpen ? "primary" : "border", background: "surface" },
+            children: [
+              { type: "label", key: "t", text: clip(`${chipStatus}${providerName} · ${modelName.replace(/\s*\((recommended|default)\)$/i, "")}`, 28), grow: true, minWidth: 0, style: { fontSize: 14 } },
+              { type: "icon", key: "chev", svg: modelChevron, size: 12, color: "muted", style: { rotate: modelsOpen ? 180 : 0 } },
+            ] } as UiNode,
+        ] });
+        composer.push({ type: "row", key: "act", gap: 6, align: "center", style: { noShrink: true }, children: [
+          { type: "switch", key: "auto", style: { radius: 8, color: "muted" }, label: "Auto", checked: conv?.approvalPolicy === "autopilot", action: "toggleAuto", disabled: !conv, tooltip: autoTooltip },
+          iconButton("settings-toggle", "sliders-horizontal", "toggleSettings", "Agent settings"),
+          { type: "spacer", key: "chat-gap" } as UiNode,
           { type: "button", key: "context-usage", text: context.value === null ? "—" : `${Math.round(context.value * 100)}%`, iconSvg: usagePieSvg(context.value), iconSize: 18,
             action: "", variant: "ghost", small: true, tooltip: context.tooltip, style: { height: 32, paddingX: 4, gap: 4, noShrink: true, color: "muted" } },
           ...(active.busy ? [{ type: "button", key: "cancel", text: "Stop", action: "cancel", style: chatStyle.control } as UiNode] : []),
@@ -607,7 +658,7 @@ const mod: AppModule = {
         const transcript = kids.pop()!;
         kids.push({ type: "split", key: "chat-composer-split", direction: "vertical", grow: true,
           fixed: attachments.length ? [null, 240] : undefined,
-          sizes: [1 - Math.max(composerFraction, attachments.length ? 0.42 : 0), Math.max(composerFraction, attachments.length ? 0.42 : 0)], minSize: attachments.length ? 220 : 96, resizeAction: "resizeComposer",
+          sizes: [1 - Math.max(composerFraction, attachments.length ? 0.42 : 0), Math.max(composerFraction, attachments.length ? 0.42 : 0)], minSize: attachments.length ? 260 : 150, resizeAction: "resizeComposer",
           children: [transcript, { type: "column", key: "composer", style: chatStyle.composer, grow: true, gap: 6, padding: 8, children: composer }],
           tooltip: "Drag the divider above the input to resize it",
         });
@@ -615,7 +666,13 @@ const mod: AppModule = {
       if (mcpOpen && conv) kids.push(connectionsPopover(conv, live, active, connected, skills, skillState, providerName, modelName, model.value || ""));
       if (modelsOpen) {
         const filtered = model.options.filter((o) => `${o.label} ${modelDetails(o.value)?.description || ""}`.toLowerCase().includes(modelQuery.toLowerCase()));
-        kids.push({ type: "popover", key: "model-picker", transition: anchoredMotion, closeAction: "toggleModels", style: { ...chatStyle.picker, background: "background" }, children: [
+        kids.push({ type: "popover", key: "model-picker", transition: anchoredAboveMotion, closeAction: "toggleModels", bottom: 56, left: 8, width: 380, anchorScope: "container", maxHeight: 520, style: { ...chatStyle.picker, background: "background" }, children: [
+          { type: "label", key: "provider-h", text: "Provider", size: "xs", color: "muted", padding: 10 },
+          { type: "row", key: "providers", gap: 6, wrap: true, style: { paddingX: 10 }, children: (view?.profiles || []).map((pr: any): UiNode => ({
+            type: "button", key: "pr-" + pr.id, text: pr.name.replace(/\s*\([^)]*\)$/, ""), action: "setProfile", value: pr.id, small: true,
+            variant: pr.id === conv?.acpProfileId ? "primary" : "ghost", disabled: providerLocked && pr.id !== conv?.acpProfileId,
+            tooltip: providerLocked ? "Wait for the agent to finish or stop its turn before switching providers" : "Switch provider · recent dialogue carries over once; earlier history is available through MCP" })) },
+          { type: "label", key: "model-h", text: "Model", size: "xs", color: "muted", padding: 10 },
           { type: "row", key: "search-row", gap: 8, padding: 10, children: [
             { type: "textInput", key: "model-search", ...filterInput, value: modelQuery, placeholder: "Search models", changeAction: "searchModels", grow: true },
             iconButton("close", "x", "toggleModels", "Close models"),
@@ -635,6 +692,7 @@ const mod: AppModule = {
     return { type: "column", key: "ai-root", style: chatStyle.root, gap: 0, grow: true, children: kids };
   },
   async onEvent(ctx, ev) {
+    if (ev.action === "openHistory") { historyOpen = true; ctx.ui.invalidate(); return; }
     if (ev.action === "newChat" && view && !view.profiles.length) {
       ctx.events.emit("settings.open", { category: "plugins" }); return;
     }

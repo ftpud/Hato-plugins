@@ -2,7 +2,7 @@ import { providerProfiles } from "@hato/sdk/agent-providers";
 import type { AppModule, ModuleContext, DaemonTarget } from "@hato/sdk/types";
 import { daemonTargetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { workspaceSkills } from "../../files/src/skills";
-import { agentActivity, agentSettings, autoAgentName, isAutoAgentName, relativeAgentPath, type AgentMcp, type AgentSpec } from "@hato/sdk/persistent-agents";
+import { agentActivity, agentSettings, autoAgentName, isAutoAgentName, relativeAgentPath, type AgentMcp, type AgentSession, type AgentSpec, type WorkingAgent } from "@hato/sdk/persistent-agents";
 import { imageAttachments } from "@hato/sdk/images";
 import { exportMcpTools } from "@hato/sdk/mcp";
 import { acpServer, transportOf, validateMcp } from "@hato/sdk/mcp-servers";
@@ -272,19 +272,40 @@ async function performTask(ctx:ModuleContext,r:{sessionId:string;workspaceId:str
   try {return {...task,agent:await startTaskAgent(ctx,v.session,`task:${task.id}`,agent)};}
   catch(e) {return {...task,agentError:`The task was created but the agent did not start: ${e instanceof Error?e.message:String(e)}`};}
 }
-// Poll the daemons this desktop already talks to: claim queued task requests and publish which
-// workspaces have a working background agent (`persistent-agents.busy`, like `ai-sessions.busy`).
+// Poll daemons the desktop already talks to for task requests and working sessions.
 let daemonPoll:ReturnType<typeof setInterval>|null=null,polling=false,busySignature="";
-const WORKING=new Set(["starting","busy","waiting"]);
+let workingSignature = "";
+const WORKING_LIMIT = 50;
+const WORKING: ReadonlySet<AgentSession["status"]> = new Set(["starting", "busy", "waiting"]);
+
+function publishWorking(ctx: ModuleContext, working: WorkingAgent[]) {
+  const entries = working.sort((a, b) => a.id.localeCompare(b.id)).slice(0, WORKING_LIMIT);
+  const sig = JSON.stringify(entries);
+  if (sig === workingSignature) return;
+  workingSignature = sig;
+  ctx.state.set("persistent-agents.working", entries);
+}
 async function pollDaemons(ctx:ModuleContext) {
   if(polling)return;polling=true;
   try {
     const busy:Record<string,number>={};
+    const working: WorkingAgent[] = [];
     for(const [machineId,pending] of [...prepared]) {
       let t:DaemonTarget;try{t=await pending;}catch{continue;}
       try {
-        const sessions:any[]=await ctx.host.daemon.request(t,"modules.call",{target:"agent-runner",method:"list",args:{},timeoutMs:10000});
-        for(const s of sessions||[])if(s.machineId===machineId&&WORKING.has(s.status))busy[s.workspaceId]=(busy[s.workspaceId]||0)+1;
+        const sessions: AgentSession[] = await ctx.host.daemon.request(t,"modules.call",{target:"agent-runner",method:"list",args:{},timeoutMs:10000});
+        for (const s of sessions || []) {
+          if (s.machineId !== machineId || !WORKING.has(s.status)) continue;
+          busy[s.workspaceId] = (busy[s.workspaceId] || 0) + 1;
+          const { workflowId, runId, blockId } = s.workflow ?? {};
+          const workflow = s.workflow ? {
+            ...(typeof workflowId === "string" ? { workflowId } : {}),
+            ...(typeof runId === "string" ? { runId } : {}),
+            ...(typeof blockId === "string" ? { blockId } : {}),
+          } : null;
+          const progress = s.progress && Number.isFinite(s.progress.percent) ? { percent: s.progress.percent, ...(Number.isFinite(s.progress.at) ? { at: s.progress.at } : {}), ...(s.progress.note ? { note: s.progress.note } : {}) } : null;
+          working.push({ id: s.id, name: s.name, workspaceId: s.workspaceId, status: s.status as WorkingAgent["status"], workflow, progress });
+        }
       }catch{ /* daemon unreachable: report nothing for it */ }
       let requests:any[];
       try{requests=await ctx.host.daemon.request(t,"modules.call",{target:"internal-remote-mcp",method:"claimTaskRequests",args:{},timeoutMs:10000});}catch{continue;}
@@ -300,6 +321,7 @@ async function pollDaemons(ctx:ModuleContext) {
     }
     const sig=JSON.stringify(Object.entries(busy).sort());
     if(sig!==busySignature){busySignature=sig;ctx.state.set("persistent-agents.busy",busy);}
+    publishWorking(ctx, working);
   } finally {polling=false;}
 }
 /** After a Library edit, give running agents on connected machines the new text of the entries they
@@ -331,6 +353,7 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
   deactivate() {if(daemonPoll)clearInterval(daemonPoll);daemonPoll=null;if(libraryTimer)clearTimeout(libraryTimer);libraryTimer=null;},
   activate(ctx) {
     desktopMcp=desktopAgentTools(ctx);
+    publishWorking(ctx, []);
     ctx.state.watch(LIBRARY_STATE,()=>{if(libraryTimer)clearTimeout(libraryTimer);libraryTimer=setTimeout(()=>{libraryTimer=null;void pushLibrary(ctx).catch(e=>ctx.log.warn(String(e)));},1500);});
     // If the local daemon is already running, connect to it so background activity and task
     // requests are seen without opening the Agents panel first. Never starts a daemon.

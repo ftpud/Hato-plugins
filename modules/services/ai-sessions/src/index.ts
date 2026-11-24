@@ -4,11 +4,11 @@
 import { exportMcpTools } from "@hato/sdk/mcp";
 import { chatHandoff } from "@hato/sdk/chat-handoff";
 import { acpServer, transportOf } from "@hato/sdk/mcp-servers";
-import type { AgentMcp } from "@hato/sdk/persistent-agents";
+import { lastProgressMarker, PROGRESS_MARKER_INSTRUCTION, type AgentMcp, type AgentProgress } from "@hato/sdk/persistent-agents";
 import { reasoningMarkdown } from "@hato/sdk/reasoning";
 import { imageAttachments, transcriptContent } from "@hato/sdk/images";
 import { messageWindow } from "@hato/sdk/chat-window";
-import type { AppModule, ChatMessage, ModuleContext, ImageAttachment } from "@hato/sdk/types";
+import type { AppModule, ChatMessage, ModuleContext, ImageAttachment, WorkingConversation } from "@hato/sdk/types";
 import { debounce, errMsg } from "@hato/sdk/runtime";
 
 type Policy = "ask" | "auto-low" | "autopilot";
@@ -33,18 +33,34 @@ interface Conv {
 const convs = new Map<string, Conv>();
 const loading = new Map<string, Promise<Conv>>();
 const HISTORY_PAGE = 80;
+const WORKING_LIMIT = 50;
 const LOW_RISK_KINDS = new Set(["read", "search", "think", "fetch"]);
 let notify: () => void = () => {};
 let busySignature = "";
+let workingSignature = "";
 let historyMcp: ReturnType<typeof exportMcpTools>;
-/** Publish `ai-sessions.busy`: workspaceId -> number of conversations with an active turn. */
-function publishBusy(ctx: ModuleContext) {
+/** Publish the count and display projection of the same active turns. */
+function publishActivity(ctx: ModuleContext) {
   const busy: Record<string, number> = {};
-  for (const c of convs.values()) if (c.busy || c.submitting || c.steering.length) busy[c.row.workspaceId] = (busy[c.row.workspaceId] || 0) + 1;
+  const working: WorkingConversation[] = [];
+  for (const c of convs.values()) {
+    if (!(c.busy || c.submitting || c.steering.length)) continue;
+    const { id, title, workspaceId } = c.row;
+    busy[workspaceId] = (busy[workspaceId] || 0) + 1;
+    const status = c.live?.status === "starting" || c.row.status === "connecting" ? "starting" : "busy";
+    working.push({ id, title, workspaceId, status });
+  }
   const sig = JSON.stringify(Object.entries(busy).sort());
-  if (sig === busySignature) return;
-  busySignature = sig;
-  ctx.state.set("ai-sessions.busy", busy);
+  if (sig !== busySignature) {
+    busySignature = sig;
+    ctx.state.set("ai-sessions.busy", busy);
+  }
+  const entries = working.sort((a, b) => a.id.localeCompare(b.id)).slice(0, WORKING_LIMIT);
+  const workingSig = JSON.stringify(entries);
+  if (workingSig !== workingSignature) {
+    workingSignature = workingSig;
+    ctx.state.set("ai-sessions.working", entries);
+  }
 }
 let flushSoon: () => void = () => {};
 
@@ -104,12 +120,22 @@ function textOf(content: any): string {
   return "";
 }
 
+/** conversationId → progress from reply markers, published at `ai-sessions.progress`. */
+const progress = new Map<string, AgentProgress>();
+/** Conversations told about reply markers in the current provider connection. */
+const markerPrompted = new Set<string>();
+let progressChanged: () => void = () => {};
+
 function project(c: Conv, u: any) {
   switch (u.sessionUpdate) {
     case "agent_message_chunk": {
       let m = byId(c, c.current.assistant);
       if (!m) { m = add(c, "assistant", { text: "" }); c.current.assistant = m.id; }
       m.payload.text += textOf(u.content);
+      // Chats without Hato's tools report progress as a reply marker (sidebar only; transcripts strip it).
+      const reported = lastProgressMarker(m.payload.text.slice(-4000));
+      const known = progress.get(c.row.id);
+      if (reported && (known?.percent !== reported.percent || known?.note !== reported.note)) { progress.set(c.row.id, reported); progressChanged(); }
       c.dirty.add(m.id);
       c.current.thought = null;
       break;
@@ -186,6 +212,7 @@ async function configuredMcps(ctx: ModuleContext): Promise<AgentMcp[]> {
 }
 
 async function connect(ctx: ModuleContext, id: string) {
+  markerPrompted.delete(id); // a new provider connection hasn't seen the marker instruction
   const c = await load(ctx, id);
   await update(ctx, id, { status: "connecting" });
   notify();
@@ -229,6 +256,7 @@ const mod: AppModule = {
   id: "ai-sessions",
   moduleApiVersion: 1,
   async activate(ctx) {
+    progressChanged = debounce(() => ctx.state.set("ai-sessions.progress", Object.fromEntries(progress) as any), 150);
     historyMcp = exportMcpTools(ctx, "Chat history", [{
       name: "history", description: "Read original user and assistant messages from this conversation only. Bounded to 20 messages and 16k characters; use beforeSequence to page earlier. Tool logs, thoughts and image data are excluded.",
       inputSchema: { type: "object", properties: { beforeSequence: { type: "integer", minimum: 1 } }, additionalProperties: false }, annotations: { readOnlyHint: true },
@@ -249,9 +277,9 @@ const mod: AppModule = {
         return { messages, beforeSequence: messages[0]?.sequence ?? rows.slice(-20)[0]?.sequence ?? null, hasOlder: rows.length > 20 || budget <= 0 };
       },
     }]);
-    notify = debounce(() => { publishBusy(ctx); ctx.events.emit("ai-sessions.changed", {}); }, 60);
+    notify = debounce(() => { publishActivity(ctx); ctx.events.emit("ai-sessions.changed", {}); }, 60);
     ctx.events.on("persistent-agents.mcpsChanged", () => notify());
-    publishBusy(ctx);
+    publishActivity(ctx);
     flushSoon = debounce(() => { flush(ctx); }, 1200);
     ctx.events.on("acp.update", (p: any) => {
       const c = convs.get(p.conversationId);
@@ -439,7 +467,12 @@ const mod: AppModule = {
         notify();
         try {
           const transfer = c.row.config?.__hatoHandoff ? chatHandoff(previousMessages.map(m => ({ role: m.kind, text: String(m.payload?.text || "") }))) : "";
-          await ctx.modules.call("acp", "prompt", { conversationId: c.row.id, text: transfer ? `${transfer}\n\nCurrent user request:\n${text}` : text, images });
+          // Without Hato's tools (no report_progress), ask once per provider connection for reply markers.
+          const marker = !(c.row.mcpSelection || []).includes("internal") && !markerPrompted.has(c.row.id) ? PROGRESS_MARKER_INSTRUCTION : "";
+          if (marker) markerPrompted.add(c.row.id);
+          if (progress.delete(c.row.id)) progressChanged();
+          const body = transfer ? `${transfer}\n\nCurrent user request:\n${text}` : text;
+          await ctx.modules.call("acp", "prompt", { conversationId: c.row.id, text: marker ? `${marker}\n\n${body}` : body, images });
           if (c.row.config?.__hatoHandoff) {
             const config = { ...c.row.config }; delete config.__hatoHandoff;
             await update(ctx, c.row.id, { config });

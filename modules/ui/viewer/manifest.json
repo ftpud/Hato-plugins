@@ -22,7 +22,7 @@
           "column": 2,
           "size": 0.38
         },
-        "pinned": true,
+        "pinned": false,
         "activity": {
           "side": "left",
           "order": 30,
@@ -33,7 +33,7 @@
     ]
   },
   "author": "Hato contributors",
-  "version": "0.1.55",
+  "version": "0.1.56",
   "pluginPackage": "foundation",
   "pluginType": "System",
   "calls": [

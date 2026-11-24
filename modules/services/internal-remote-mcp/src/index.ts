@@ -1,6 +1,7 @@
 import type { AppModule,ModuleContext,Handle } from "@hato/sdk/types";
 import { JsonRpcPeer,errMsg,rpcError } from "@hato/sdk/runtime";
 import { isLibraryRef, textDigest } from "@hato/sdk/library";
+import { agentProgress, PROGRESS_INSTRUCTION, REPORT_PROGRESS_TOOL } from "@hato/sdk/persistent-agents";
 interface Scope {sessionId:string;workspaceId:string;root:string;skills:string[];inline?:Record<string,string>;daemon?:{bin:string;dir:string};token:string}
 let db:Handle;
 let listener:{handle:string;port:number}|null=null;
@@ -10,6 +11,7 @@ const proxy=`const net=require('node:net');const s=net.connect({host:'127.0.0.1'
 const object=(properties:any,required:string[]=[])=>({type:"object",properties,required,additionalProperties:false});
 const AGENT={type:"object",description:"Background agent to start in the task",properties:{name:{type:"string",maxLength:120},prompt:{type:"string",description:"First prompt for the agent"},model:{type:"string",description:"Model id; defaults to this agent's model"}},required:["prompt"],additionalProperties:false};
 const tools=[
+  REPORT_PROGRESS_TOOL,
   {name:"agents_create",description:"Create a background worker inheriting this agent’s provider, workspace, instructions, MCP and skill permissions",inputSchema:object({name:{type:"string"},text:{type:"string"},model:{type:"string"}},["name"])},
   {name:"agents_stop",description:"Stop a background agent process",inputSchema:object({id:{type:"string"}},["id"])},
   {name:"agents_list",description:"List background agents in this workspace",inputSchema:object({})},
@@ -76,6 +78,7 @@ function finishTask(id:string,outcome:{value?:any;error?:string}) {
   return true;
 }
 async function call(ctx:ModuleContext,s:Scope,name:string,a:any) {
+  if(name==="report_progress")return ctx.modules.call("agent-runner","setProgress",{sessionId:s.sessionId,...agentProgress(a)});
   if(TASK_OPS[name]) {
     const op=TASK_OPS[name],args=taskArgs(op,a);
     if(!s.daemon)return ctx.modules.call("persistent-agents","taskRequest",{sessionId:s.sessionId,workspaceId:s.workspaceId,op,args},{timeoutMs:TASK_TIMEOUT_MS});
@@ -140,7 +143,7 @@ function attachPeer(ctx:ModuleContext,handle:string,c:{token:string|null;peer:Js
     c.peer=new JsonRpcPeer(line=>ctx.host.net.write(handle,line+"\n"));
     c.peer.onRequest=async(method,params)=>{
       const s=scopes.get(c.token!);if(!s)throw rpcError(-32001,"MCP access revoked");
-      if(method==="initialize")return {protocolVersion:["2024-11-05","2025-03-26","2025-06-18"].includes(params?.protocolVersion)?params.protocolVersion:"2024-11-05",capabilities:{tools:{}},serverInfo:{name:"internal-remote-mcp",version:"0.1.0"}};
+      if(method==="initialize")return {protocolVersion:["2024-11-05","2025-03-26","2025-06-18"].includes(params?.protocolVersion)?params.protocolVersion:"2024-11-05",capabilities:{tools:{}},serverInfo:{name:"internal-remote-mcp",version:"0.1.0"},instructions:PROGRESS_INSTRUCTION};
       if(method==="ping")return {};
       if(method==="tools/list")return {tools};
       if(method==="tools/call") {

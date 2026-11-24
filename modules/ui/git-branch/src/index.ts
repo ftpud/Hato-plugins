@@ -148,7 +148,7 @@ const mod: AppModule = {
     ] });
     return { type: "dropdown", key: "branch-menu", text: `${title}  ⌄`, iconSvg: uiIcons["git-branch"], variant: "ghost", action: "toggle", open,
       disabled: !workspaceId || catalog?.repo === false, menuWidth: 380, maxHeight: 640, tooltip: `Current branch: ${title}${error ? `\n${error}` : ""}`,
-      style: { background: "transparent", borderWidth: 0 }, children: [{ type: "column", key: "menu-content", gap: 12, padding: 16, scroll: true, children }] };
+      style: { background: "transparent", borderWidth: 0, justify: "start", paddingX: 6 }, children: [{ type: "column", key: "menu-content", gap: 12, padding: 16, scroll: true, children }] };
   },
   async onEvent(ctx, event) {
     if (event.action === "toggle") { open = !!event.value; if (open) { error = null; void refresh(ctx); } ctx.ui.invalidate(); return; }

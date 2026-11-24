@@ -5,6 +5,7 @@
 // token bound to one conversation/workspace/machine. Tool logic delegates to `module-dev`, whose
 // mutating operations are approved natively by the kernel (Autopilot cannot bypass that).
 import { McpRegistry } from "./registry";
+import { agentProgress, PROGRESS_INSTRUCTION, REPORT_PROGRESS_TOOL, type AgentProgress } from "@hato/sdk/persistent-agents";
 import type { AppModule, Handle, ModuleContext } from "@hato/sdk/types";
 import { errMsg, JsonRpcPeer, rpcError, sshConnect, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import skSelfConfigure from "../skills/self-configure.md";
@@ -48,6 +49,7 @@ let localProxyPath: string | null = null;
 let stats = { connections: 0, toolCalls: 0, authFailures: 0 };
 
 const TOOLS = [
+  { ...REPORT_PROGRESS_TOOL, title: "report.progress" },
   { name: "modules_list", title: "modules.list", description: "List Hato application modules, active builds, imported seed (bundled baseline), saved build origins and health. Local module build numbers are not app release versions.", inputSchema: { type: "object", properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true } },
   { name: "modules_describe", title: "modules.describe", description: "Describe one module: static manifest, capabilities, dependencies, source directory, exact runtime/build-tool/storage paths, saved versions and their origins, diagnostics, last build. Inspect before editing; the running app may use a different source tree from the workspace checkout.", inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] }, annotations: { readOnlyHint: true } },
   { name: "modules_read_source", title: "modules.read_source", description: "Read allowlisted module source. Without `path` lists files; with `path` (module-relative, e.g. src/index.ts) returns its text.", inputSchema: { type: "object", properties: { id: { type: "string" }, path: { type: "string" } }, required: ["id"] }, annotations: { readOnlyHint: true } },
@@ -58,6 +60,18 @@ const TOOLS = [
   { name: "modules_logs", title: "modules.logs", description: "Bounded, redacted logs for one module.", inputSchema: { type: "object", properties: { id: { type: "string" }, limit: { type: "integer" } }, required: ["id"] }, annotations: { readOnlyHint: true } },
   { name: "skills_get", title: "skills.get", description: `Return a Hato skill guide (Markdown). Available: ${Object.keys(SKILLS).join(", ")}.`, inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] }, annotations: { readOnlyHint: true } },
 ];
+
+/** Chat progress reported with report_progress: conversationId → latest estimate. A conversation's
+ *  entry is dropped once its turn ends (it leaves `ai-sessions.working`). */
+const progress = new Map<string, AgentProgress>();
+function publishProgress(ctx: ModuleContext) { ctx.state.set("internal-mcp.progress", Object.fromEntries(progress) as any); }
+function pruneProgress(ctx: ModuleContext, working: unknown) {
+  const live = new Set(Array.isArray(working) ? working.map((w: any) => w?.id) : []);
+  let changed = false;
+  // A report can arrive just before the working list updates; keep fresh ones.
+  for (const [id, p] of progress) if (!live.has(id) && Date.now() - p.at > 5000) { progress.delete(id); changed = true; }
+  if (changed) publishProgress(ctx);
+}
 
 async function callTool(ctx: ModuleContext, conn: McpConn, name: string, args: any) {
   const info = tokens.get(conn.token!);
@@ -80,6 +94,12 @@ async function callTool(ctx: ModuleContext, conn: McpConn, name: string, args: a
     case "modules_activate": return md("activate", { id, stageId: args.stageId });
     case "modules_rollback": return md("rollback", { id, toVersion: args.toVersion });
     case "modules_logs": return md("logs", { id, limit: args.limit || 100 });
+    case "report_progress": {
+      // Sidebar state only (`internal-mcp.progress`); nothing is added to the chat transcript.
+      progress.set(info.conversationId, agentProgress(args));
+      publishProgress(ctx);
+      return { percent: progress.get(info.conversationId)!.percent };
+    }
     case "skills_get": {
       const s = SKILLS[String(args.name)];
       if (!s) throw new Error(`unknown skill ${args.name}`);
@@ -100,7 +120,7 @@ function makePeer(ctx: ModuleContext, conn: McpConn) {
           protocolVersion: v,
           capabilities: { tools: { listChanged: true }, prompts: { listChanged: false }, resources: { listChanged: false } },
           serverInfo: { name: "hato-internal", title: "Hato internal modules", version: SERVER_VERSION },
-          instructions: "Module-contributed commands are workspace-bound and individually controlled in Settings. Module maintenance tools inspect and evolve hot-swappable TypeScript modules: read skills_get self-configure first, then the task-specific skill. Describe the target module to discover the running runtime paths; workspace checkout edits may not affect a packaged app. Patch → build/stage → activate → verify; a build alone is not live. Bundled/Updated selects saved JavaScript builds, not native app releases. New plugins install through Settings → Plugins from a manifest and runnable JavaScript; maintenance patch tools only edit existing module source. Native changes need a rebuilt app and relaunch. Never replace a daemon that has active work. Module maintenance mutations require native user approval; contributed commands retain their provider module's existing capability checks.",
+          instructions: PROGRESS_INSTRUCTION + " Module-contributed commands are workspace-bound and individually controlled in Settings. Module maintenance tools inspect and evolve hot-swappable TypeScript modules: read skills_get self-configure first, then the task-specific skill. Describe the target module to discover the running runtime paths; workspace checkout edits may not affect a packaged app. Patch → build/stage → activate → verify; a build alone is not live. Bundled/Updated selects saved JavaScript builds, not native app releases. New plugins install through Settings → Plugins from a manifest and runnable JavaScript; maintenance patch tools only edit existing module source. Native changes need a rebuilt app and relaunch. Never replace a daemon that has active work. Module maintenance mutations require native user approval; contributed commands retain their provider module's existing capability checks.",
         };
       }
       case "ping": return {};
@@ -224,6 +244,7 @@ const mod: AppModule = {
   id: "internal-mcp",
   moduleApiVersion: 1,
   async activate(ctx, prev) {
+    ctx.state.watch("ai-sessions.working", (working: unknown) => pruneProgress(ctx, working));
     registry = new McpRegistry(ctx, TOOLS, () => {
       for (const conn of connsByHandle.values()) if (conn.peer) conn.peer.notify("notifications/tools/list_changed").catch(() => {});
     });

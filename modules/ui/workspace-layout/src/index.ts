@@ -12,10 +12,13 @@ import { exportSettings } from "@hato/sdk/settings";
 import { fontOptions, typography } from "@hato/sdk/typography";
 import { animePalette, animeTerminal } from "./anime";
 import { animeWallpaper } from "./anime-wallpaper";
+import { emberAmbient, emberPalette, emberTerminal } from "./ember";
+import { haloSlotWidth, haloTrafficLights } from "@hato/sdk/halo-rail";
+import { glassCard } from "@hato/sdk/halo-glass";
 import { applicationIcon } from "./application-icon";
 import { moduleVersions } from "./module-versions";
-import { colorScheme } from "@hato/sdk/color-scheme";
-import { bundledSchemes, parseScheme, schemeNode, type SyntaxScheme } from "@hato/sdk/syntax-schemes";
+import { bundledSchemes, parseScheme, type SyntaxScheme } from "@hato/sdk/syntax-schemes";
+import { editorTheme } from "./editor-theme";
 import { debounce, errMsg } from "@hato/sdk/runtime";
 import { BAR_ITEMS, PANELS, setContributedBarItems, defaultLayout, dropPanel, homeOf, locate, moveBarItem, moveTo, panelSignature, removeBarItem, repair, setPanels, type BarId, type Layout, type PanelDef } from "./model";
 import { loadContributions, watchContributions, type Contributions } from "@hato/sdk/plugins";
@@ -35,7 +38,7 @@ let fontWeight = "400";
 let mode: "light" | "dark" | "system" = "system";
 const modeOptions = [{ value: "dark", label: "Dark" }, { value: "light", label: "Light" }, { value: "system", label: "Keep current" }];
 const weightOptions = [{ value: "400", label: "Regular" }, { value: "500", label: "Medium" }];
-let appearanceTheme = "classic";
+let appearanceTheme = "ember";
 /** Interface motion; "system" follows the OS Reduce Motion preference (opacity-only when reduced). */
 let animations: UiMotionMode = "system";
 const animationOptions = [{ value: "system", label: "Follow system" }, { value: "on", label: "On" }, { value: "off", label: "Off" }];
@@ -73,7 +76,9 @@ const panelPercent = () => percentOf(panelOpacity, { airy: 40, balanced: 60, sol
 const backgroundPercent = () => percentOf(projectsBackground, { off: 0, subtle: 12, visible: 24 }, 0, 40, 12);
 const projectsBackgroundOpacity = () => backgroundPercent() / 100;
 const fontSizeOf = (value: unknown) => String(percentOf(value, {}, 12, 20, 15));
-const themeOptions = [{ value: "classic", label: "Classic" }, { value: "anime", label: "Anime · Sakura Twilight" }];
+const themeOptions = [{ value: "ember", label: "Ember" }, { value: "anime", label: "Anime · Sakura Twilight" }];
+/** Classic was retired; older saved themes open as Ember. */
+const themeOf = (v: unknown) => themeOptions.some(option => option.value === v) ? String(v) : "ember";
 let runtimePaths: { repoRoot: string; dataDir: string; modulesRoot?: string } | null = null;
 let ws: any = null;
 let modules: any[] = [];
@@ -105,11 +110,20 @@ function publishSharing(ctx: ModuleContext) {
 const savedSetting = async (ctx: ModuleContext, key: string) => upgradeLegacy(key, await ctx.modules.call("persistence", "settings.get", { key }));
 let publishSettings: () => void = () => {};
 const sidebarSubscriptions = new Map<string, () => void>();
+/** Sidebars may ask for a different width (e.g. the Halo rail expanding) via `<module>.preferredWidth`. */
+const sidebarWidths: Record<string, number> = {};
+const sidebarMotion = { durationMs: 320, easing: [0.22, 1, 0.36, 1] as [number, number, number, number] };
+/** Theme and resolved color mode, for modules that adapt their composition to the theme. */
+function publishAppearance(ctx: ModuleContext) {
+  ctx.state.set("workspace-layout.appearance", { theme: appearanceTheme, mode });
+}
 
 function applyContributions(c: Contributions) {
   contributions = c;
   const defs: Record<string, PanelDef> = {};
-  for (const p of Object.values(c.panels)) defs[p.id] = { slot: p.module, title: p.title, defaultHidden: p.defaultHidden, dockBelow: p.dockBelow, dock: p.dock, pinned: p.pinned };
+  // Older installed Editor manifests pin the panel. Keep the current toggle policy even when
+  // hot-updating the layout against one of those manifests.
+  for (const p of Object.values(c.panels)) defs[p.id] = { slot: p.module, title: p.title, defaultHidden: p.defaultHidden, dockBelow: p.dockBelow, dock: p.dock, pinned: p.id === "viewer" ? false : p.pinned };
   const before = panelSignature();
   setPanels(defs);
   const barsChanged = setContributedBarItems(Object.fromEntries((c.barItems || []).map(b => [b.id, { title: b.title, slot: b.module, width: b.width, defaultBar: b.bar }])));
@@ -120,8 +134,45 @@ function subscribeSidebars(ctx: ModuleContext) {
   const wanted = new Set((contributions?.sidebars || []).map((s) => s.module));
   for (const [m, stop] of sidebarSubscriptions) if (!wanted.has(m)) { stop(); sidebarSubscriptions.delete(m); }
   for (const m of wanted) if (!sidebarSubscriptions.has(m)) {
-    sidebarSubscriptions.set(m, ctx.events.on(`${m}.togglePanel`, (event: any) => toggleSidebarPanel(ctx, event?.id)));
+    const stopToggle = ctx.events.on(`${m}.togglePanel`, (event: any) => toggleSidebarPanel(ctx, event?.id));
+    const widthOf = (v: unknown) => { const n = Number(v); if (Number.isFinite(n) && n >= 32 && n <= 480) sidebarWidths[m] = n; else delete sidebarWidths[m]; };
+    widthOf(ctx.state.get(`${m}.preferredWidth`));
+    const stopWidth = ctx.state.watch(`${m}.preferredWidth`, (v: unknown) => { widthOf(v); ctx.ui.invalidate(); });
+    // Rails have no call grants; their menu, appearance and expansion requests arrive as events.
+    const stopOpen = ctx.events.on(`${m}.open`, (e: any) => { void openFromRail(ctx, String(e?.target || "")); });
+    const stopAppearance = ctx.events.on(`${m}.appearance`, (e: any) => { void applyAppearance(ctx, { mode: e?.mode }).catch((err) => ctx.log.warn("rail appearance", errMsg(err))); });
+    const stopExpanded = ctx.events.on(`${m}.expanded`, (e: any) => { void saveRailExpanded(ctx, m, e?.expanded === true); });
+    sidebarSubscriptions.set(m, () => { stopToggle?.(); stopOpen?.(); stopAppearance?.(); stopExpanded?.(); if (typeof stopWidth === "function") stopWidth(); delete sidebarWidths[m]; });
   }
+}
+
+/** Rail expansion per sidebar module, persisted here because rails hold no persistence grant. */
+let railExpanded: Record<string, boolean> = {};
+async function saveRailExpanded(ctx: ModuleContext, m: string, value: boolean) {
+  railExpanded = { ...railExpanded, [m]: value };
+  ctx.state.set("workspace-layout.railExpanded", railExpanded);
+  try { await ctx.modules.call("persistence", "settings.set", { key: "rail-expanded.v1", value: railExpanded }); } catch (e) { ctx.log.warn("save rail expansion", errMsg(e)); }
+}
+async function openFromRail(ctx: ModuleContext, target: string) {
+  try {
+    if (target === "settings") await ctx.modules.call("settings", "open");
+    else if (target === "plugins") await ctx.modules.call("settings", "open", { category: "plugins" });
+    else if (target === "modules") { if (!showModules) { showModules = true; diag = null; deferredSwaps = {}; await loadModules(ctx); loadUpdates(ctx, true); } }
+    else if (target === "layout") showLayout = true;
+  } catch (e) { ctx.log.warn("open from rail", target, errMsg(e)); }
+  ctx.ui.invalidate();
+}
+async function applyAppearance(ctx: ModuleContext, a: { theme?: unknown; mode?: unknown }) {
+  if (a?.theme !== undefined) {
+    if (!themeOptions.some(option => option.value === a.theme)) throw new Error("Invalid theme");
+    await ctx.modules.call("persistence", "settings.set", { key: "appearance.theme", value: a.theme }); appearanceTheme = String(a.theme);
+  }
+  if (a?.mode !== undefined) {
+    if (!modeOptions.some(option => option.value === a.mode)) throw new Error("Invalid color mode");
+    await ctx.modules.call("persistence", "settings.set", { key: "appearance.mode", value: a.mode }); mode = a.mode as typeof mode;
+  }
+  publishAppearance(ctx); publishSettings(); ctx.ui.invalidate();
+  return { theme: appearanceTheme, mode };
 }
 
 const COLLAPSED_ROW = 0;
@@ -141,6 +192,7 @@ async function loadUpdates(ctx: ModuleContext, scan: boolean, full = false) {
     upd = {};
     for (const m of r.modules) upd[m.id] = m;
     updSummary = { available: r.available, errors: r.errors };
+    ctx.state.set("workspace-layout.moduleUpdates", updSummary.available.length);
   } catch (e) { diag = errMsg(e); }
   finally { scanningUpd = false; ctx.ui.invalidate(); }
 }
@@ -193,7 +245,7 @@ function panelHeader(id: string, mode: "dock" | "float" | "window"): UiNode {
 
 function panelBody(id: string, mode: "dock" | "float" | "window"): UiNode {
   const collapsed = mode === "dock" && !!layout.collapsed[id] && !panelMotion();
-  return { type: "column", key: "panel-" + id, grow: true, bg: "panel", ...(appearanceTheme === "anime" ? { style: { radius: 16, borderWidth: 1, borderColor: "border", shadow: "lg" as const, padding: 6 } } : {}), children: [
+  return { type: "column", key: "panel-" + id, grow: true, bg: "panel", ...(appearanceTheme === "anime" ? { style: { radius: 16, borderWidth: 1, borderColor: "border", shadow: "lg" as const, padding: 6 } } : { style: { radius: 14, borderWidth: 1, borderColor: "glassEdge", background: "panel", padding: 4, ...glassCard } }), children: [
     ...((mode === "dock" && (layout.showPanelTitles || collapsed)) || (mode !== "dock" && layout.showPanelControls) ? [panelHeader(id, mode)] : []),
     ...(collapsed ? [] : [{ type: "slot", key: "slot", module: PANELS[id].slot, grow: true } as UiNode]),
   ] };
@@ -356,28 +408,13 @@ function layoutMenu(): UiNode {
       { type: "button", key: "hid", text: "Hide", action: "hide", value: id, small: true, disabled: k === "hidden" },
     ] } as UiNode;
   });
-  const onBars = new Set([...layout.bars.top.items, ...layout.bars.bottom.items]);
-  const itemRows: UiNode[] = Object.keys(BAR_ITEMS).map((it) => {
-    const bar = layout.bars.top.items.includes(it) ? "top" : layout.bars.bottom.items.includes(it) ? "bottom" : null;
-    return { type: "row", key: "i-" + it, gap: 4, align: "center", children: [
-      { type: "label", key: "n", text: BAR_ITEMS[it].title, width: 160, size: "sm" },
-      { type: "label", key: "w", text: bar ? `${bar} bar` : "hidden", size: "xs", color: "muted", grow: true },
-      { type: "button", key: "t", text: "Top", action: "itemToBar", value: { item: it, bar: "top" }, small: true, disabled: bar === "top" },
-      { type: "button", key: "b", text: "Bottom", action: "itemToBar", value: { item: it, bar: "bottom" }, small: true, disabled: bar === "bottom" },
-      { type: "button", key: "h", text: "Hide", action: "removeItem", value: it, small: true, disabled: !onBars.has(it) },
-    ] } as UiNode;
-  });
   return { type: "modal", key: "layout-modal", title: "Layout", closeAction: "toggleLayoutMenu", children: [
-    { type: "label", key: "hint", text: "Drag panel titles (⠿) onto another panel's edge or center to re-dock. Drag dividers to resize; drag past the minimum to collapse. Drag the ⋮ grips on the bars to reorder or move items. Everything here is the workspace-layout TypeScript module — it can be changed and hot-swapped like any other module.", size: "xs", color: "muted", wrap: true },
-    { type: "label", key: "h1", text: "Bars", weight: "bold", size: "sm" },
-    { type: "row", key: "bars", gap: 12, children: [
-      { type: "toggle", key: "bb", label: "Show bottom bar", checked: layout.bars.bottom.visible, action: "toggleBar", value: "bottom" } as UiNode,
-    ] },
+    { type: "label", key: "hint", text: "Drag panel titles (⠿) onto another panel's edge or center to re-dock. Drag dividers to resize; drag past the minimum to collapse. Everything here is the workspace-layout TypeScript module — it can be changed and hot-swapped like any other module.", size: "xs", color: "muted", wrap: true },
+    { type: "label", key: "h1", text: "Rails", weight: "bold", size: "sm" },
     { type: "row", key: "sidebars", gap: 12, wrap: true, children: [
       { type: "toggle", key: "left-sidebar-visible", label: "Show left sidebar", checked: layout.showLeftSidebar, action: "toggleSidebar" },
       { type: "toggle", key: "right-sidebar-visible", label: "Show right sidebar", checked: layout.showRightSidebar, action: "toggleSidebar" },
     ] },
-    ...itemRows,
     { type: "divider", key: "d1" },
     { type: "label", key: "h2", text: "Panels", weight: "bold", size: "sm" },
     { type: "toggle", key: "collapsed-tray", label: "Show collapsed panels tray", checked: layout.showCollapsedTray, action: "toggleCollapsedTray", tooltip: "Restore buttons for collapsed panels. Sidebar buttons also restore them." },
@@ -487,7 +524,7 @@ async function resetCustomization(ctx: ModuleContext) {
   groupBySpace = true; await ctx.modules.call("persistence", "settings.set", { key: "sidebar-grouping.v1", value: true });
   publishSharing(ctx);
   fontFamily = values["appearance.fontFamily"]; fontSize = values["appearance.fontSize"]; fontWeight = values["appearance.fontWeight"];
-  mode = values["appearance.mode"]; animations = animationsOf(values["appearance.animations"]); appearanceTheme = values["appearance.theme"]; panelOpacity = values["appearance.panelOpacity"];
+  mode = values["appearance.mode"]; animations = animationsOf(values["appearance.animations"]); appearanceTheme = themeOf(values["appearance.theme"]); publishAppearance(ctx); panelOpacity = values["appearance.panelOpacity"];
   projectsBackground = values["appearance.projectsBackground"]; syntaxScheme = values["appearance.syntaxScheme"];
   ctx.state.set("workspace-layout.projectsBackgroundOpacity", projectsBackgroundOpacity());
   ctx.state.set("workspace-layout.sidebarButtons", sidebarButtons);
@@ -535,7 +572,11 @@ const mod: AppModule = {
     mode = savedMode === "light" || savedMode === "dark" ? savedMode : "system";
     animations = animationsOf(await ctx.modules.call("persistence", "settings.get", { key: "appearance.animations" }));
     const savedTheme = await ctx.modules.call("persistence", "settings.get", { key: "appearance.theme" });
-    appearanceTheme = themeOptions.some(option => option.value === savedTheme) ? savedTheme : "classic";
+    appearanceTheme = themeOf(savedTheme);
+    publishAppearance(ctx);
+    const savedRails = await ctx.modules.call("persistence", "settings.get", { key: "rail-expanded.v1" }).catch(() => null);
+    railExpanded = savedRails && typeof savedRails === "object" && !Array.isArray(savedRails) ? Object.fromEntries(Object.entries(savedRails).filter(([, v]) => typeof v === "boolean")) as Record<string, boolean> : {};
+    ctx.state.set("workspace-layout.railExpanded", railExpanded);
     const savedOpacity = await ctx.modules.call("persistence", "settings.get", { key: "appearance.panelOpacity" });
     panelOpacity = String(percentOf(savedOpacity, { airy: 40, balanced: 60, solid: 85 }, 20, 100, 60));
     const savedProjectsBackground = await ctx.modules.call("persistence", "settings.get", { key: "appearance.projectsBackground" });
@@ -546,13 +587,13 @@ const mod: AppModule = {
     syntaxScheme = typeof savedScheme === "string" ? savedScheme : "default";
     publishSettings = exportSettings(ctx, () => [{ key: "appearance", title: "Appearance", group: "Appearance", layout: "table", fields: [
       { key: "theme", label: "Theme", type: "select", value: appearanceTheme, options: themeOptions,
-        description: "Sakura Twilight pairs an original anime wallpaper with floating indigo glass and pink accents." },
+        description: "Ember: graphite or warm paper with an ember-orange accent. Sakura Twilight: an original anime wallpaper with floating indigo glass and pink accents." },
       { key: "panelOpacity", label: "Panel opacity", type: "range", value: String(panelPercent()), min: 20, max: 100, step: 5, unit: "%",
         description: appearanceTheme === "anime" ? "Lower keeps the wallpaper visible; higher is easier to read." : "Applies to the Sakura Twilight theme." },
       { key: "projectsBackground", label: "Projects background", type: "range", value: String(backgroundPercent()), min: 0, max: 40, step: 2, unit: "%",
         description: "Strength of the faint dove behind the project list. 0% hides it." },
       { key: "mode", label: "Color mode", type: "select", value: mode, options: modeOptions,
-        description: "Classic follows this color mode. Sakura Twilight uses its own twilight palette." },
+        description: "Ember follows this color mode. Sakura Twilight uses its own twilight palette." },
       { key: "animations", label: "Animations", type: "select", value: animations, options: animationOptions,
         description: "Menus, popovers, tooltips, notifications and buttons. Follow system uses fades only when Reduce Motion is on." },
     ] }, { key: "syntax", title: "Syntax colors", group: "Appearance", layout: "table", fields: [
@@ -590,16 +631,13 @@ const mod: AppModule = {
         { key: "stripes", label: "Alternating row backgrounds", type: "toggle", value: tableStyle.stripes },
         { key: "dividers", label: "Row divider lines", type: "toggle", value: tableStyle.dividers },
       ],
-    }, { key: "workspace-chrome", title: "Bars & panel controls", group: "Workspace", layout: "table", fields: [
-      { key: "showLeftSidebar", label: "Left sidebar", type: "toggle", value: layout.showLeftSidebar },
-      { key: "showRightSidebar", label: "Right sidebar", type: "toggle", value: layout.showRightSidebar },
+    }, { key: "workspace-chrome", title: "Rails & panel controls", group: "Workspace", layout: "table", fields: [
+      { key: "showLeftSidebar", label: "Workspace rail (left)", type: "toggle", value: layout.showLeftSidebar },
+      { key: "showRightSidebar", label: "Assistant rail (right)", type: "toggle", value: layout.showRightSidebar },
       { key: "showPanelTitles", label: "Panel titles", type: "toggle", value: layout.showPanelTitles },
       { key: "showPanelControls", label: "Panel header buttons", type: "toggle", value: layout.showPanelControls },
       { key: "showCollapsedTray", label: "Collapsed panels tray", type: "toggle", value: layout.showCollapsedTray,
         description: "Show restore buttons for collapsed panels under the workspace. Sidebar buttons restore collapsed panels either way." },
-      { key: "groupBySpace", label: "Group sidebar buttons by shared space", type: "toggle", value: groupBySpace,
-        description: "Keep buttons of panels that share a space together and separate the groups with a line." },
-      { key: "bottomBar", label: "Bottom bar", type: "toggle", value: layout.bars.bottom.visible },
     ] }], async (section, key, value) => {
       if (section === "sidebar-order") {
         const active = contributions ? configurableSidebarPanels(contributions).filter(p => sidebarPosition(p, sidebarButtons) === key).map(p => p.id) : [];
@@ -658,6 +696,7 @@ const mod: AppModule = {
           if (!themeOptions.some(option => option.value === value)) throw new Error("Invalid appearance preference");
           await ctx.modules.call("persistence", "settings.set", { key: "appearance.theme", value });
           appearanceTheme = String(value);
+          publishAppearance(ctx);
           ctx.ui.invalidate();
           return;
         }
@@ -671,6 +710,7 @@ const mod: AppModule = {
         if (key !== "mode" || !modeOptions.some(option => option.value === value)) throw new Error("Invalid appearance preference");
         await ctx.modules.call("persistence", "settings.set", { key: "appearance.mode", value });
         mode = value as typeof mode;
+        publishAppearance(ctx);
         ctx.ui.invalidate();
         return;
       }
@@ -689,6 +729,9 @@ const mod: AppModule = {
     ctx.events.on("terminal-panel.reveal", (event: any) => { if (event.workspaceId === ws?.id) revealPanel(ctx, "terminal"); });
     ctx.events.on("ai.openMcps", () => revealPanel(ctx, "mcps"));
     ctx.events.on("workflows-panel.reveal", () => revealPanel(ctx, "workflows"));
+    ctx.events.on("workflows-panel.close", (event: any) => {
+      if (event?.workspaceId === ws?.id && panelVisible("workflows")) toggleSidebarPanel(ctx, "workflows");
+    });
     const revealRunConfigurations = (event: any) => { if (event?.workspaceId === ws?.id) revealPanel(ctx, "run-configurations"); };
     ctx.events.on("viewer.runConfiguration", revealRunConfigurations);
     ctx.events.on("run-bar.editConfiguration", revealRunConfigurations);
@@ -729,36 +772,32 @@ const mod: AppModule = {
     getLayout: () => layout,
     setLayout: (ctx, a) => { set(ctx, repair(a.layout)); return layout; },
     resetLayout: (ctx) => { set(ctx, defaultLayout()); return layout; },
+    /** Rail entry points (also reachable by event, see subscribeSidebars). */
+    openLayout: async (ctx) => { await openFromRail(ctx, "layout"); return true; },
+    openModules: async (ctx) => { await openFromRail(ctx, "modules"); return true; },
+    setAppearance: (ctx, a) => applyAppearance(ctx, a),
   },
   render(): UiNode {
+    const palette = appearanceTheme === "anime" ? animePalette(panelOpacity) : emberPalette;
     const kids: UiNode[] = [{ type: "theme", key: "color-scheme", applicationIcon,
       motion: { mode: animations, experimentalDockReveal: panelMotion(), menu: anchoredMotion, tooltip: tooltipMotion, interaction: interactionMotion },
-      chrome: { toasts: { transition: toastMotion } }, controls: { listRowHeight: listRowHeight(tableStyle), stripedRows: tableStyle.stripes, rowDividers: tableStyle.dividers }, palette: appearanceTheme === "anime" ? animePalette(panelOpacity) : colorScheme, ...(appearanceTheme === "anime" ? { terminal: { light: animeTerminal, dark: animeTerminal } } : {}), typography: typography(fontFamily, fontSize, fontWeight), ...(mode === "system" ? {} : { mode }),
-      ...(schemeNode(allSchemes().find(s => s.id === syntaxScheme)) ? { syntax: schemeNode(allSchemes().find(s => s.id === syntaxScheme)) } : {}) }];
-    const top = barNode("top");
-    if (top) kids.push(top);
-    if (!["top", "bottom"].some((b) => layout.bars[b as BarId].visible && layout.bars[b as BarId].items.includes("layoutMenu"))) {
-      kids.push({ type: "row", key: "layout-access", children: [btn("open-layout", "Layout", "toggleLayoutMenu", null, "Configure panels and bars")] });
-    }
-    if (!["top", "bottom"].some((b) => layout.bars[b as BarId].visible && layout.bars[b as BarId].items.includes("settings"))) {
-      kids.push({ type: "row", key: "settings-access", children: [btn("settings", "Settings", "openSettings", null, "Appearance and module preferences")] });
-    }
+      chrome: { toasts: { transition: toastMotion }, window: { titlebar: "hidden", trafficLights: haloTrafficLights } }, controls: { listRowHeight: listRowHeight(tableStyle), stripedRows: tableStyle.stripes, rowDividers: tableStyle.dividers }, palette, terminal: appearanceTheme === "anime" ? { light: animeTerminal, dark: animeTerminal } : emberTerminal, typography: typography(fontFamily, fontSize, fontWeight), ...(mode === "system" ? {} : { mode }),
+      syntax: editorTheme(allSchemes().find(s => s.id === syntaxScheme), palette) }];
+    // One shell: no top or bottom bars. Their contents live in the Halo rails (sdk/halo-rail.ts),
+    // which open Layout, Modules and Settings through this module's methods.
     // Overlay plugins (e.g. settings) render modals; their slots must not reserve dock space.
     for (const o of contributions?.overlays || []) {
       kids.push({ type: "column", key: `overlay:${o.module}`, height: 0, children: [{ type: "slot", key: "slot", module: o.module }] });
     }
     const collapsed = collapsedPanels();
     const sidebars = (side: "left" | "right") => (side === "left" ? layout.showLeftSidebar : layout.showRightSidebar)
-      ? (contributions?.sidebars || []).filter((s) => s.side === side).map((s) => ({ type: "slot", key: `sidebar:${s.module}`, module: s.module, width: s.width || 44 } as UiNode))
+      ? (contributions?.sidebars || []).filter((s) => s.side === side).map((s) => ({ type: "slot", key: `sidebar:${s.module}`, module: s.module, width: sidebarWidths[s.module] || haloSlotWidth(s.side, false), layoutTransition: sidebarMotion } as UiNode))
       : [];
-    // Bars and sidebars keep classic spacing in every theme; only the panel area floats inset.
     kids.push({ type: "row", key: "workspace-content", grow: true, align: "stretch", children: [
       ...sidebars("left"),
-      { type: "column", key: "workspace-panels", grow: true, ...(appearanceTheme === "anime" ? { padding: 8 } : {}), children: [dockArea(), ...(collapsed ? [collapsed] : [])] },
+      { type: "column", key: "workspace-panels", grow: true, padding: 8, children: [dockArea(), ...(collapsed ? [collapsed] : [])] },
       ...sidebars("right"),
     ] });
-    const bottom = barNode("bottom");
-    if (bottom) kids.push(bottom);
     for (const [id, g] of Object.entries(layout.floating)) {
       kids.push({ type: "floating", key: "float:" + id, title: PANELS[id].title, x: g.x, y: g.y, width: g.width, height: g.height, moveAction: "moveFloat", children: [panelBody(id, "float")] } as UiNode);
     }
@@ -767,7 +806,7 @@ const mod: AppModule = {
     }
     if (showLayout) kids.push(layoutMenu());
     if (showModules) kids.push(modulesModal());
-    return { type: "column", key: "layout-root", grow: true, ...(appearanceTheme === "anime" ? { backgroundImage: animeWallpaper, style: { background: "#11152b" } } : { bg: "accent" as const }), children: kids };
+    return { type: "column", key: "layout-root", grow: true, ...(appearanceTheme === "anime" ? { backgroundImage: animeWallpaper, style: { background: "#11152b" } } : { ambient: emberAmbient, style: { background: "background" } }), children: kids };
   },
   async onEvent(ctx, ev) {
     const v: any = ev.value;

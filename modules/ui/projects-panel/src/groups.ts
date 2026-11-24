@@ -6,7 +6,7 @@ type Groups = { active: string; groups: Group[] };
 type Project = { id: string; name: string };
 type NameEdit = { key: string; name: string; id?: string; projectId?: string };
 
-export function groupPanel() {
+export function groupPanel(onChange: (ctx: ModuleContext) => void = () => {}) {
   let state: Groups = { active: "all", groups: [] };
   let request = 0, form = 0;
   let edit: NameEdit | null = null;
@@ -14,7 +14,7 @@ export function groupPanel() {
   let error = "", saving = false, nativeTabs = false;
   const active = () => state.groups.find(g => g.id === state.active);
   const update = (ctx: ModuleContext, next: Groups) => {
-    if (Array.isArray(next?.groups)) { state = next; ctx.ui.invalidate(); }
+    if (Array.isArray(next?.groups)) { state = next; onChange(ctx); ctx.ui.invalidate(); }
   };
   const load = async (ctx: ModuleContext) => {
     const mine = ++request;
@@ -156,5 +156,7 @@ export function groupPanel() {
     } catch (e) { error = errMsg(e); }
     ctx.ui.invalidate();
   }
-  return { activate, active, projectMenu, render, event };
+  /** Groups and the active tab, for the Halo rail's project tabs. */
+  const snapshot = () => ({ active: state.active, groups: state.groups.map(g => ({ id: g.id, name: g.name, projectIds: [...g.projectIds] })) });
+  return { activate, active, projectMenu, render, event, snapshot };
 }
