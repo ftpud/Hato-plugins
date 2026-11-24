@@ -259,6 +259,16 @@ const mod: AppModule = {
       await x(ctx, `UPDATE ai_conversations SET ${cols.map(([c]) => c + " = ?").join(", ")} WHERE id = ?`, [...cols.map(([, v]) => v), id]);
       return null;
     },
+    "conversations.remove": async (ctx, a) => {
+      const id = str(a.id, "id"), workspaceId = str(a.workspaceId, "workspaceId");
+      await ready;
+      await ctx.host.db.transaction(db!, [
+        { sql: "DELETE FROM ai_messages WHERE conversation_id IN (SELECT id FROM ai_conversations WHERE id = ? AND workspace_id = ?)", params: [id, workspaceId] },
+        { sql: "DELETE FROM ai_conversations WHERE id = ? AND workspace_id = ?", params: [id, workspaceId] },
+        { sql: "UPDATE workspace_views SET active_conversation_id = NULL WHERE workspace_id = ? AND active_conversation_id = ?", params: [workspaceId, id] },
+      ]);
+      return null;
+    },
     "messages.list": async (ctx, a) => {
       const limit = Math.max(1, Math.min(Math.floor(Number(a.limit) || 500), 5000));
       const before = a.beforeSequence;

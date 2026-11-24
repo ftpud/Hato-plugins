@@ -4,7 +4,7 @@ import { defaultSettings } from "../../../services/persistence/src/default-setti
 //   panels inside the window, detached OS windows, or are hidden.
 // * Splits are natively resizable; dragging a pane past its minimum collapses it.
 // * Panel titles are drag handles: drop onto another panel's left/right/top/bottom/center to re-dock.
-// * The top and bottom bars are data too: show/hide, reorder/move items by dragging their ⋮ grip.
+// * Workspace and Assistant rails provide navigation and workspace actions.
 // The kernel only provides the primitives (split, dragHandle, dropZone, floating, window); all
 // policy lives here and is persisted through the persistence service ("layout.v1").
 import type { AppModule, ModuleContext, UiNode } from "@hato/sdk/types";
@@ -22,8 +22,7 @@ import { editorTheme } from "./editor-theme";
 import { debounce, errMsg } from "@hato/sdk/runtime";
 import { BAR_ITEMS, PANELS, setContributedBarItems, defaultLayout, dropPanel, homeOf, locate, moveBarItem, moveTo, panelSignature, removeBarItem, repair, setPanels, type BarId, type Layout, type PanelDef } from "./model";
 import { loadContributions, watchContributions, type Contributions } from "@hato/sdk/plugins";
-import { configurableSidebarPanels, normalizeSidebarOrder, orderedSidebarItems, type SidebarOrder, normalizeSidebarButtons, sidebarPosition, sidebarPositionOptions, type SidebarButtons } from "@hato/sdk/sidebar-placement";
-import { parseOrder } from "@hato/sdk/settings-order";
+import { normalizeSidebarOrder, type SidebarOrder, normalizeSidebarButtons, type SidebarButtons } from "@hato/sdk/sidebar-placement";
 import { normalizeTableStyle, listRowHeight, type TableStyle } from "@hato/sdk/ui-table";
 import { enforcePanelSharing, normalizePanelSharing, sharingOptions, showPanel, visibleIn, type PanelSharing } from "./panel-sharing";
 import { defaultSidebarButtons, defaultSidebarOrder, defaultPanelSharing, upgradeLegacy } from "./defaults";
@@ -588,8 +587,8 @@ const mod: AppModule = {
     publishSettings = exportSettings(ctx, () => [{ key: "appearance", title: "Appearance", group: "Appearance", layout: "table", fields: [
       { key: "theme", label: "Theme", type: "select", value: appearanceTheme, options: themeOptions,
         description: "Ember: graphite or warm paper with an ember-orange accent. Sakura Twilight: an original anime wallpaper with floating indigo glass and pink accents." },
-      { key: "panelOpacity", label: "Panel opacity", type: "range", value: String(panelPercent()), min: 20, max: 100, step: 5, unit: "%",
-        description: appearanceTheme === "anime" ? "Lower keeps the wallpaper visible; higher is easier to read." : "Applies to the Sakura Twilight theme." },
+      ...(appearanceTheme === "anime" ? [{ key: "panelOpacity", label: "Panel opacity", type: "range" as const, value: String(panelPercent()), min: 20, max: 100, step: 5, unit: "%",
+        description: "Lower keeps the wallpaper visible; higher is easier to read." }] : []),
       { key: "projectsBackground", label: "Projects background", type: "range", value: String(backgroundPercent()), min: 0, max: 40, step: 2, unit: "%",
         description: "Strength of the faint dove behind the project list. 0% hides it." },
       { key: "mode", label: "Color mode", type: "select", value: mode, options: modeOptions,
@@ -607,24 +606,11 @@ const mod: AppModule = {
         description: "Applies to panels, chat, file previews and terminals. JetBrains Mono is bundled." },
       { key: "fontSize", label: "Text size", type: "range", value: fontSize, min: 12, max: 20, step: 1, unit: " px" },
       { key: "fontWeight", label: "Text weight", type: "select", value: fontWeight, options: weightOptions },
-    ] }, { key: "side-panels", title: "Side panels", group: "Workspace", layout: "table",
-      description: "Choose which panel buttons appear and place them at the top or bottom of either sidebar. Panels remain accessible through Layout.",
-      fields: contributions ? configurableSidebarPanels(contributions).map(panel => ({
-        key: panel.id, label: panel.activity?.title || panel.title, type: "select" as const,
-        value: sidebarPosition(panel, sidebarButtons), options: sidebarPositionOptions,
-      })) : [],
-    }, { key: "panel-sharing", title: "Panel sharing", group: "Workspace", layout: "table",
+    ] }, { key: "panel-sharing", title: "Panel sharing", group: "Workspace", layout: "table",
       description: "Panels assigned to the same shared space replace each other when opened. Independent panels keep their own space.",
       fields: Object.keys(PANELS).map(id => ({ key: id, label: PANELS[id].title, type: "select" as const,
         value: panelSharing[id] || "", options: sharingOptions(panelSharing),
         description: panelSharing[id] ? `Shares with: ${Object.keys(PANELS).filter(other => other !== id && panelSharing[other] === panelSharing[id]).map(other => PANELS[other].title).join(", ") || "no other panels assigned yet"}` : undefined })),
-    }, { key: "sidebar-order", title: "Sidebar order & spacers", group: "Workspace",
-      description: "Move buttons with the arrows. Add a spacer to separate related tools; spacers can be moved and removed.",
-      fields: ["left-top", "left-bottom", "right-top", "right-bottom"].map(position => ({
-        key: position, label: position.replace("-", " · "), type: "order" as const, allowSpacers: true,
-        items: contributions ? configurableSidebarPanels(contributions).filter(p => sidebarPosition(p, sidebarButtons) === position).map(p => ({ id: p.id, label: p.activity?.title || p.title })) : [],
-        value: JSON.stringify(contributions ? orderedSidebarItems(contributions, sidebarButtons, sidebarOrder, position) : []),
-      })),
     }, { key: "tables", title: "Tables & lists", group: "Appearance", layout: "table",
       description: "Set the density and presentation of settings tables and native lists. Individual panels can supply their own row sizes.", fields: [
         { key: "density", label: "Row density", type: "select", value: tableStyle.density, options: [{ value: "compact", label: "Compact" }, { value: "comfortable", label: "Comfortable" }, { value: "spacious", label: "Spacious" }] },
@@ -639,26 +625,14 @@ const mod: AppModule = {
       { key: "showCollapsedTray", label: "Collapsed panels tray", type: "toggle", value: layout.showCollapsedTray,
         description: "Show restore buttons for collapsed panels under the workspace. Sidebar buttons restore collapsed panels either way." },
     ] }], async (section, key, value) => {
-      if (section === "sidebar-order") {
-        const active = contributions ? configurableSidebarPanels(contributions).filter(p => sidebarPosition(p, sidebarButtons) === key).map(p => p.id) : [];
-        const ordered = parseOrder(value, active, true);
-        const retained = (sidebarOrder[key] || []).filter(id => !active.includes(id) && !id.startsWith("@spacer:"));
-        const next = { ...sidebarOrder, [key]: [...ordered, ...retained] };
-        await ctx.modules.call("persistence", "settings.set", { key: "sidebar-order.v1", value: next });
-        sidebarOrder = next; ctx.state.set("workspace-layout.sidebarOrder", next); return;
-      }
       if (section === "tables") {
         const next = normalizeTableStyle({ ...tableStyle, [key]: value });
         await ctx.modules.call("persistence", "settings.set", { key: "ui-tables.v1", value: next });
         tableStyle = next; ctx.state.set("workspace-layout.tableStyle", next); ctx.events.emit("workspace-layout.tableStyleChanged", {}); return;
       }
       if (section === "workspace-chrome") {
-        if (typeof value !== "boolean") throw new Error("Invalid panel preference");
-        if (key === "groupBySpace") {
-          await ctx.modules.call("persistence", "settings.set", { key: "sidebar-grouping.v1", value });
-          groupBySpace = value; publishSharing(ctx); return;
-        }
-        const next = key === "bottomBar" ? { ...layout, bars: { ...layout.bars, ["bottom"]: { ...layout.bars["bottom"], visible: value } } } : { ...layout, [key]: value };
+        if (typeof value !== "boolean" || !["showLeftSidebar", "showRightSidebar", "showPanelTitles", "showPanelControls", "showCollapsedTray"].includes(key)) throw new Error("Invalid panel preference");
+        const next = { ...layout, [key]: value };
         await ctx.modules.call("persistence", "settings.set", { key: "layout.v1", value: next }); set(ctx, next); return;
       }
       if (section === "panel-sharing") {
@@ -667,14 +641,6 @@ const mod: AppModule = {
         await ctx.modules.call("persistence", "settings.set", { key: "panel-sharing.v1", value: next });
         panelSharing = next; publishSharing(ctx);
         set(ctx, enforcePanelSharing(layout, panelSharing));
-        return;
-      }
-      if (section === "side-panels") {
-        if (!contributions || !configurableSidebarPanels(contributions).some(p => p.id === key) || !sidebarPositionOptions.some(p => p.value === value)) throw new Error("Invalid sidebar preference");
-        const next = normalizeSidebarButtons({ ...sidebarButtons, [key]: value });
-        await ctx.modules.call("persistence", "settings.set", { key: "activity-sidebar.v1", value: next });
-        sidebarButtons = next;
-        ctx.state.set("workspace-layout.sidebarButtons", sidebarButtons);
         return;
       }
       if (section === "syntax") {
@@ -714,6 +680,7 @@ const mod: AppModule = {
         ctx.ui.invalidate();
         return;
       }
+      if (section !== "typography") throw new Error("Unknown settings section");
       if (key === "fontSize") value = fontSizeOf(value);
       const options = key === "fontFamily" ? fontOptions : key === "fontWeight" ? weightOptions : [];
       if (typeof value !== "string" || (key !== "fontSize" && !options.some(option => option.value === value))) throw new Error("Invalid typography preference");

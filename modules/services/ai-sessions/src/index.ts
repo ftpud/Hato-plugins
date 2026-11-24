@@ -32,6 +32,7 @@ interface Conv {
 
 const convs = new Map<string, Conv>();
 const loading = new Map<string, Promise<Conv>>();
+const deleting = new Set<string>();
 const HISTORY_PAGE = 80;
 const WORKING_LIMIT = 50;
 const LOW_RISK_KINDS = new Set(["read", "search", "think", "fetch"]);
@@ -65,6 +66,7 @@ function publishActivity(ctx: ModuleContext) {
 let flushSoon: () => void = () => {};
 
 async function load(ctx: ModuleContext, id: string): Promise<Conv> {
+  if (deleting.has(id)) throw new Error("This chat is being deleted");
   const known = convs.get(id);
   if (known?.loaded) return known;
   const pending = loading.get(id);
@@ -97,7 +99,13 @@ function add(c: Conv, kind: string, payload: any): Msg {
 }
 const byId = (c: Conv, id: string | null) => (id ? c.messages.find((m) => m.id === id) : undefined);
 
-async function flush(ctx: ModuleContext) {
+let flushing: Promise<void> = Promise.resolve();
+function flush(ctx: ModuleContext): Promise<void> {
+  const next = flushing.catch(() => {}).then(() => flushMessages(ctx));
+  flushing = next;
+  return next;
+}
+async function flushMessages(ctx: ModuleContext) {
   for (const c of convs.values()) {
     if (!c.dirty.size) continue;
     const ids = Array.from(c.dirty);
@@ -325,6 +333,28 @@ const mod: AppModule = {
   async deactivate(ctx) { await flush(ctx); },
   methods: {
     async list(ctx, a) { return ctx.modules.call("persistence", "conversations.list", { workspaceId: a.workspaceId }); },
+
+    async remove(ctx, a) {
+      const row = await ctx.modules.call("persistence", "conversations.get", { id: a.conversationId });
+      if (!row || row.workspaceId !== a.workspaceId) throw new Error("Chat does not belong to this workspace");
+      const c = await load(ctx, row.id);
+      if (deleting.has(row.id)) throw new Error("This chat is being deleted");
+      if (c.busy || c.submitting || c.steering.length || c.historyLoading || c.row.status === "connecting" || c.live?.status === "starting") throw new Error("Finish or stop this chat before deleting it");
+      deleting.add(row.id);
+      try {
+        await ctx.modules.call("acp", "stop", { conversationId: row.id });
+        c.live = null;
+        await update(ctx, row.id, { status: "offline" });
+        await flush(ctx);
+        await ctx.modules.call("persistence", "conversations.remove", { id: row.id, workspaceId: row.workspaceId });
+        convs.delete(row.id);
+        progress.delete(row.id);
+        markerPrompted.delete(row.id);
+        ctx.state.set("ai-sessions.progress", Object.fromEntries(progress));
+        notify();
+        return null;
+      } finally { deleting.delete(row.id); }
+    },
 
     async create(ctx, a) {
       const desc = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });

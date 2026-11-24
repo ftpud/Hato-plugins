@@ -52,7 +52,7 @@ function persistent(ctx:ModuleContext,method:string,args:any={}) {
     ctx.events.emit("ai.persistentRequest",{requestId,method,args:{...selection,...args}});
   });
 }
-function resetChatWindows(){historyBefore=[];historyLimit=CHAT_MESSAGE_LIMIT;settingsOpen=false;modelsOpen=false;historyOpen=false;mcpOpen=false;skillsOpen=false;error=null;}
+function resetChatWindows(){historyBefore=[];historyLimit=CHAT_MESSAGE_LIMIT;settingsOpen=false;modelsOpen=false;historyOpen=false;mcpOpen=false;skillsOpen=false;deleteChat=null;error=null;}
 function publishSession(ctx:ModuleContext){ctx.state.set("ai.session",background?{kind:"background",...background}:{kind:"chat"});}
 async function openBackground(ctx:ModuleContext,selection:any) {
   if(!ws||selection?.workspaceId!==ws.id||typeof selection.id!=="string")return;
@@ -95,6 +95,8 @@ let mcpOpen = false;
 let modelsOpen = false;
 let historyOpen = false;
 let historyQuery = "";
+let deleteChat: { id: string; workspaceId: string; background: boolean } | null = null;
+const chatWorking = (status: string) => ["busy", "waiting", "starting", "connecting"].includes(status);
 let historyConversationId: string | null = null;
 let historyBefore: string[] = [];
 let pagingHistory = false;
@@ -414,7 +416,7 @@ const mod: AppModule = {
   methods: {
     newChat: async (ctx) => { await mod.onEvent!(ctx, { action: "newChat" } as any); return true; },
     selectConversation: async (ctx, a) => { await mod.onEvent!(ctx, { action: "selectConv", value: String(a?.id || "") } as any); return true; },
-    openHistory: async (ctx) => { historyOpen = true; ctx.ui.invalidate(); return true; },
+    openHistory: async (ctx) => { await mod.onEvent!(ctx, { action: "openHistory" } as any); return true; },
   },
   id: "ai",
   moduleApiVersion: 1,
@@ -523,8 +525,22 @@ const mod: AppModule = {
         { type: "column", key: "session-list", scroll: true, maxHeight: 440, gap: 6, children: sessions.length ? sessions.map((c: any): UiNode => {
           const provider = view.profiles.find((p: any) => p.id === c.acpProfileId)?.name || "Agent";
           const selected = c.id === view.activeId;
-          return { type: "choice", key: c.id, text: c.title, description: `${provider} · ${c.status === "busy" ? "Working" : c.status === "online" ? "Connected" : c.status === "error" ? "Needs attention" : "Saved"}${selected ? " · Current session" : ""}`, selected, action: "selectConv", value: c.id,
-            style: { padding: 12, radius: 10, borderWidth: 1, borderColor: selected ? "primary" : "border", background: selected ? "selection" : "background" } };
+          const confirming = deleteChat?.id === c.id;
+          return { type: "column", key: c.id, gap: 6, style: { padding: 8, radius: 10, borderWidth: 1, borderColor: selected ? "primary" : "border", background: selected ? "selection" : "background" }, children: [
+            { type: "row", key: "session", gap: 8, align: "center", children: [
+              // Native choices fill their parent; constrain that parent so the delete action
+              // always keeps its own space, even beside a long conversation title.
+              { type: "column", key: "selection", grow: true, minWidth: 0, children: [
+                { type: "choice", key: "select", text: c.title, description: `${provider} · ${c.status === "busy" ? "Working" : c.status === "online" ? "Connected" : c.status === "error" ? "Needs attention" : "Saved"}${selected ? " · Current session" : ""}`, selected, action: "selectConv", value: c.id, disabled: busy === "deleteChat" },
+              ] },
+              { type: "button", key: "delete", text: "Delete", iconSvg: uiIcons.trash, action: "requestDeleteChat", value: c.id, small: true, variant: "ghost", style: { width: 84, noShrink: true }, disabled: !!busy || chatWorking(c.status), tooltip: chatWorking(c.status) ? "Finish or stop this chat before deleting it" : "Delete chat" },
+            ] },
+            ...(confirming ? [{ type: "row", key: "confirm-delete", gap: 8, align: "center", children: [
+              { type: "label", key: "warning", text: "Delete this chat and its saved history?", size: "xs", wrap: true, grow: true },
+              { type: "button", key: "cancel", text: "Cancel", action: "cancelDeleteChat", small: true, disabled: !!busy },
+              { type: "button", key: "confirm", text: "Delete", action: "confirmDeleteChat", small: true, variant: "danger", disabled: !!busy || chatWorking(c.status) },
+            ] } as UiNode] : []),
+          ] };
         }) : [{ type: "label", key: "no-sessions", text: historyQuery ? "No matching sessions. Try another search." : "Your conversations will appear here.", color: "muted", padding: 20, wrap: true }] },
       ] });
     }
@@ -692,7 +708,49 @@ const mod: AppModule = {
     return { type: "column", key: "ai-root", style: chatStyle.root, gap: 0, grow: true, children: kids };
   },
   async onEvent(ctx, ev) {
-    if (ev.action === "openHistory") { historyOpen = true; ctx.ui.invalidate(); return; }
+    if (ev.action === "requestDeleteChat") {
+      const chat = view?.conversations.find((c: any) => c.id === ev.value);
+      if (!ws || !chat || busy || chatWorking(chat.status)) return;
+      deleteChat = { id: chat.id, workspaceId: ws.id, background: !!background };
+      ctx.ui.invalidate(); return;
+    }
+    if (ev.action === "cancelDeleteChat") { deleteChat = null; ctx.ui.invalidate(); return; }
+    if (ev.action === "confirmDeleteChat") {
+      const target = deleteChat;
+      if (!target || target.workspaceId !== ws?.id || target.background !== !!background || busy) return;
+      busy = "deleteChat"; ctx.ui.invalidate();
+      try {
+        if (target.background) {
+          const page = await persistent(ctx, "view", { id: target.id, limit: 1 });
+          if (chatWorking(page.session.status)) throw new Error("Finish or stop this chat before deleting it");
+          await persistent(ctx, "remove", { id: target.id });
+          if (ws?.id === target.workspaceId) {
+            backgroundSessions = backgroundSessions.filter(s => s.id !== target.id);
+            if (background?.id === target.id) {
+              leaveBackground(ctx);
+              await ctx.modules.call("workspace", "view.patch", { workspaceId: target.workspaceId, patch: { ui: { aiBackgroundSession: null } } });
+            }
+          }
+          backgroundDrafts.delete(target.id);
+        } else await ctx.modules.call("ai-sessions", "remove", { workspaceId: target.workspaceId, conversationId: target.id });
+        if (ws?.id === target.workspaceId) {
+          connectionAttempts.delete(target.id);
+          deleteChat = null;
+          await load(ctx);
+          historyOpen = true;
+        }
+      } catch (e) { if (ws?.id === target.workspaceId) error = errMsg(e); }
+      finally { if (busy === "deleteChat") busy = null; ctx.ui.invalidate(); }
+      return;
+    }
+    if (ev.action === "openHistory") {
+      historyOpen = true; historyQuery = "";
+      if (background) {
+        try { backgroundSessions = await persistent(ctx, "list"); await load(ctx); }
+        catch (e) { error = errMsg(e); }
+      }
+      ctx.ui.invalidate(); return;
+    }
     if (ev.action === "newChat" && view && !view.profiles.length) {
       ctx.events.emit("settings.open", { category: "plugins" }); return;
     }

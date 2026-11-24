@@ -63,7 +63,7 @@ function categoryGroup(category: Category): string {
   if (category.section?.group) return category.section.group;
   if (category.key === "plugins" || category.key === "security") return "Advanced";
   if (["appearance", "typography", "tables"].includes(category.section?.key || "")) return "Appearance";
-  if (["side-panels", "sidebar-order", "panel-sharing", "workspace-chrome"].includes(category.section?.key || "")) return "Workspace";
+  if (["panel-sharing", "workspace-chrome"].includes(category.section?.key || "")) return "Workspace";
   if (["viewer", "git-changes", "git-panel"].includes(category.module || "")) return "Editor & Git";
   if ((category.module || "").includes("mcp")) return "AI & tools";
   return "Tools & runtime";
@@ -79,7 +79,7 @@ function orderEditor(field: Extract<SettingField, { type: "order" }>, key: strin
       button("up", "↑", "up", index, index === 0), button("down", "↓", "down", index, index === items.length - 1),
       ...(id.startsWith(SPACER_PREFIX) ? [button("remove", "×", "remove", index)] : []),
     ] })),
-    ...(!items.length ? [{ type: "label", key: "empty", text: "No buttons here. Choose positions on the Side panels page.", color: "muted", wrap: true, size: "xs" } as UiNode] : []),
+    ...(!items.length ? [{ type: "label", key: "empty", text: "No items to arrange.", color: "muted", wrap: true, size: "xs" } as UiNode] : []),
   ] };
 }
 const mod: AppModule = {
@@ -190,7 +190,7 @@ const mod: AppModule = {
     if (tableRows.length) options.push(uiTable("preferences-table", tableRows, normalizeTableStyle(ctx.state.get("workspace-layout.tableStyle"))));
     const resetLabel = active.module ? ctx.state.get<SettingsExport>(`${active.module}.settings`)?.resetLabel : null;
     if (resetLabel) options.push({ type: "row", key: "reset-preferences", gap: 12, align: "center", style: { paddingX: 2, paddingY: 4 }, children: [
-      { type: "label", key: "description", text: "Restore default appearance, typography, panels, sidebar buttons and table styling. Workflows, chats and provider settings are kept.", size: "xs", color: "muted", wrap: true, grow: true },
+      { type: "label", key: "description", text: "Restore default appearance, typography, workspace layout and table styling. Workflows, chats and provider settings are kept.", size: "xs", color: "muted", wrap: true, grow: true },
       { type: "button", key: "reset", text: resetLabel, action: "resetPreferences", value: active.module, variant: "danger", small: true, style: { noShrink: true } },
     ] });
     const groups = ["Appearance", "Workspace", "Editor & Git", "AI & tools", "Tools & runtime", "Advanced"];

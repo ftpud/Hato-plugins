@@ -1,5 +1,6 @@
 // Multiple resizable blocks; each block's tabs attach to independent kernel-owned PTYs.
-import type { AppModule, ModuleContext, UiNode } from "@hato/sdk/types";
+import type { AppModule, ModuleContext, UiNode, UiMotionMode, UiTransition } from "@hato/sdk/types";
+import { motionEasing } from "@hato/sdk/motion";
 import { sidebarIcons } from "@hato/sdk/sidebar-icons";
 import { terminalIcons } from "@hato/sdk/terminal-icons";
 import { terminalTabStyle, tabButtonStyle } from "@hato/sdk/tab-style";
@@ -17,6 +18,14 @@ let activityTimer: ReturnType<typeof setInterval> | null = null;
 let activityBusy = false;
 let cursors = new Map<string, number>();
 let unread = new Set<string>();
+let animateClosing = new Set<string>();
+let motionMode: UiMotionMode = "system";
+const paneTiming = { durationMs: 220, easing: motionEasing.enter };
+const CLOSE_MS = 160;
+const paneTransition = (direction: "horizontal" | "vertical"): UiTransition => ({
+  enter: { ...paneTiming, opacity: 0, offsetPx: direction === "horizontal" ? [12, 0] : [0, 12] },
+  exit: { durationMs: CLOSE_MS, easing: motionEasing.exit, opacity: 0, offsetPx: direction === "horizontal" ? [12, 0] : [0, 12] },
+});
 async function checkActivity(ctx: ModuleContext) {
   if (!ws || activityBusy) return;
   const version = epoch, workspaceId = ws.id;
@@ -62,18 +71,21 @@ async function save(ctx: ModuleContext) {
   } } });
 }
 function reset(saved?: any) {
-  epoch++; cursors = new Map(); unread = new Set(); terminals = new Map(); loading = new Map(); busy = new Set(); error = null;
+  epoch++; cursors = new Map(); unread = new Set(); terminals = new Map(); loading = new Map(); busy = new Set(); animateClosing = new Set(); error = null;
   layout = restore(saved || ws?.view?.ui?.terminalLayout, ws?.view?.ui?.terminalTabs);
 }
 async function attachVisible(ctx: ModuleContext) { await Promise.all(blocks(layout).map(block => attach(ctx, block))); }
-function renderNode(node: Node): UiNode {
+function renderNode(node: Node, direction: "horizontal" | "vertical" = "vertical"): UiNode {
   if (node.kind === "split") return { type: "split", key: node.id, direction: node.direction, sizes: node.sizes,
-    minSize: node.direction === "horizontal" ? 160 : 100, resizeAction: "resizeBlocks", grow: true, children: node.children.map(renderNode) };
+    minSize: node.direction === "horizontal" ? 160 : 100, resizeAction: "resizeBlocks", grow: true, children: node.children.map(child => renderNode(child, node.direction)) };
   const all = blocks(layout), locked = !ws || busy.has(node.id) || loading.has(node.active);
   const action = (name: string) => `${name}:${node.id}`;
   const control = (name: string, tooltip: string, icon: "plus" | "refresh" | "x"): UiNode => ({ type: "button", key: name, text: "", iconSvg: uiIcons[icon],
     action: action(name), small: true, variant: "ghost", tooltip, disabled: locked });
-  return { type: "column", key: node.id, gap: 3, padding: 4, grow: true, children: [
+  // Keep a stable outer box during exit so native presence can finish painting the live PTY.
+  // Shared layout identity also follows surviving panes when the split tree is reparented.
+  return { type: "column", key: node.id, grow: true, layoutId: `${ws?.id || "none"}:${node.id}`, layoutTransition: paneTiming, children: animateClosing.has(node.id) ? [] : [
+    { type: "column", key: "pane", grow: true, gap: 3, padding: 4, presence: paneTransition(direction), children: [
     { type: "row", key: "tabs", gap: 3, wrap: true, children: [
       ...node.keys.map((key): UiNode => ({ type: "row", key, gap: 0, style: terminalTabStyle(node.active === key), children: [
         { type: "button", key: "select", iconSvg: sidebarIcons.terminal, text: `${key.startsWith("md:") ? key.slice(3, key.lastIndexOf(":" )).split("/").pop() + " · block " + (Number(key.slice(key.lastIndexOf(":" ) + 1)) + 1) : "Terminal " + (all.flatMap(b => b.keys).indexOf(key) + 1)}${unread.has(key) ? " •" : ""}`,
@@ -89,12 +101,19 @@ function renderNode(node: Node): UiNode {
     ] },
     { type: "terminal", key: `term:${node.active}`, pty: terminals.get(node.active)?.pty || null,
       placeholder: ws ? "Starting shell…" : "Select a workspace.", grow: true },
+    ] },
   ] };
 }
 const mod: AppModule = {
   id: "terminal-panel", moduleApiVersion: 1,
   async activate(ctx, prev) {
     ws = ctx.state.get("workspace.selected") || null;
+    const readMotion = (settings: any) => {
+      const mode = settings?.sections?.find((section: any) => section.key === "appearance")?.fields?.find((field: any) => field.key === "animations")?.value;
+      motionMode = ["on", "reduced", "off"].includes(mode) ? mode : "system";
+    };
+    readMotion(ctx.state.get("workspace-layout.settings"));
+    ctx.state.watch("workspace-layout.settings", readMotion);
     reset(prev && prev.workspaceId === ws?.id ? prev.layout : undefined);
     if (prev && prev.workspaceId === ws?.id) {
       cursors = new Map(prev.cursors || []);
@@ -179,6 +198,13 @@ const mod: AppModule = {
       } else if (name === "close" || name === "closeBlock") {
         if (name === "closeBlock" && blocks(layout).length === 1) return;
         const closing = name === "closeBlock" ? block.keys : [target];
+        if (blocks(layout).length > 1 && closing.length === block.keys.length && motionMode !== "off") {
+          // Presentation only: save the final tree after the exit, never an intermediate layout.
+          animateClosing.add(block.id);
+          ctx.ui.invalidate();
+          await new Promise(resolve => setTimeout(resolve, CLOSE_MS));
+          if (version !== epoch) return;
+        }
         for (const key of closing) {
           await ctx.modules.call("terminals", "close", { workspaceId, key });
           if (version !== epoch) return;
@@ -190,7 +216,7 @@ const mod: AppModule = {
       await save(ctx);
       if (version === epoch) await attachVisible(ctx);
     } catch (e) { if (version === epoch) error = errMsg(e); }
-    finally { if (version === epoch) { busy.delete(block.id); ctx.ui.invalidate(); } }
+    finally { if (version === epoch) { animateClosing.delete(block.id); busy.delete(block.id); ctx.ui.invalidate(); } }
   },
 };
 export default mod;
