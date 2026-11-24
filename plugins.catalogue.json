@@ -8,7 +8,7 @@
       "type": "System",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.51",
+      "version": "0.1.52",
       "coreVersion": "^0.1.0",
       "description": "Hato essentials services and panels.",
       "dependencies": {},
@@ -35,7 +35,7 @@
       "type": "AI",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.14",
+      "version": "0.1.15",
       "coreVersion": "^0.1.0",
       "description": "Provider-independent ACP sessions, chat UI and MCP tools. Install AI providers separately.",
       "dependencies": {
@@ -79,7 +79,7 @@
       "type": "Development",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.6",
+      "version": "0.1.7",
       "coreVersion": "^0.1.0",
       "description": "Run configurations, Run bar and console, and the debugger for Java and JavaScript/TypeScript.",
       "dependencies": {
