@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 2,
+  "id": "run",
+  "name": "Run sessions",
+  "kind": "service",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [
+    "run-configurations",
+    "workspace"
+  ],
+  "calls": [
+    "workspace",
+    "run-configurations",
+    "debug",
+    "cloud"
+  ],
+  "capabilities": [
+    "process.scope",
+    "fs.scope",
+    "ssh.connect",
+    "approvals.request"
+  ],
+  "runsOn": "ui",
+  "distribution": "marketplace",
+  "stateVersion": 1,
+  "description": "Scoped run processes and streamed output for Java and JavaScript/TypeScript configurations.",
+  "author": "Hato contributors",
+  "version": "0.1.7",
+  "pluginPackage": "run-configurations",
+  "pluginType": "Development"
+}

@@ -26,7 +26,7 @@
   "stateVersion": 1,
   "description": "Project run configuration storage, environment previews and language detection.",
   "author": "Hato contributors",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "pluginPackage": "run-configurations",
   "pluginType": "Development"
 }
