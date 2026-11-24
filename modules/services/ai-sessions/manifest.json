@@ -17,7 +17,7 @@
   "stateVersion": 1,
   "description": "Conversation state, transcript persistence, streaming projection, approval policy.",
   "author": "Hato contributors",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "pluginPackage": "core-acp",
   "pluginType": "AI"
 }

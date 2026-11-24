@@ -86,11 +86,18 @@ export class McpRegistry {
     this.assertAllowed(name);
     const tool = this.catalog.get(name)!;
     if (tool.owner === 'internal-mcp') throw new Error('Built-in command uses the core MCP dispatcher');
+    const timeout = Math.max(1000, Math.min(180000, Number(tool.timeoutMs) || 30000));
+    const requestScope = tool.owner === 'browser' ? {
+      ...scope, browserDeadline: Date.now() + timeout,
+      ...(tool.localName === 'browser_batch' ? { allowedBrowserCommands: [...this.catalog.values()]
+        .filter(candidate => candidate.owner === 'browser' && this.allowed(candidate.name))
+        .map(candidate => candidate.localName) } : {}),
+    } : scope;
     const id = crypto.randomHex(16);
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error('Module MCP command timed out')); }, Math.max(1000, Math.min(180000, Number(tool.timeoutMs) || 30000)));
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error('Module MCP command timed out')); }, timeout);
       this.pending.set(id, { owner: tool.owner, generation: tool.generation, resolve, reject, timer });
-      try { this.ctx.events.emit('internal-mcp.call', { id, module: tool.owner, generation: tool.generation, tool: tool.localName, args, scope }); }
+      try { this.ctx.events.emit('internal-mcp.call', { id, module: tool.owner, generation: tool.generation, tool: tool.localName, args, scope: requestScope }); }
       catch (e) { clearTimeout(timer); this.pending.delete(id); reject(e); }
     });
   }

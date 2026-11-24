@@ -80,7 +80,7 @@ export const CLEAR_FN = `function(ref, selector) {
 }`;
 
 export const WAIT_FN = `function(selector, text) {
-  if (selector) return !!document.querySelector(selector);
-  if (text) return (document.body && document.body.innerText || "").includes(text);
-  return document.readyState === "complete";
+  if (!selector && !text) return document.readyState === "complete";
+  return (!selector || !!document.querySelector(selector))
+    && (!text || (document.body && document.body.innerText || "").includes(text));
 }`;

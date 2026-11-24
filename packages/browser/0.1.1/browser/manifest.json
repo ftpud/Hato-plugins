@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 2,
+  "id": "browser",
+  "name": "Browser sessions",
+  "kind": "service",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [
+    "workspace",
+    "persistence"
+  ],
+  "calls": [
+    "workspace",
+    "persistence"
+  ],
+  "capabilities": [
+    "net.websocket",
+    "net.fetch",
+    "process.scope",
+    "ssh.connect",
+    "ssh.forward",
+    "remote.daemon",
+    "ui.surface"
+  ],
+  "runsOn": "ui",
+  "distribution": "marketplace",
+  "stateVersion": 1,
+  "description": "Persistent headless browser sessions (local, workspace machine or DevTools endpoint) for you, agents and workflows.",
+  "author": "Hato contributors",
+  "version": "0.1.1",
+  "pluginPackage": "browser",
+  "pluginType": "Automation"
+}

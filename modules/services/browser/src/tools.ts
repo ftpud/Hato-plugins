@@ -21,17 +21,39 @@ export interface ToolHost {
 
 export function browserTools(host: ToolHost): ModuleMcpTool[] {
   const run = (fn: (s: BrowserSession, a: any) => Promise<any> | any, label: (a: any) => string) =>
-    async (a: any, scope: McpScope) => {
-      const s = host.pick(a.session);
+    async (s: BrowserSession, a: any, scope: BrowserScope) => {
       await s.start();
+      checkDeadline(scope);
+      if (host.pick(s.spec.id) !== s) throw new Error("Browser session changed");
       s.noteAgent(label(a), scope.conversationId);
       return fn(s, a);
     };
-  return [
+  type BrowserScope = McpScope & { allowedBrowserCommands?: string[]; browserDeadline?: number };
+  type SessionCommand = Omit<ModuleMcpTool, "handler"> & {
+    handler(s: BrowserSession, args: any, scope: BrowserScope): Promise<any>;
+  };
+  const queues = new WeakMap<BrowserSession, Promise<unknown>>();
+  function checkDeadline(scope: BrowserScope) {
+    if (scope.browserDeadline && Date.now() >= scope.browserDeadline) throw new Error("Browser command timed out");
+  }
+  function enqueue(args: any, scope: BrowserScope, task: (s: BrowserSession) => Promise<any>) {
+    const s = host.pick(args.session);
+    const result = (queues.get(s) ?? Promise.resolve()).catch(() => {}).then(() => {
+      checkDeadline(scope);
+      if (host.pick(s.spec.id) !== s) throw new Error("Browser session changed");
+      return task(s);
+    });
+    queues.set(s, result);
+    const release = () => { if (queues.get(s) === result) queues.delete(s); };
+    void result.then(release, release);
+    return result;
+  }
+  const list: ModuleMcpTool =
     { name: "browser_sessions", title: "List browser sessions", description: "List the browser sessions agents may use, with their tabs and current page.",
       inputSchema: obj({}), annotations: { readOnlyHint: true },
       handler: () => ({ sessions: host.agentSessions().map(s => { const v = s.view(); return { id: v.id, name: v.name, status: v.status, location: v.locationLabel, url: v.url, title: v.title, viewport: v.viewport,
-        tabs: v.tabs.map(t => ({ id: t.id, title: t.title, url: t.url, active: t.active })) }; }) }) },
+        tabs: v.tabs.map(t => ({ id: t.id, title: t.title, url: t.url, active: t.active })) }; }) }) };
+  const commands: SessionCommand[] = [
     { name: "browser_navigate", title: "Open a URL", description: "Navigate the active tab (or a new tab) to a URL and wait for it to load. Starts the session if needed.",
       inputSchema: obj({ session, url: { type: "string" }, newTab: { type: "boolean" }, tab }, ["url"]), timeoutMs: 90_000,
       handler: run(async (s, a) => a.newTab ? (await s.newTab(a.url), await new Promise(r => setTimeout(r, 800)), s.where()) : s.navigate(a.url, a.tab), a => `Open ${a.url}`) },
@@ -74,9 +96,12 @@ export function browserTools(host: ToolHost): ModuleMcpTool[] {
     { name: "browser_scroll", title: "Scroll", description: "Scroll with the mouse wheel at an element/coordinates (default viewport center). deltaY defaults to most of a screen; negative scrolls up.",
       inputSchema: obj({ session, deltaX: { type: "number" }, deltaY: { type: "number" }, ...target, tab }),
       handler: run((s, a) => s.scroll(a), a => `Scroll ${a.deltaY ?? "down"}`) },
-    { name: "browser_wait", title: "Wait for content", description: "Wait until a CSS selector exists or text appears (up to timeoutMs, max 60000).",
+    { name: "browser_wait", title: "Wait for content", description: "Wait for a CSS selector, visible text, or both. Without either, waits for the current document to finish loading. A timeout returns found: false as a tool error. To wait after a specific action, put both in one browser_batch.",
       inputSchema: obj({ session, selector: { type: "string" }, text: { type: "string" }, timeoutMs: { type: "integer" }, tab }), annotations: { readOnlyHint: true }, timeoutMs: 70_000,
-      handler: run((s, a) => s.waitFor(a), () => "Wait") },
+      handler: run(async (s, a) => {
+        const result = await s.waitFor(a);
+        return result.found ? result : { ...result, ok: false, error: "Browser wait timed out" };
+      }, () => "Wait") },
     { name: "browser_network", title: "Network log", description: "Recent requests (newest last): method, URL, status, type, timing and size. Filter by URL substring, resource type (xhr, fetch, document…) or method; failedOnly shows errors and HTTP ≥400; sinceSeq returns only newer entries; headers includes request/response headers.",
       inputSchema: obj({ session, filter: { type: "string" }, limit: { type: "integer" }, failedOnly: { type: "boolean" }, sinceSeq: { type: "integer" }, headers: { type: "boolean" }, tab }), annotations: { readOnlyHint: true },
       handler: run((s, a) => ({ requests: s.networkLog(a) }), () => "Network log") },
@@ -84,4 +109,59 @@ export function browserTools(host: ToolHost): ModuleMcpTool[] {
       inputSchema: obj({ session, requestId: { type: "string" }, maxChars: { type: "integer" } }, ["requestId"]), annotations: { readOnlyHint: true },
       handler: run((s, a) => s.networkBody(a.requestId, a.maxChars ?? 100_000), () => "Response body") },
   ];
+  const byName = new Map(commands.map(command => [command.name, command]));
+  const batch: ModuleMcpTool = {
+    name: "browser_batch",
+    title: "Run browser commands in order",
+    description: "Run up to 10 existing browser commands on one session, in order, without interleaving agent commands. Each step has a command name (e.g. browser_click) and its usual arguments, with session set only at the batch level. Stops on the first failure and returns completed results and any screenshots.",
+    timeoutMs: 180_000,
+    inputSchema: obj({ session, steps: {
+      type: "array", minItems: 1, maxItems: 10,
+      items: obj({ command: { type: "string", enum: [...byName.keys()] }, arguments: { type: "object" } }, ["command"]),
+    } }, ["steps"]),
+    handler(args, scope: BrowserScope) {
+      if (!Array.isArray(args.steps) || args.steps.length < 1 || args.steps.length > 10) {
+        throw new Error("Provide between 1 and 10 browser steps");
+      }
+      const steps = args.steps.map((step: any, index: number) => {
+        const command = byName.get(step?.command);
+        const input = step?.arguments ?? {};
+        if (!command || !scope.allowedBrowserCommands?.includes(command.name)) {
+          throw new Error(`Step ${index + 1}: browser command is denied or unavailable`);
+        }
+        if (typeof input !== "object" || Array.isArray(input) || "session" in input) {
+          throw new Error(`Step ${index + 1}: arguments must be an object without session`);
+        }
+        for (const key of command.inputSchema.required ?? []) {
+          if (input[key] === undefined) throw new Error(`Step ${index + 1}: missing ${key}`);
+        }
+        return { command, input };
+      });
+      return enqueue(args, scope, async s => {
+        const results: { command: string; result: unknown }[] = [];
+        const images: unknown[] = [];
+        let failure: { step: number; command: string; error: string } | undefined;
+        for (const { command, input } of steps) {
+          try {
+            checkDeadline(scope);
+            if (host.pick(s.spec.id) !== s) throw new Error("Browser session changed");
+            const { mcpContent = [], ...result } = await command.handler(s, input, scope);
+            if (command.name === "browser_wait" && result.found === false) throw new Error(result.error);
+            results.push({ command: command.name, result });
+            const screenshots = mcpContent.filter((item: any) => item.type === "image");
+            if (screenshots.length) images.push({ type: "text", text: `Screenshot from step ${results.length}` }, ...screenshots);
+          } catch (error) {
+            failure = { step: results.length + 1, command: command.name, error: error instanceof Error ? error.message : String(error) };
+            break;
+          }
+        }
+        const summary = { ok: !failure, results, ...(failure ? { failure } : {}) };
+        return images.length ? { ...summary, mcpContent: [{ type: "text", text: JSON.stringify(summary) }, ...images] } : summary;
+      });
+    },
+  };
+  return [list, ...commands.map(({ handler, ...tool }) => ({
+    ...tool,
+    handler: (args: any, scope: BrowserScope) => enqueue(args, scope, s => handler(s, args, scope)),
+  })), batch];
 }
