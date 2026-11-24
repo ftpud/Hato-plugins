@@ -10,7 +10,9 @@
   "runsOn": "workspace",
   "stateVersion": 1,
   "description": "Summarises agent activity on this machine as allowlisted metadata for the Hato Cloud overview. Never exports prompts, output or file contents.",
-  "calls": ["agent-runner"],
+  "calls": [
+    "agent-runner"
+  ],
   "author": "Hato contributors",
   "version": "0.1.0",
   "pluginPackage": "cloud",

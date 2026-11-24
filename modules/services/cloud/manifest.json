@@ -5,8 +5,18 @@
   "kind": "service",
   "entry": "src/index.ts",
   "moduleApiVersion": 1,
-  "dependencies": ["persistence", "workspace"],
-  "capabilities": ["cloud.account", "net.loopback", "ui.openUrl", "remote.daemon", "remote.daemon.admin", "ssh.connect"],
+  "dependencies": [
+    "persistence",
+    "workspace"
+  ],
+  "capabilities": [
+    "cloud.account",
+    "net.loopback",
+    "ui.openUrl",
+    "remote.daemon",
+    "remote.daemon.admin",
+    "ssh.connect"
+  ],
   "runsOn": "ui",
   "stateVersion": 1,
   "description": "Manages Hato Cloud accounts, enrolment, inventory and daemon routes.",

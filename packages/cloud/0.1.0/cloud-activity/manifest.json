@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 2,
+  "id": "cloud-activity",
+  "name": "Cloud activity",
+  "kind": "service",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [],
+  "capabilities": [],
+  "runsOn": "workspace",
+  "stateVersion": 1,
+  "description": "Summarises agent activity on this machine as allowlisted metadata for the Hato Cloud overview. Never exports prompts, output or file contents.",
+  "calls": [
+    "agent-runner"
+  ],
+  "author": "Hato contributors",
+  "version": "0.1.0",
+  "pluginPackage": "cloud",
+  "pluginType": "Connectivity"
+}

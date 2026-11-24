@@ -26,7 +26,7 @@
   "stateVersion": 1,
   "description": "Scoped run processes and streamed output for Java and JavaScript/TypeScript configurations.",
   "author": "Hato contributors",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "pluginPackage": "run-configurations",
   "pluginType": "Development"
 }

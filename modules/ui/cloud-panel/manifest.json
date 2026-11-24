@@ -5,7 +5,9 @@
   "kind": "ui",
   "entry": "src/index.ts",
   "moduleApiVersion": 1,
-  "dependencies": ["cloud"],
+  "dependencies": [
+    "cloud"
+  ],
   "requires": [],
   "capabilities": [],
   "stateVersion": 1,

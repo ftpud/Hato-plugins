@@ -26,7 +26,7 @@
   "stateVersion": 1,
   "description": "Debug sessions for JavaScript/TypeScript (js-debug) and Java (java-debug), with project breakpoints.",
   "author": "Hato contributors",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "pluginPackage": "run-configurations",
   "pluginType": "Development"
 }
