@@ -10,7 +10,8 @@ import {
   blockingIssues, edgeType, isAgentBlock, isCapabilityBlock, normalizeDefinition, preview, validateWorkflow,
 } from "@hato/sdk/workflows";
 import { WORKFLOW_TEMPLATES } from "@hato/sdk/workflow-templates";
-import { adoptDefinition, recordMcpActivity, timerAction, timerDelay, cancel, chat, drive, execs, initEngine, invoke, messages, newExec, stateOf, steer, toolTargets, toolCatalogue, touch, track, transfer, useMeeting, answer, type Exec } from "./engine";
+import { adoptDefinition, promptBlock, recordMcpActivity, recordProviderTurn, setAutonomousClaudeTurns, timerAction, timerDelay, cancel, chat, drive, execs, initEngine, invoke, messages, newExec, stateOf, steer, toolTargets, sessionToolCatalogue, touch, track, transfer, useMeeting, answer, type Exec, type ProviderTurnEvent } from "./engine";
+import { imageAttachments } from "@hato/sdk/images";
 import { initMcp, issueEndpoint, revokeWhere, type Scope } from "./mcp";
 import { terminalAction } from "./terminal";
 import { appAction, killAllApps, listApps, runningApps } from "./procs";
@@ -73,8 +74,9 @@ async function updateRuns(projectId: string, def: WorkflowDefinition, mcpEnv?: P
   for (const { id } of rows) {
     const live = execs.get(id);
     if (live) {
+      withMcp(live.env);
       adoptDefinition(live, def);
-      await ctxRef.host.db.exec(db, "UPDATE runs SET env=? WHERE id=?", [JSON.stringify(withMcp(live.env)), id]);
+      if (mcpEnv) await ctxRef.host.db.exec(db, "UPDATE runs SET env=? WHERE id=?", [JSON.stringify(live.env), id]);
       count++; continue;
     }
     const stored = await loadRun(id); if (!stored) continue;
@@ -184,7 +186,8 @@ async function runToolBody(s: Extract<Scope, { kind: "run" }>, name: string, a: 
     return t;
   };
   const record = (text: string) => { const st = stateOf(x, caller); st.log.push({ at: now(), kind: "tool", text: text.slice(0, 500) }); if (st.log.length > 200) st.log.shift(); };
-  if (name === "workflow_connections") return toolCatalogue(x, x.def.blocks.find(b => b.id === caller)!).map(t => ({ ...t, status: stateOf(x, t.block_id).status }));
+  const catalogue = () => sessionToolCatalogue(x, x.def.blocks.find(b => b.id === caller)!);
+  if (name === "workflow_connections") return catalogue();
   if (name === "workflow_choose_path") {
     const paths = x.def.edges.filter(e => e.from === caller && edgeType(e) === "path").map(e => e.label);
     if (!paths.includes(String(a.path))) throw new Error(`Unknown path; choose one of ${JSON.stringify(paths)}`);
@@ -202,15 +205,14 @@ async function runToolBody(s: Extract<Scope, { kind: "run" }>, name: string, a: 
   const t = target(), action = typeof a.action === "string" && a.action ? a.action : undefined;
   const input = String(a.input ?? a.message ?? "");
   record(`${action || "use"} ${t.label}`);
+  if (t.type === "mcp" || t.type === "browser") return (await catalogue()).find(entry => entry.block_id === t.id);
   if (action === "fetch") {
-    if (t.type === "mcp") return toolCatalogue(x, x.def.blocks.find(b => b.id === caller)!).find(entry => entry.block_id === t.id);
-  if (t.type === "meeting") return useMeeting(x, t.id, caller, { action: "diff" });
+    if (t.type === "meeting") return useMeeting(x, t.id, caller, { action: "diff" });
     const k = `${caller}>${t.id}`, out = x.outputs.get(t.id) ?? "", seen = x.fetched.get(k) ?? 0;
     const from = seen > out.length ? 0 : seen, text = out.slice(from, from + 8000);
     x.fetched.set(k, from + text.length);
     return text ? { text, hasMore: from + text.length < out.length } : { unchanged: true };
   }
-  if (t.type === "mcp") return toolCatalogue(x, x.def.blocks.find(b => b.id === caller)!).find(entry => entry.block_id === t.id);
   if (t.type === "meeting") return useMeeting(x, t.id, caller, { ...a, action: action || "diff" });
   if (t.type === "terminal_control") {
     const value = await terminalAction(ctxRef, x.env, action || "list", a);
@@ -265,6 +267,10 @@ const mod: AppModule = {
       try { recordMcpActivity(await execFor(event.workflow.runId), event.workflow.blockId, event.sessionId, event.update); }
       catch (e) { ctx.log.warn("MCP activity trace", errMsg(e)); }
     });
+    ctx.events.on("agent-runner.providerTurn", async (event: ProviderTurnEvent) => {
+      try { recordProviderTurn(await execFor(event.workflow.runId), event); }
+      catch (e) { ctx.log.warn("Workflow provider turn", errMsg(e)); }
+    });
     await initMcp(ctx, db, {
       list: s => s.kind === "run" ? RUN_TOOLS : CONFIG_TOOLS,
       call: (s, name, args) => s.kind === "run" ? runTool(s, name, args) : configTool(s, name, args),
@@ -284,7 +290,8 @@ const mod: AppModule = {
   },
   async deactivate(ctx) { if (flushTimer) clearTimeout(flushTimer); await flush(); void ctx; },
   methods: {
-    health: () => ({ ok: true, version: WORKFLOW_RUNNER_VERSION, active: [...execs.values()].filter(x => x.driving || x.busy.size || x.timers.size || x.answers.size).length, apps: runningApps() }),
+    health: () => ({ ok: true, version: WORKFLOW_RUNNER_VERSION, workflowTurnBoundaries: true, active: [...execs.values()].filter(x => x.driving || x.busy.size || x.timers.size || x.answers.size).length, apps: runningApps() }),
+    setPreferences(_ctx, a, meta) { gateway(meta); setAutonomousClaudeTurns(a.trackAutonomousClaudeTurns !== false); return null; },
     async list(_ctx, a) { return listDefinitions(String(a.projectId)); },
     async get(_ctx, a) { return definition(String(a.projectId), String(a.id)); },
     async save(_ctx, a, meta) { gateway(meta); return saveDefinition(String(a.projectId), a.definition, a.expectedRevision === undefined ? undefined : a.expectedRevision, a.available, a.mcpEnv); },
@@ -340,6 +347,16 @@ const mod: AppModule = {
       gateway(meta);
       const text = String(a.text || "").trim(); if (!text) throw new Error("Message is empty");
       return chat(await execFor(String(a.runId)), String(a.blockId), text);
+    },
+    async promptSession(_ctx, a, meta) {
+      gateway(meta);
+      const x = await execFor(String(a.runId)), blockId = String(a.blockId);
+      const b = x.def.blocks.find(b => b.id === blockId);
+      if (x.env.workspaceId !== a.workspaceId || !b || !isAgentBlock(b) || stateOf(x, blockId).sessionId !== a.id)
+        throw new Error("Unknown workflow block session");
+      const text = String(a.text || "").trim(), images = imageAttachments(a.images);
+      if (!text && !images.length) throw new Error("Message is empty");
+      return promptBlock(x, blockId, text, images);
     },
     /** Delete a finished run; returns its agent session ids for the gateway to remove. */
     async removeRun(ctx, a, meta) {

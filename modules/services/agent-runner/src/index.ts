@@ -18,6 +18,9 @@ interface Live {
   queued: string[]; cancelSent: boolean; stopping: boolean; context: string; firstPrompt: boolean;
   /** Agent supports `_session/steering`: follow-ups join the running turn instead of cancelling it. */
   steering: boolean;
+  loadSession?: boolean;
+  mcpStartupFailures?: Record<string, string>;
+  providerTurn?: { id: string; output: string };
   turn: number; stderr: string;
   toolTitles?: Map<string, string>;
 }
@@ -90,8 +93,33 @@ async function applySetting(c:Live,id:string,value:string|boolean) {
 }
 function update(ctx:ModuleContext,c:Live,u:any) {
   const kind=u.sessionUpdate;
+  const mcpStatus=u._meta?.claudeCode;
+  if(mcpStatus?.kind==="mcpServerStatus" && typeof mcpStatus.server==="string") {
+    const failures=c.mcpStartupFailures??=Object.create(null);
+    failures[mcpStatus.server]=mcpStatus.status==="needs-auth"
+      ? "Claude could not authenticate this MCP server." : "Claude reported that this MCP server failed to start.";
+  } else if(kind==="tool_call" && u.status==="failed" && typeof u.toolCallId==="string" && u.toolCallId.startsWith("mcp_startup.")) {
+    const name=/^mcp__(.+)__startup$/.exec(u.title)?.[1];
+    if(name)(c.mcpStartupFailures??=Object.create(null))[name]="Codex reported that this MCP server did not start.";
+  }
+  if(kind==="async_task_spawned" && u.taskType==="turn" && typeof u.asyncTaskId==="string" && c.session.status==="ready") {
+    c.providerTurn={id:u.asyncTaskId,output:""};
+    c.turn=Math.max(c.turn+1,Date.now());
+    c.cancelSent=false;c.session.status="busy";c.session.error=null;
+    emitProviderTurn(ctx,c,{phase:"started",turnId:u.asyncTaskId});
+    void persist(ctx,c.session);
+    return;
+  }
+  if(kind==="async_task_state_update" && c.providerTurn?.id===u.asyncTaskId && ["completed","failed","stopped"].includes(u.state)) {
+    finishProviderTurn(ctx,c,u.state);
+    return;
+  }
   if(kind==="agent_message_chunk" || kind==="agent_thought_chunk") {
-    if(u.content?.type==="text")void message(ctx,c.session,kind==="agent_thought_chunk"?"thought":"assistant",String(u.content.text||"")).catch(e=>ctx.log.error(errMsg(e)));
+    if(u.content?.type==="text") {
+      const text=String(u.content.text||"");
+      if(kind==="agent_message_chunk" && c.providerTurn) c.providerTurn.output=(c.providerTurn.output+text).slice(-200_000);
+      void message(ctx,c.session,kind==="agent_thought_chunk"?"thought":"assistant",text).catch(e=>ctx.log.error(errMsg(e)));
+    }
   } else if(kind==="tool_call" || kind==="tool_call_update") {
     if(c.session.workflow) ctx.events.emit("agent-runner.toolActivity", { sessionId: c.session.id, workflow: c.session.workflow, update: u });
     const text=(u.content||[]).map((x:any)=>x.content?.text||x.text||"").join("\n");
@@ -105,6 +133,17 @@ function update(ctx:ModuleContext,c:Live,u:any) {
   } else if(kind==="config_option_update") { c.session.configOptions=u.configOptions||[];void persist(ctx,c.session); }
   else if(kind==="current_mode_update"&&c.session.modes) { c.session.modes={...c.session.modes,currentModeId:u.currentModeId};void persist(ctx,c.session); }
   else if(kind==="usage_update") { c.session.usage=reportedUsage(u);void persist(ctx,c.session); }
+}
+function emitProviderTurn(ctx:ModuleContext,c:Live,event:Record<string,unknown>) {
+  if(c.session.workflow)ctx.events.emit("agent-runner.providerTurn",{...event,sessionId:c.session.id,workflow:c.session.workflow});
+}
+function finishProviderTurn(ctx:ModuleContext,c:Live,state:string,error?:string) {
+  const turn=c.providerTurn;
+  if(!turn)return;
+  c.providerTurn=undefined;
+  c.session.status="ready";c.session.error=error??null;
+  emitProviderTurn(ctx,c,{phase:"finished",turnId:turn.id,state,output:turn.output.trim(),error});
+  void persist(ctx,c.session);
 }
 /** One instruction file or skill as the agent receives it, with a fingerprint of its text. */
 interface Instruction { path: string; label: string; text: string; digest: string; skill: boolean; name: string; description: string }
@@ -171,6 +210,7 @@ async function stop(ctx:ModuleContext,id:string) {
   const s=session(id), c=live.get(id);
   if(c) {
     c.stopping=true; c.queued=[];
+    finishProviderTurn(ctx,c,"stopped");
     for(const p of c.permissions.values())p.resolve({outcome:{outcome:"cancelled"}});
     c.permissions.clear();
     await ctx.host.process.closeStdin(c.process).catch(()=>{});
@@ -183,7 +223,7 @@ async function stop(ctx:ModuleContext,id:string) {
   await ctx.host.db.exec(db,"UPDATE permissions SET resolved=1 WHERE session_id=?",[id]);
   s.status="stopped"; await persist(ctx,s); return s;
 }
-async function start(ctx:ModuleContext,s:AgentSession) {
+async function start(ctx:ModuleContext,s:AgentSession,preserveConversation=false) {
   if(live.has(s.id))return live.get(s.id)!;
   s.status="starting";s.error=null;await persist(ctx,s);
   let c:Live|undefined;
@@ -219,11 +259,21 @@ async function start(ctx:ModuleContext,s:AgentSession) {
     const connection=c;
     c.peer=new JsonRpcPeer(line=>ctx.host.process.write(connection.process,line+"\n"));
     live.set(s.id,c);
-    c.peer.onNotification=(method,params)=>{
-      if(method!=="session/update" || params?.sessionId!==s.sessionId)return;
-      if(s.status==="starting" && ["user_message_chunk","agent_message_chunk","agent_thought_chunk","tool_call","tool_call_update","plan"].includes(params.update?.sessionUpdate))return;
-      update(ctx,connection,params.update||{});
+    const trackProviderTurns=s.workflow && s.profile.provider==="claude" && s.trackAutonomousClaudeTurns!==false;
+    const onNotification=(method:string,params:any)=>{
+      if(connection.stopping || method!=="session/update" || params?.sessionId!==s.sessionId)return;
+      const u=params.update||{};
+      if(!trackProviderTurns && (u.sessionUpdate==="async_task_spawned" || u.sessionUpdate==="async_task_state_update"))return;
+      if(s.status==="starting" && ["user_message_chunk","agent_message_chunk","agent_thought_chunk","tool_call","tool_call_update","plan","async_task_spawned","async_task_state_update"].includes(u.sessionUpdate)) {
+        if(u._meta?.claudeCode?.kind!=="mcpServerStatus" && !String(u.toolCallId||"").startsWith("mcp_startup."))return;
+      }
+      update(ctx,connection,u);
     };
+    c.peer.onNotification=trackProviderTurns?(method,params)=>{
+      // A prompt response and the next wakeup can be read in the same stdout chunk.
+      // Process notifications in wire order with the prompt response handlers.
+      void Promise.resolve().then(()=>onNotification(method,params)).catch(e=>ctx.log.error(errMsg(e)));
+    }:onNotification;
     c.peer.onRequest=async(method,params)=>{
       if(method!=="session/request_permission")throw rpcError(-32601,"Unsupported agent request");
       if(params.sessionId!==s.sessionId)throw rpcError(-32602,"Wrong session");
@@ -242,24 +292,35 @@ async function start(ctx:ModuleContext,s:AgentSession) {
     };
     c.subscriptions.push(await ctx.host.streams.listen(c.process,{channel:"stdout"},chunk=>connection.peer.feed(chunk),error=>{
       if(connection.stopping)return;
-      s.status="interrupted";s.error=error?errMsg(error):`Agent exited${connection.stderr?": "+connection.stderr.slice(-600):""}`;
+      const reason=error?errMsg(error):`Agent exited${connection.stderr?": "+connection.stderr.slice(-600):""}`;
+      finishProviderTurn(ctx,connection,"failed",reason);
+      s.status="interrupted";s.error=reason;
       connection.peer.failAll(s.error);live.delete(s.id);
       for(const p of connection.permissions.values())p.resolve({outcome:{outcome:"cancelled"}});
       void persist(ctx,s);
     }));
     c.subscriptions.push(await ctx.host.streams.listen(c.process,{channel:"stderr"},chunk=>{connection.stderr=(connection.stderr+chunk).slice(-4000);}));
-    const init=await request(c,"initialize",{protocolVersion:1,clientCapabilities:{fs:{readTextFile:false,writeTextFile:false},terminal:false},clientInfo:{name:"hato-agents",version:"0.1.0"}});
+    // Claude ACP reports wakeups and background follow-up turns via its AIR async-task extension.
+    const asyncTasks=trackProviderTurns
+      ? {_meta:{jetbrains:{air:{version:1,capabilities:["asyncTasks"]}}}} : {};
+    const init=await request(c,"initialize",{protocolVersion:1,clientCapabilities:{fs:{readTextFile:false,writeTextFile:false},terminal:false,...asyncTasks},clientInfo:{name:"hato-agents",version:"0.1.0"}});
     if(init.protocolVersion!==1)throw new Error("Unsupported ACP version");
     c.steering=init._meta?.steering?.supported===true;
+    c.loadSession=init.agentCapabilities?.loadSession===true;
     s.promptImages=init.agentCapabilities?.promptCapabilities?.image===true;
     // Remote MCP servers need the provider's matching transport (e.g. Codex has HTTP but not SSE).
     const caps=init.agentCapabilities?.mcpCapabilities||{};
     for(const m of sessionServers as any[])if((m.type==="http"||m.type==="sse")&&!caps[m.type])throw new Error(`${s.profile.name} cannot connect to ${m.type.toUpperCase()} MCP server “${m.name}”. Use a provider that supports it${m.type==="sse"?" or switch the server to Streamable HTTP":""}.`);
     let result:any;
+    if(s.sessionId && !c.loadSession) {
+      if(!preserveConversation)throw new Error("Provider cannot reload this session; create a new agent to avoid losing its context");
+      if(s.contextSent)throw new Error("This provider cannot resume the conversation with new MCP settings.");
+      s.sessionId=null;
+    }
     if(s.sessionId) {
-      if(!init.agentCapabilities?.loadSession)throw new Error("Provider cannot reload this session; create a new agent to avoid losing its context");
       try { result=await request(c,"session/load",{sessionId:s.sessionId,cwd:s.root,mcpServers:sessionServers}); }
       catch(e) {
+        if(preserveConversation && s.contextSent)throw new Error(`Provider could not resume the conversation with the updated configuration: ${errMsg(e)}`);
         // The provider no longer has this session (never prompted, expired or removed): start a
         // new one, as desktop chats do, instead of leaving the agent unable to reconnect.
         ctx.log.warn(`session/load failed for ${s.name}; starting a new provider session`,errMsg(e));
@@ -306,19 +367,23 @@ async function prompt(ctx:ModuleContext,c:Live,text:string,images:ImageAttachmen
   if(s.status!=="ready")throw new Error("Agent is not idle");
   const instructions=instructionContext(s,await readInstructions(ctx,s));
   const handoff = s.handoffPending ? chatHandoff((await ctx.host.db.query<any>(db,"SELECT role,text FROM messages WHERE session_id=? AND role IN ('user','assistant') ORDER BY seq DESC LIMIT 12",[s.id])).reverse()) : "";
-  c.turn=Date.now();c.cancelSent=false;s.status="busy";s.error=null;
+  if(s.status!=="ready" || c.stopping)throw new Error("Agent is not idle");
+  c.turn=Math.max(c.turn+1,Date.now());c.cancelSent=false;s.status="busy";s.error=null;
+  const turn=c.turn;
   await message(ctx,s,"user",text,undefined,undefined,images);await persist(ctx,s);
   const context=[instructions.preamble,handoff].filter(Boolean).join("\n\n"); s.handoffPending=false; c.firstPrompt=false;s.contextSent=true;s.sentDigests=instructions.digests;await persist(ctx,s);
   // The fingerprint index goes only with messages that (re)send instructions: the first one and
   // after a skill is switched on/off or its text changes. Other messages are sent as typed.
   const body=(context?`${context}\n\nUser request:\n${text}`:text)+(instructions.preamble&&instructions.index?`\n\n${instructions.index}`:"");
   void c.peer.request("session/prompt",{sessionId:s.sessionId,prompt:promptBlocks(body,images)}).then(async r=>{
-    await enqueue(()=>ctx.host.db.exec(db,"UPDATE permissions SET resolved=1 WHERE session_id=?",[s.id]));
+    if(c.stopping || live.get(s.id)!==c)return;
+    const cleanup=enqueue(()=>ctx.host.db.exec(db,"UPDATE permissions SET resolved=1 WHERE session_id=?",[s.id]));
     for(const pending of c.permissions.values())pending.resolve({outcome:{outcome:"cancelled"}});
     c.permissions.clear();
-    if(c.stopping || live.get(s.id)!==c)return;
-    s.status="ready";await message(ctx,s,"system",`Turn ended: ${r.stopReason||"complete"}`);await persist(ctx,s);
-    if(c.queued.length) {
+    s.status="ready";
+    const ended=message(ctx,s,"system",`Turn ended: ${r.stopReason||"complete"}`);
+    await Promise.all([cleanup,ended]);await persist(ctx,s);
+    if(s.status==="ready" && c.queued.length) {
       const next=c.queued.join("\n\n");c.queued=[];
       await ctx.host.db.exec(db,"UPDATE sessions SET queue_json='[]' WHERE id=?",[s.id]);
       await prompt(ctx,c,next);
@@ -328,7 +393,7 @@ async function prompt(ctx:ModuleContext,c:Live,text:string,images:ImageAttachmen
     if(live.get(s.id)!==c)return;
     s.status="ready";s.error=errMsg(e);await message(ctx,s,"error",s.error);await persist(ctx,s);
   }).catch(e=>ctx.log.error(errMsg(e)));
-  return {accepted:true};
+  return {accepted:true,turn};
 }
 const mod:AppModule={
   id:"agent-runner",moduleApiVersion:1,
@@ -347,11 +412,11 @@ const mod:AppModule={
   },
   canSwap:()=>({ok:live.size===0,reason:"Stop persistent agents before replacing their runtime"}),
   methods:{
-    health:()=>({ok:true,reasoning:true,mcpActivity:true,toolTitles:true,chatSettings:true,images:true,policy:true,connected:live.size}),
+    health:()=>({ok:true,reasoning:true,mcpActivity:true,toolTitles:true,chatSettings:true,images:true,policy:true,workflowTurnBoundaries:true,connected:live.size}),
     async fork(ctx,a,meta) {
       if(!["internal-remote-mcp","daemon-client"].includes(meta.caller))throw new Error("Only workspace controllers can create child agents");
       const parent=session(a.parentId);
-      const spec:AgentSession={...parent,id:crypto.randomUUID(),name:String(a.name||"Background worker").slice(0,120),customName:true,model:String(a.model||parent.model),sessionId:null,contextSent:false,status:"starting",error:null,createdAt:now(),updatedAt:now(),revision:0,configOptions:[],models:null};
+      const spec:AgentSession={...parent,id:crypto.randomUUID(),name:String(a.name||"Background worker").slice(0,120),customName:true,model:String(a.model||parent.model),sessionId:null,contextSent:false,status:"starting",error:null,createdAt:now(),updatedAt:now(),revision:0,configOptions:[],models:null,workflow:undefined,trackAutonomousClaudeTurns:undefined};
       sessions.set(spec.id,spec);await persist(ctx,spec);
       const c=await serialize(spec.id,()=>start(ctx,spec));
       if(a.text)await prompt(ctx,c,String(a.text));
@@ -383,11 +448,12 @@ const mod:AppModule={
       }
       const permissions=await ctx.host.db.query<any>(db,"SELECT data FROM permissions WHERE session_id=? AND resolved=0 ORDER BY rowid",[s.id]);
       const queue=await ctx.host.db.query<any>(db,"SELECT queue_json FROM sessions WHERE id=?",[s.id]);
-      return {session:publicSession(s),messages,before:older?rows[0].seq:null,permissions:permissions.map(p=>JSON.parse(p.data)),queued:JSON.parse(queue[0]?.queue_json||"[]")};
+      return {session:publicSession(s),messages,before:older?rows[0].seq:null,permissions:permissions.map(p=>JSON.parse(p.data)),queued:JSON.parse(queue[0]?.queue_json||"[]"),mcpStartupFailures:live.get(s.id)?.mcpStartupFailures};
     },
     send:(ctx,a)=>serialize(String(a.id),async()=>{
       const s=session(a.id),text=String(a.text||"").trim(),images=imageAttachments(a.images);
       if((!text&&!images.length)||text.length>128*1024)throw new Error("Prompt is empty or too large");
+      if(a.currentTurnOnly===true && s.status!=="busy" && s.status!=="waiting")return {promptRequired:true};
       const c=await start(ctx,s);
       if(images.length&&!s.promptImages)throw new Error(`${s.profile.name} does not support image prompts. Choose a provider with image support.`);
       if(s.status==="busy"||s.status==="waiting") {
@@ -401,6 +467,7 @@ const mod:AppModule={
           catch(e){ctx.log.warn("steering failed; falling back to interrupt",errMsg(e));interrupt=true;}
           if(outcome==="steered"){await message(ctx,s,"user",text,undefined,undefined,images);await persist(ctx,s);return {steered:true};}
           if(outcome==="promptRequired") {
+            if(a.currentTurnOnly===true)return {promptRequired:true};
             if((s.status as string)==="ready")return prompt(ctx,c,text,images);  // the turn may end while steering
             if(images.length)throw new Error("Wait for the agent to finish its turn before sending pictures");
             c.queued.push(text);
@@ -408,6 +475,7 @@ const mod:AppModule={
             return {queued:true};
           }
         }
+        if(a.currentTurnOnly===true)return {promptRequired:true};
         if(images.length)throw new Error("Wait for the agent to finish its turn before sending pictures");
         c.queued.push(text);
         await ctx.host.db.exec(db,"UPDATE sessions SET queue_json=? WHERE id=?",[JSON.stringify(c.queued),s.id]);
@@ -435,7 +503,8 @@ const mod:AppModule={
     async cancel(ctx,a) {const c=live.get(String(a.id));if(c){
       for(const p of c.permissions.values())p.resolve({outcome:{outcome:"cancelled"}});c.permissions.clear();
       await ctx.host.db.exec(db,"UPDATE permissions SET resolved=1 WHERE session_id=?",[c.session.id]);
-      await c.peer.notify("session/cancel",{sessionId:c.session.sessionId});}return null;},
+      if(c.providerTurn)await request(c,"_session/async_task/stop",{sessionId:c.session.sessionId,asyncTaskId:c.providerTurn.id});
+      else await c.peer.notify("session/cancel",{sessionId:c.session.sessionId});}return null;},
     setModel:(ctx,a)=>serialize(String(a.id),async()=>{const c=live.get(String(a.id));if(!c)throw new Error("Reconnect agent first");const choice=modelChoices(c.session).find(m=>m.id===a.model);if(!choice)throw new Error("Unknown model");await config(ctx,c,choice.configId,choice.id);return c.session;}),
     /** Change one provider option (mode, reasoning, ...) on the connected agent and keep it for reconnects. */
     setConfig:(ctx,a)=>serialize(String(a.id),async()=>{
@@ -486,20 +555,36 @@ const mod:AppModule={
       const name=String(p.name||"").trim().slice(0,120);if(!name)throw new Error("Agent name is required");
       // A patch without `profile` renames only.
       if(p.profile!==undefined&&(!p.profile?.executable||!Array.isArray(p.profile.args)||!Array.isArray(p.skills)||!Array.isArray(p.mcps)))throw new Error("Invalid agent configuration");
-      const configChanged=p.profile!==undefined&&JSON.stringify([s.profile,s.model,s.agentFile,s.skills,s.mcps,!!s.workspaceMcp,s.inline||{}])!==JSON.stringify([p.profile,String(p.model||""),p.agentFile||null,p.skills,p.mcps,!!p.workspaceMcp,p.inline||{}]);
+      const trackAutonomousClaudeTurns=meta.caller==="workflow-runner" && p.profile?.provider==="claude"
+        ? p.trackAutonomousClaudeTurns!==false : s.trackAutonomousClaudeTurns;
+      const configChanged=p.profile!==undefined&&JSON.stringify([s.profile,s.model,s.agentFile,s.skills,s.mcps,!!s.workspaceMcp,s.inline||{},s.trackAutonomousClaudeTurns])!==JSON.stringify([p.profile,String(p.model||""),p.agentFile||null,p.skills,p.mcps,!!p.workspaceMcp,p.inline||{},trackAutonomousClaudeTurns]);
       if(configChanged&&["busy","waiting","starting"].includes(s.status))throw new Error("Wait for the agent to finish its turn, or cancel it, before changing its configuration");
       const wasLive=live.has(s.id);
+      const workflowUpdate=meta.caller==="workflow-runner"&&configChanged;
+      const previous=workflowUpdate?{...s}:undefined;
+      if(workflowUpdate && s.profile.id===p.profile.id && s.contextSent && live.get(s.id)?.loadSession===false)
+        throw new Error("This provider cannot resume the conversation with new MCP settings.");
       if(configChanged&&wasLive)await stop(ctx,s.id);
       const newProvider=configChanged&&s.profile.id!==p.profile.id;
       const instructionsChanged=configChanged&&JSON.stringify([s.agentFile,s.skills,s.inline||{}])!==JSON.stringify([p.agentFile||null,p.skills,p.inline||{}]);
       s.name=name;
       if(typeof p.customName==="boolean")s.customName=p.customName;
       if(configChanged) {
-        Object.assign(s,{profile:p.profile,model:String(p.model||""),agentFile:p.agentFile||null,skills:p.skills,mcps:p.mcps,workspaceMcp:!!p.workspaceMcp,inline:p.inline&&typeof p.inline==="object"?p.inline:{},contextSent:newProvider||(instructionsChanged&&!s.sentDigests)?false:s.contextSent});
+        Object.assign(s,{profile:p.profile,model:String(p.model||""),agentFile:p.agentFile||null,skills:p.skills,mcps:p.mcps,workspaceMcp:!!p.workspaceMcp,inline:p.inline&&typeof p.inline==="object"?p.inline:{},trackAutonomousClaudeTurns,contextSent:newProvider||(instructionsChanged&&!s.sentDigests)?false:s.contextSent});
         if(newProvider){s.handoffPending=true;s.sessionId=null;s.configOptions=[];s.models=null;s.modes=null;s.usage=null;s.reasoning="";s.settings={};}
       }
-      await persist(ctx,s);
-      if(configChanged&&wasLive)await start(ctx,s);
+      if(workflowUpdate) {
+        try { await start(ctx,s,!newProvider); }
+        catch(e) {
+          Object.assign(s,previous,{status:"stopped",revision:s.revision});
+          if(wasLive)await start(ctx,s,true).catch(e=>ctx.log.warn("Restoring the previous workflow session failed",errMsg(e)));
+          else await persist(ctx,s);
+          throw e;
+        }
+      } else {
+        await persist(ctx,s);
+        if(configChanged&&wasLive)await start(ctx,s);
+      }
       return publicSession(s);
     }),
     /** Desktop gateway: replace the text of attached Library entries after a Library edit. No restart;

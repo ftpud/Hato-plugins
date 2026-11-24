@@ -119,6 +119,15 @@ export function activityLog(run: RunDetail, st: WorkflowBlockState, prefix: stri
 }
 
 /** Details of one block in a run: status, error, question/answer, permission, chat, output. */
+export function browserPreview(b: WorkflowBlock, key: string): UiNode {
+  const session = S.browsers.find(s => s.id === b.browser?.sessionId);
+  const placeholder = !session ? "Browser session unavailable" : session.error ||
+    (session.status === "running" ? "Waiting for the first frame…" : session.progress || "The browser is stopped.");
+  return { type: "column", key: `${key}:browser-preview`, height: 190, children: [
+    { type: "surface", key: `${key}:${session?.id || "missing"}`, surface: session?.surface ?? null, placeholder, grow: true },
+  ] };
+}
+
 export function blockRunView(run: RunDetail, b: WorkflowBlock, st: WorkflowBlockState & { outputChars?: number }, prefix: string, includeActivity = true): UiNode[] {
   const k = (s: string) => `${prefix}:${run.id}:${b.id}:${s}`;
   const chat = b.type === "chatbox" ? chatStatus(st) : null;

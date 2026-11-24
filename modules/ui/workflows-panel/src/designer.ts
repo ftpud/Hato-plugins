@@ -10,7 +10,7 @@ import {
 import { transferEdges } from "./transfers";
 import { CARD, blockColor, blockIcon, edgeStyle, statusColor, statusText } from "./style";
 import { S, ACTIVE, btn, call, field, icon, input, muted, shownRun, text } from "./state";
-import { blockStatus, blockRunView, statusLabel } from "./runs";
+import { browserPreview, blockStatus, blockRunView, statusLabel } from "./runs";
 
 // ---------------------------------------------------------------- draft editing
 
@@ -60,7 +60,7 @@ export function connect(from: string, to: string) {
   const a = block(from), b = block(to); if (!a || !b) return;
   let type: WorkflowEdgeType = S.mode;
   // Capability and tool-only targets are always used; non-agents cannot use.
-  if (["terminal_control", "task_controls", "mcp", "skill", "meeting"].includes(b.type) && isAgentBlock(a)) type = "use";
+  if (["terminal_control", "task_controls", "mcp", "browser", "skill", "meeting"].includes(b.type) && isAgentBlock(a)) type = "use";
   if (type === "use" && !isAgentBlock(a)) type = "follow";
   if (type === "path" && a.type !== "ai" && a.type !== "yes_no_prompt") type = "follow";
   let label: string | undefined;
@@ -125,6 +125,7 @@ function cardFor(b: WorkflowBlock): CanvasItem {
   const c = S.catalog;
   const detail = b.type === "script" || b.type === "run_app" ? (b.command || "").split("\n")[0]
     : b.type === "timer" ? `${b.seconds ?? 0} s` : b.type === "skill" && b.skillId ? b.skillId
+    : b.type === "browser" ? (b.browser?.name || b.browser?.sessionId || "Choose a session")
     : b.type === "mcp" ? (c?.mcps?.find((m: any) => m.id === b.mcp?.serverId)?.name || b.mcp?.serverId || "")
     : isAgentBlock(b) ? `${c?.profiles?.find((p: any) => p.id === b.profileId)?.name || b.provider || "Default provider"}${b.model ? ` · ${b.model}` : ""}`
     : (b.prompt || b.description || "").replace(/\s+/g, " ");
@@ -224,6 +225,17 @@ function blockInspector(b: WorkflowBlock): UiNode[] {
   if (b.type === "timer") out.push(field("secs", "Seconds", input(k("seconds"), b.seconds, "field")));
   if (b.type === "skill") out.push(field("skill", "Existing workspace skill", { type: "select", key: k("skillId"), value: b.skillId || "", action: "field",
     options: [{ value: "", label: "Custom instructions" }, ...(c?.skills || []).map((s: any) => ({ value: s.path, label: s.name }))] } as UiNode));
+  if (b.type === "browser") {
+    const options = [{ value: "", label: "Choose a session" }, ...S.browsers.map(s => ({
+      value: s.id, label: s.agentAccess ? s.name : `${s.name} (agent access off)`,
+    }))];
+    if (b.browser?.sessionId && !options.some(o => o.value === b.browser?.sessionId)) {
+      options.push({ value: b.browser.sessionId, label: `${b.browser.name || b.browser.sessionId} (unavailable)` });
+    }
+    out.push(field("browser", "Browser session", { type: "select", key: `browser:${b.id}`, value: b.browser?.sessionId || "", action: "browserSession", options }));
+    if (!S.browsers.length) out.push(muted("browser-help", "Create a session in the Browser panel."));
+    if (b.browser?.sessionId) out.push(browserPreview(b, "inspector"));
+  }
   if (b.type === "mcp") out.push(field("mcp", "MCP server", { type: "select", key: `mcp:${b.id}`, value: b.mcp?.serverId || "", action: "mcpServer", options: (c?.mcps || []).map((m: any) => ({ value: m.id, label: m.name })) } as UiNode));
   if (S.draft!.edges.filter(e => e.to === b.id && edgeType(e) !== "use").length > 1)
     out.push(field("join", "When several connections arrive", { type: "select", key: k("join"), value: b.join || "all", action: "field", options: [{ value: "all", label: "Wait for all active branches" }, { value: "any", label: "Run on the first one" }] } as UiNode));

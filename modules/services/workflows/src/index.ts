@@ -6,12 +6,20 @@ import type { AppModule, ModuleContext, DaemonTarget } from "@hato/sdk/types";
 import { isLibraryRef } from "@hato/sdk/library";
 import { daemonTargetFor, errMsg, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { exportMcpTools } from "@hato/sdk/mcp";
-import { INTERNAL_MCP_SERVERS, WORKFLOW_REFERENCE, WORKFLOW_RUNNER_VERSION, edgeType, isAgentBlock, isInternalMcp, normalizeDefinition, validateWorkflow, type WorkflowRunEnv, type WorkflowRun } from "@hato/sdk/workflows";
+import { INTERNAL_MCP_SERVERS, WORKFLOW_REFERENCE, WORKFLOW_RUNNER_VERSION, capabilityMcpServer, edgeType, isAgentBlock, isInternalMcp, normalizeDefinition, validateWorkflow, type WorkflowRunEnv, type WorkflowRun } from "@hato/sdk/workflows";
 import { advertisedChoices, providerChoiceKey } from "@hato/sdk/workflow-provider-options";
 import { agentActivity } from "@hato/sdk/persistent-agents";
 import { WORKFLOW_TEMPLATES } from "@hato/sdk/workflow-templates";
+import { exportSettings } from "@hato/sdk/settings";
 
 const prepared = new Map<string, Promise<{ target: DaemonTarget; bin: string; dir: string }>>();
+const autonomousTurnsSetting = "workflows.trackAutonomousClaudeTurns";
+let trackAutonomousClaudeTurns = true;
+function pushPreferences(ctx: ModuleContext, target: DaemonTarget) {
+  return ctx.host.daemon.request(target, "modules.call", {
+    target: "workflow-runner", method: "setPreferences", args: { trackAutonomousClaudeTurns }, timeoutMs: 15_000,
+  });
+}
 async function resolve(ctx: ModuleContext, workspaceId: string): Promise<WorkspaceDescriptor> {
   if (typeof workspaceId !== "string" || !workspaceId) throw new Error("Select a workspace first");
   return ctx.modules.call("workspace", "resolve", { workspaceId });
@@ -24,26 +32,34 @@ async function daemon(ctx: ModuleContext, d: WorkspaceDescriptor) {
       const target = await daemonTargetFor(ctx, d);
       const info = await ctx.host.daemon.ensure(target);
       const plugins = (await ctx.host.daemon.request(target, "plugins.list")).plugins as any[];
+      let agentUpgradePending = false;
       for (const id of ["internal-remote-mcp", "agent-runner"]) {
         if (plugins.find(p => p.id === id)?.active) {
           if (id !== "agent-runner") continue;
           const health = await ctx.host.daemon.request(target, "modules.call", { target: id, method: "health", args: {}, timeoutMs: 15000 }).catch(() => null);
-          if (health?.reasoning && health?.mcpActivity && health?.toolTitles) continue;
+          if (health?.workflowTurnBoundaries) continue;
           const agents = await ctx.host.daemon.request(target, "modules.call", { target: id, method: "list", args: {}, timeoutMs: 15000 }).catch(() => null);
-          if (!Array.isArray(agents) || agents.some((s: any) => ["ready", "starting", "busy", "waiting"].includes(s.status))) continue;
+          if (!Array.isArray(agents) || agents.some((s: any) => ["ready", "starting", "busy", "waiting"].includes(s.status))) {
+            agentUpgradePending = true;
+            continue;
+          }
         }
         const pushed = await ctx.host.daemon.request(target, "plugins.push", { id });
         if (!pushed.active) throw new Error(pushed.error || `${id} did not activate on the daemon`);
       }
       let push = !plugins.find(p => p.id === "workflow-runner")?.active;
+      let health;
       if (!push) {
-        const health = await ctx.host.daemon.request(target, "modules.call", { target: "workflow-runner", method: "health", args: {}, timeoutMs: 15000 }).catch(() => null);
+        health = await ctx.host.daemon.request(target, "modules.call", { target: "workflow-runner", method: "health", args: {}, timeoutMs: 15000 }).catch(() => null);
         push = !health || (health.version !== WORKFLOW_RUNNER_VERSION && !health.active && !health.apps);
       }
+      if (push && agentUpgradePending && health) push = false;
+      if (push && agentUpgradePending) throw new Error("The workflow runtime update is waiting for the workspace's agents to disconnect.");
       if (push) {
         const pushed = await ctx.host.daemon.request(target, "plugins.push", { id: "workflow-runner" });
         if (!pushed.active) throw new Error(pushed.error || "The workflow runtime did not activate on the daemon");
       }
+      if (push || health?.workflowTurnBoundaries) await pushPreferences(ctx, target);
       return { target, bin: info.bin, dir: info.dir };
     })();
     prepared.set(d.machineId, pending);
@@ -93,8 +109,8 @@ async function mcpEnv(ctx: ModuleContext, d: WorkspaceDescriptor, definition?: a
       if (agent && isAgentBlock(agent) && (agent.type === "chatbox" || edgeType(edge) === "use")) connected.add(edge.to);
     }
     const ids = [...new Set<string>(definition.blocks
-      .filter((b: any) => b.type === "mcp" && connected.has(b.id))
-      .map((b: any) => b.mcp?.serverId).filter(Boolean))];
+      .filter((b: any) => connected.has(b.id))
+      .map(capabilityMcpServer).filter(Boolean))];
     if (ids.includes("internal-local-mcp")) mcpConfigs["internal-local-mcp"] = await desktopEndpoint(ctx, d, definition.id);
     const configured = ids.filter(id => !isInternalMcp(id) && mcps.some((m: any) => m.id === id));
     if (configured.length) {
@@ -172,7 +188,19 @@ async function providerOptions(ctx: ModuleContext, d: WorkspaceDescriptor, a: an
 let mcp: ReturnType<typeof exportMcpTools> | null = null;
 const mod: AppModule = {
   id: "workflows", moduleApiVersion: 1,
-  activate(ctx) {
+  async activate(ctx) {
+    trackAutonomousClaudeTurns = (await ctx.modules.call("persistence", "settings.get", { key: autonomousTurnsSetting })) !== false;
+    exportSettings(ctx, () => [{ key: "workflows", title: "Workflows", group: "AI",
+      fields: [{ type: "toggle", key: "trackAutonomousClaudeTurns", label: "Track autonomous Claude turns in workflows",
+        description: "Track Claude wakeups as workflow activity. Turn off to keep full read and search tool cards. Applies from the next workflow prompt.",
+        value: trackAutonomousClaudeTurns }] }], async (_section, _key, value) => {
+      await ctx.modules.call("persistence", "settings.set", { key: autonomousTurnsSetting, value });
+      trackAutonomousClaudeTurns = value !== false;
+      await Promise.all([...prepared].map(async ([machineId, ready]) => {
+        try { await pushPreferences(ctx, (await ready).target); }
+        catch { if (prepared.get(machineId) === ready) prepared.delete(machineId); }
+      }));
+    });
     const object = (properties: any, required: string[] = []) => ({ type: "object", properties, required, additionalProperties: false });
     const scoped = async (scope: { workspaceId: string }) => resolve(ctx, scope.workspaceId);
     const targetWorkspace = { type: "string", description: "Target workspace ID: project:<projectId>:root or task:<taskId>." };

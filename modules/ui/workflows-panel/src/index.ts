@@ -3,6 +3,7 @@
 // (an OS window, or inline in the panel). Everything that runs lives in the daemon's workflow
 // runtime, reached through the `workflows` gateway.
 import type { AppModule, ModuleContext, UiNode } from "@hato/sdk/types";
+import type { BrowserState } from "@hato/sdk/browser";
 import { errMsg } from "@hato/sdk/runtime";
 import { blockingIssues, isStartBlock, isAgentBlock, normalizeDefinition, validateWorkflow, type WorkflowEdgeType } from "@hato/sdk/workflows";
 import { CARD } from "./style";
@@ -114,6 +115,11 @@ const mod: AppModule = {
       S.undo = prev.undo || []; S.redo = prev.redo || []; S.selection = prev.selection || null;
       S.logOpen = new Set(prev.logOpen || []); S.open = new Set(prev.open || []); S.cardRun = new Map(prev.cardRun || []);
     }
+    S.browsers = ctx.state.get<BrowserState>("browser.state")?.sessions ?? [];
+    ctx.state.watch("browser.state", (state: BrowserState) => {
+      S.browsers = state?.sessions ?? [];
+      if (S.visible || S.designerOpen) ctx.ui.invalidate();
+    });
     ctx.state.watch("workspace.selected", (next: any) => {
       if (next?.id === S.ws?.id) return;
       if (S.ws?.id) workspaceDrafts.set(S.ws.id, draftState());
@@ -346,6 +352,14 @@ const mod: AppModule = {
         case "appAct": { const [, id, actName] = key.split(":") as [string, string, any]; const b = block(id); if (!b) return;
           mutate(() => { const all = ["start", "status", "kill", "tail"] as const; const cur = new Set(b.app?.actions?.length ? b.app.actions : all); if (cur.has(actName)) cur.delete(actName); else cur.add(actName); b.app = { ...(b.app || { name: b.id }), actions: all.filter(x => cur.has(x)) }; });
           ctx.ui.invalidate(); return; }
+        case "browserSession": {
+          const b = block(key.split(":")[1]);
+          if (!b) return;
+          const session = S.browsers.find(s => s.id === value);
+          mutate(() => { b.browser = session ? { sessionId: session.id, name: session.name } : undefined; });
+          ctx.ui.invalidate();
+          return;
+        }
         case "mcpServer": { const id = key.split(":")[1]; const b = block(id); if (!b) return; mutate(() => { b.mcp = { serverId: value }; }); ctx.ui.invalidate(); return; }
         case "edgeField": { const [, id, f] = key.split(":"); const e = edge(id); if (!e) return;
           mutate(() => { if (f === "timeoutMs") { const n = Number(value); if (Number.isFinite(n) && n > 0) e.timeoutMs = Math.round(n * 1000); else delete e.timeoutMs; } else if (f === "type") { e.type = value as WorkflowEdgeType; if (value !== "path") delete e.label; else e.label ||= "route-1"; } else setField(e, f, value); }, `${id}:${f}`);

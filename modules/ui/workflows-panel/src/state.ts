@@ -1,6 +1,7 @@
 // Shared panel state. One mutable object so the library, run and designer views can be split
 // across files; it is snapshotted on module reload.
 import type { ChatMessage, ModuleContext, UiNode } from "@hato/sdk/types";
+import type { BrowserSessionView } from "@hato/sdk/browser";
 import type { ProviderChoices } from "@hato/sdk/workflow-provider-options";
 import type { WorkflowBlockState, WorkflowDefinition, WorkflowEdgeType, WorkflowIssue, WorkflowRun } from "@hato/sdk/workflows";
 
@@ -10,6 +11,7 @@ export interface RunSummary { id: string; workflowId: string; workflowName: stri
 export type RunDetail = WorkflowRun & { blocks: (WorkflowBlockState & { outputChars?: number })[] };
 
 export const S = {
+  browsers: [] as BrowserSessionView[],
   ws: null as any, catalog: null as any, list: [] as Summary[], visible: false, epoch: 0,
   // library
   filter: "", newTemplate: "blank",

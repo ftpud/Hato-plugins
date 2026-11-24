@@ -109,6 +109,13 @@ function makePeer(ctx: ModuleContext, conn: McpConn) {
         conn.inflight++;
         try {
           const r = await callTool(ctx, conn, params.name, params.arguments || {});
+          // Module commands may return MCP content blocks (e.g. screenshots) in `mcpContent`.
+          if (r && typeof r === "object" && Array.isArray((r as any).mcpContent)) {
+            const { mcpContent, ...rest } = r as any;
+            const content = mcpContent.filter((c: any) => (c?.type === "text" && typeof c.text === "string") || (c?.type === "image" && typeof c.data === "string" && /^image\/(png|jpeg|webp|gif)$/.test(c.mimeType)))
+              .map((c: any) => c.type === "text" ? { type: "text", text: c.text } : { type: "image", data: c.data, mimeType: c.mimeType });
+            return { content: content.length ? content : [{ type: "text", text: JSON.stringify(rest, null, 2) }], structuredContent: Object.keys(rest).length ? rest : undefined, isError: false };
+          }
           return { content: [{ type: "text", text: typeof r === "string" ? r : JSON.stringify(r, null, 2) }], structuredContent: typeof r === "object" && r !== null && !Array.isArray(r) ? r : undefined, isError: !!(r && typeof r === "object" && (r as any).ok === false) };
         } catch (e: any) {
           if (e && e.rpcCode) throw e;

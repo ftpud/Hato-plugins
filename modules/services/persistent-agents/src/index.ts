@@ -484,7 +484,15 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     if(isAutoAgentName(v.session)){const name=autoAgentName(v.session);if(name!==v.session.name){await invoke(ctx,String(a.workspaceId),"update",{id:v.session.id,patch:{name,customName:false}}).catch(()=>{});v.session={...v.session,name};}}
     return v;
   },
-  async send(ctx,a) {await owned(ctx,a);const images=imageAttachments(a.images);return invoke(ctx,a.workspaceId,"send",{id:a.id,text:a.text,steer:!!a.steer,...(images.length?{images}:{})});},
+  async send(ctx,a) {
+    const {session}=await owned(ctx,a),images=imageAttachments(a.images);
+    if(session.workflow) {
+      const t=await target(ctx,a.workspaceId);
+      return ctx.host.daemon.request(t,"modules.call",{target:"workflow-runner",method:"promptSession",
+        args:{...session.workflow,workspaceId:a.workspaceId,id:a.id,text:a.text,images},timeoutMs:180000});
+    }
+    return invoke(ctx,a.workspaceId,"send",{id:a.id,text:a.text,steer:!!a.steer,...(images.length?{images}:{})});
+  },
   /** Replace this machine's agent runtime with the desktop's current build, even while agents run.
    *  Agents that were connected are reconnected afterwards (their provider sessions resume). */
   async updateRuntime(ctx,a) {

@@ -8,7 +8,7 @@ import { uiIcons } from "@hato/sdk/ui-icons";
 import { isStartBlock, type WorkflowDefinition } from "@hato/sdk/workflows";
 import { blockColor, blockIcon, statusColor } from "./style";
 import { S, ACTIVE, btn, card, icon, muted, runsOf, shownRun, text, type Summary } from "./state";
-import { activityLog, blockRunView, pausedBlocks, preview, statusLabel } from "./runs";
+import { activityLog, browserPreview, blockRunView, pausedBlocks, preview, statusLabel } from "./runs";
 
 export const definitionOf = (wf: string): WorkflowDefinition | undefined => (S.selectedId === wf && S.draft) || S.defs.get(wf);
 
@@ -129,6 +129,7 @@ function workflowCard(w: Summary, maximized: boolean): UiNode {
       ] },
       ...(sb.prompt || sb.command ? [muted("p", (sb.command || sb.prompt).slice(0, 400))] : []),
     ], { style: { background: "background" } }));
+    if (sb.type === "browser" && sb.browser?.sessionId) children.push(browserPreview(sb, `detail:${sb.id}`));
     if (run && st) children.push(activityLog(run, st, "detail"));
   }
   // The expanded card must own a bounded scroll viewport. Otherwise its fixed preview

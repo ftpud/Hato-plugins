@@ -9,7 +9,7 @@ export const CARD = { width: 228, height: 88, grid: 24, snap: 12 };
 export const blockColor: Record<WorkflowBlockType, string> = {
   start_button: "#2f9e5b", start_input: "#2f9e5b", ai: "#7c6cf0", chatbox: "#4f8fde", skill: "#d08b2c", text: "#6f8f5f", markdown: "#6f8f5f",
   script: "#c0603f", run_app: "#c0603f", timer: "#8a8f99", user_prompt: "#c99a12", yes_no_prompt: "#c99a12", meeting: "#3aa98e",
-  terminal_control: "#7d7d7d", task_controls: "#7d7d7d", mcp: "#7d7d7d",
+  terminal_control: "#7d7d7d", task_controls: "#7d7d7d", mcp: "#7d7d7d", browser: "#386ea0",
 };
 
 export const blockIcon: Record<string, string> = {
@@ -28,6 +28,7 @@ export const blockIcon: Record<string, string> = {
   meeting: svg("<circle cx='9' cy='8' r='3'/><circle cx='17' cy='9' r='2.5'/><path d='M3 20a6 6 0 0 1 12 0M14.5 15a5 5 0 0 1 6.5 5'/>"),
   terminal_control: svg("<rect x='3' y='4' width='18' height='16' rx='2'/><path d='m7 9 3 3-3 3M13 15h4'/>"),
   task_controls: svg("<circle cx='6' cy='6' r='2'/><circle cx='18' cy='18' r='2'/><path d='M6 8v6a4 4 0 0 0 4 4h6M18 16V6'/>"),
+  browser: svg("<circle cx='12' cy='12' r='9'/><path d='M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18Z'/>"),
   mcp: svg("<path d='M9 3v4m6-4v4M7 7h10v4a5 5 0 0 1-10 0V7Zm5 9v5'/>"),
   workflow: svg("<rect x='3' y='3' width='6' height='6' rx='1'/><rect x='15' y='15' width='6' height='6' rx='1'/><rect x='15' y='3' width='6' height='6' rx='1'/><path d='M9 6h6M18 9v6M6 9v6a3 3 0 0 0 3 3h6'/>"),
   play: svg("<polygon points='6 4 20 12 6 20 6 4'/>"),
