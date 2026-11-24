@@ -5,10 +5,27 @@ import { errMsg } from "@hato/sdk/runtime";
 import { DEFAULT_VIEWPORT, locationLabel, type BrowserNetworkEntry, type BrowserSessionSpec, type BrowserSessionView, type BrowserStatus } from "@hato/sdk/browser";
 import { Cdp } from "./cdp";
 import { devtoolsPort, endpointUrl, findBrowser, forward, installHeadlessShell, launch, machineFor, processKey, type Launched, type Machine } from "./launch";
-import { CLEAR_FN, ELEMENTS_FN, LOCATE_FN, TEXT_FN, WAIT_FN } from "./scripts";
+import { CLEAR_FN, ELEMENTS_FN, LOCATE_FN, OPTION_FN, PAGE_STATE_FN, QUIET_INSTALL, READBACK_FN, SCROLL_FN, SELECT_FN, TEXT_FN, WAIT_FN } from "./scripts";
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const NETWORK_LIMIT = 1000;
+const CONSOLE_LIMIT = 500;
+/** Request types that mean "the page is still fetching something it will render". */
+const PENDING_TYPES = new Set(["Document", "XHR", "Fetch"]);
+
+interface Located {
+  x: number; y: number; matches?: number; rect?: { left: number; top: number; width: number; height: number };
+  target?: { tag: string; name: string; ref: number; [k: string]: unknown } | null; editable?: boolean;
+  coveredBy?: { tag: string; name: string; ref: number }; hidden?: boolean; point?: boolean;
+}
+
+export interface ConsoleEntry { seq: number; tab: string; level: string; text: string; at: number; url?: string; line?: number }
+
+/** How an agent points at something: ref, selector, visible name, field label or coordinates (optionally from a screenshot). */
+export interface Target {
+  ref?: number; selector?: string; name?: string; label?: string; role?: string; nth?: number;
+  x?: number; y?: number; scale?: number; originX?: number; originY?: number;
+}
 
 interface Tab { id: string; session?: string; url: string; title: string; loading: boolean; openerId?: string; history?: { back: boolean; forward: boolean } }
 
@@ -71,8 +88,14 @@ export class BrowserSession {
   agent?: { at: number; text: string; caller?: string };
   network: BrowserNetworkEntry[] = [];
   netSeq = 0;
+  consoleLog: ConsoleEntry[] = [];
+  consoleSeq = 0;
+  /** Network sequence at the start of the latest agent action, so waits can match requests it caused. */
+  actionSeq = 0;
   executable?: string;
   private netIndex = new Map<string, BrowserNetworkEntry>();
+  private pending = new Map<string, { tab: string; at: number }>();
+  private lastSeen = new Map<string, { url: string; title: string }>();
   private machine: Machine | null = null;
   private launched: Launched | null = null;
   private wsUrl = "";
@@ -302,6 +325,15 @@ export class BrowserSession {
       cdp.send("Page.handleJavaScriptDialog", { accept: true, promptText: p.defaultPrompt || "" }, s).catch(() => {});
       this.agent = { at: Date.now(), text: `Dialog: ${String(p.message || "").slice(0, 120)}` }; this.changed();
     });
+    // Console and uncaught errors
+    const note = (level: string, text: string, s?: string, extra: { url?: string; line?: number } = {}) => {
+      this.consoleLog.push({ seq: ++this.consoleSeq, tab: this.tabOf(s) || "", level, text: text.slice(0, 2000), at: Date.now(), ...extra });
+      if (this.consoleLog.length > CONSOLE_LIMIT) this.consoleLog.shift();
+    };
+    const show = (a: any) => a.value !== undefined ? (typeof a.value === "string" ? a.value : JSON.stringify(a.value)) : a.description || a.unserializableValue || a.type;
+    cdp.on("Runtime.consoleAPICalled", (p, s) => note(p.type === "warning" ? "warn" : p.type, (p.args || []).map(show).join(" "), s, { url: p.stackTrace?.callFrames?.[0]?.url, line: p.stackTrace?.callFrames?.[0]?.lineNumber }));
+    cdp.on("Runtime.exceptionThrown", (p, s) => { const d = p.exceptionDetails || {}; note("exception", d.exception?.description || d.text || "Uncaught exception", s, { url: d.url, line: d.lineNumber }); });
+    cdp.on("Log.entryAdded", (p, s) => note(p.entry?.level === "warning" ? "warn" : p.entry?.level || "log", `${p.entry?.text || ""}${p.entry?.url ? ` (${p.entry.url})` : ""}`, s, { url: p.entry?.url, line: p.entry?.lineNumber }));
     // Network log
     cdp.on("Network.requestWillBeSent", (p, s) => {
       const tab = this.tabOf(s) || "";
@@ -311,6 +343,7 @@ export class BrowserSession {
         startedAt: Math.round((p.wallTime || Date.now() / 1000) * 1000), requestHeaders: p.request.headers, postData: typeof p.request.postData === "string" ? p.request.postData.slice(0, 20_000) : undefined };
       Object.defineProperty(e, "_ts", { value: p.timestamp, enumerable: false, writable: true });
       this.netIndex.set(p.requestId, e);
+      if (PENDING_TYPES.has(p.type)) this.pending.set(p.requestId, { tab, at: Date.now() });
       this.network.push(e);
       if (this.network.length > NETWORK_LIMIT) { const old = this.network.shift()!; if (this.netIndex.get(old.requestId) === old) this.netIndex.delete(old.requestId); }
       this.changed();
@@ -322,10 +355,12 @@ export class BrowserSession {
       this.netSeq++; this.changed();
     });
     cdp.on("Network.loadingFinished", p => {
+      this.pending.delete(p.requestId);
       const e = this.netIndex.get(p.requestId); if (!e) return;
       e.encodedBytes = p.encodedDataLength; e.durationMs = Math.round((p.timestamp - (e as any)._ts) * 1000); this.netSeq++; this.changed();
     });
     cdp.on("Network.loadingFailed", p => {
+      this.pending.delete(p.requestId);
       const e = this.netIndex.get(p.requestId); if (!e) return;
       e.failed = true; e.error = p.canceled ? "canceled" : p.errorText || p.blockedReason || "failed"; e.durationMs = Math.round((p.timestamp - (e as any)._ts) * 1000); this.netSeq++; this.changed();
     });
@@ -342,6 +377,9 @@ export class BrowserSession {
     await Promise.all([
       cdp.send("Page.enable", {}, sessionId),
       cdp.send("Network.enable", { maxPostDataSize: 20_000 }, sessionId),
+      cdp.send("Runtime.enable", {}, sessionId).catch(() => {}),
+      cdp.send("Log.enable", {}, sessionId).catch(() => {}),
+      cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: QUIET_INSTALL }, sessionId).catch(() => {}),
       this.spec.headed ? Promise.resolve() : cdp.send("Emulation.setDeviceMetricsOverride", { width: vp.width, height: vp.height, deviceScaleFactor: 1, mobile: false }, sessionId),
       cdp.send("Runtime.runIfWaitingForDebugger", {}, sessionId).catch(() => {}),
     ]);
@@ -447,16 +485,17 @@ export class BrowserSession {
 
   async navigate(url: string, tabId?: string, waitMs = 15_000) {
     const cdp = this.need(), tab = this.tab(tabId);
+    this.actionSeq = this.netSeq;
     const loaded = this.waitLoad(tab.session!, waitMs);
     const r = await cdp.send("Page.navigate", { url: this.normalizeUrl(url) }, tab.session);
     if (r.errorText) throw new Error(`Navigation failed: ${r.errorText}`);
     await loaded;
-    return this.where(tab.id);
+    return this.observe(tab.id);
   }
 
   async history(action: "back" | "forward" | "reload" | "stop", tabId?: string) {
     const cdp = this.need(), tab = this.tab(tabId);
-    if (action === "reload") { const loaded = this.waitLoad(tab.session!, 15_000); await cdp.send("Page.reload", {}, tab.session); await loaded; return this.where(tab.id); }
+    if (action === "reload") { const loaded = this.waitLoad(tab.session!, 15_000); this.actionSeq = this.netSeq; await cdp.send("Page.reload", {}, tab.session); await loaded; return this.observe(tab.id); }
     if (action === "stop") { await cdp.send("Page.stopLoading", {}, tab.session); return this.where(tab.id); }
     const h = await cdp.send("Page.getNavigationHistory", {}, tab.session);
     const index = h.currentIndex + (action === "back" ? -1 : 1);
@@ -464,7 +503,7 @@ export class BrowserSession {
     const loaded = this.waitLoad(tab.session!, 10_000);
     await cdp.send("Page.navigateToHistoryEntry", { entryId: h.entries[index].id }, tab.session);
     await loaded;
-    return this.where(tab.id);
+    return this.observe(tab.id);
   }
 
   where(tabId?: string) {
@@ -525,49 +564,124 @@ export class BrowserSession {
     return r.result?.value;
   }
 
+  private pendingCount(tabId: string) {
+    const now = Date.now();
+    let n = 0;
+    for (const [id, p] of this.pending) {
+      if (now - p.at > 20_000) { this.pending.delete(id); continue; } // long-polls and lost events do not block "settled"
+      if (p.tab === tabId) n++;
+    }
+    return n;
+  }
+
+  /** Is the page done changing? Combines document state, in-flight XHR/fetch, DOM quiet time and loading indicators. */
+  async readiness(tabId?: string, quietMs = 500) {
+    const tab = this.tab(tabId);
+    const page = await this.evaluate(PAGE_STATE_FN, [], tab.id).catch(() => null);
+    const pendingRequests = this.pendingCount(tab.id);
+    const quiet = page?.quietMs ?? 0;
+    const settled = !!page && page.readyState === "complete" && !tab.loading && pendingRequests === 0 && !page.busy && quiet >= quietMs;
+    return { settled, readyState: page?.readyState ?? "unknown", pendingRequests, busy: !!page?.busy, ...(page?.busyReason ? { busyReason: page.busyReason as string } : {}),
+      quietMs: Math.round(quiet), focused: page?.focused ?? null };
+  }
+
+  private mark(tab: Tab) { this.lastSeen.set(tab.id, { url: tab.url, title: tab.title }); }
+
+  /** Post-action state: where we are, whether URL/title changed since the previous call, the focused element and readiness. */
+  async observe(tabId?: string) {
+    const tab = this.tab(tabId);
+    const { focused, ...page } = await this.readiness(tab.id, 300);
+    const prev = this.lastSeen.get(tab.id);
+    this.mark(tab);
+    return { ...this.where(tab.id), changed: { url: !!prev && prev.url !== tab.url, title: !!prev && prev.title !== tab.title }, focused, page };
+  }
+
   async text(scope: "page" | "viewport", selector?: string, maxChars = 20_000, tabId?: string) {
     const r = await this.evaluate(TEXT_FN, [scope, selector || null, Math.min(Math.max(maxChars, 200), 200_000)], tabId);
     if (r?.error) throw new Error(r.error);
+    const tab = this.tab(tabId);
+    const { focused: _focused, ...ready } = await this.readiness(tab.id);
+    this.mark(tab);
+    return { ...this.where(tabId), ...r, contentLoaded: ready.settled, ready,
+      ...(ready.settled ? {} : { warning: "The page is not settled yet, so this text may be partial (loading spinners, pending requests or recent DOM changes). Use browser_wait with no arguments to wait until it settles, then read again." }) };
+  }
+
+  /** Interactive elements. `fields` lists form controls only, with label, value and checked/selected/disabled state. */
+  async elements(all = false, max = 200, tabId?: string, opts: { fields?: boolean; selector?: string } = {}) {
+    const r = await this.evaluate(ELEMENTS_FN, [all, Math.min(Math.max(max, 1), 1000), !!opts.fields, opts.selector || null], tabId);
+    if (r?.error) throw new Error(r.error);
+    this.mark(this.tab(tabId));
     return { ...this.where(tabId), ...r };
   }
 
-  async elements(all = false, max = 200, tabId?: string) {
-    const r = await this.evaluate(ELEMENTS_FN, [all, Math.min(Math.max(max, 1), 1000)], tabId);
-    return { ...this.where(tabId), ...r };
-  }
-
-  async screenshot(opts: { quality?: "low" | "full"; fullPage?: boolean; tab?: string }) {
+  async screenshot(opts: Target & { quality?: "tiny" | "low" | "full"; fullPage?: boolean; tab?: string; maxWidth?: number; region?: { x: number; y: number; width: number; height: number } }) {
     const cdp = this.need(), tab = this.tab(opts.tab);
-    const low = opts.quality !== "full";
+    const quality = opts.quality === "full" ? "full" : opts.quality === "tiny" ? "tiny" : "low";
+    let crop: { x: number; y: number; width: number; height: number } | undefined = opts.region;
+    if (!crop && (opts.ref || opts.selector || opts.name || opts.label)) {
+      const p = await this.locate(opts, tab.id);
+      if (!p.rect) throw new Error("Could not measure the element to crop to");
+      const pad = 8;
+      crop = { x: p.rect.left - pad, y: p.rect.top - pad, width: p.rect.width + pad * 2, height: p.rect.height + pad * 2 };
+    }
     const metrics = await cdp.send("Page.getLayoutMetrics", {}, tab.session);
     const vv = metrics.cssVisualViewport || metrics.visualViewport || { clientWidth: this.viewport.width, clientHeight: this.viewport.height, pageX: 0, pageY: 0 };
     const content = metrics.cssContentSize || metrics.contentSize;
-    const width = opts.fullPage ? content.width : vv.clientWidth, height = opts.fullPage ? Math.min(content.height, 16_000) : vv.clientHeight;
-    const scale = low ? Math.min(1, 960 / Math.max(width, 1)) : 1;
-    const clip = { x: opts.fullPage ? 0 : vv.pageX, y: opts.fullPage ? 0 : vv.pageY, width, height, scale };
-    const r = await cdp.send("Page.captureScreenshot", { format: low ? "jpeg" : "png", ...(low ? { quality: 55 } : {}), clip, captureBeyondViewport: !!opts.fullPage }, tab.session, 60_000);
-    return { data: r.data as string, mimeType: low ? "image/jpeg" : "image/png", width: Math.round(width * scale), height: Math.round(height * scale), cssWidth: width, cssHeight: height, scale, ...this.where(tab.id) };
+    let x = vv.pageX, y = vv.pageY, width = vv.clientWidth, height = vv.clientHeight, origin = { x: 0, y: 0 };
+    if (crop) {
+      const left = Math.max(0, crop.x), top = Math.max(0, crop.y);
+      width = Math.max(1, Math.min(vv.clientWidth, crop.x + crop.width) - left); height = Math.max(1, Math.min(vv.clientHeight, crop.y + crop.height) - top);
+      x = vv.pageX + left; y = vv.pageY + top; origin = { x: Math.round(left), y: Math.round(top) };
+    } else if (opts.fullPage) { x = 0; y = 0; width = content.width; height = Math.min(content.height, 16_000); }
+    const limit = opts.maxWidth && opts.maxWidth > 0 ? opts.maxWidth : quality === "tiny" ? 480 : quality === "low" ? 960 : Infinity;
+    const scale = Math.min(1, limit / Math.max(width, 1));
+    const jpeg = quality !== "full";
+    const r = await cdp.send("Page.captureScreenshot", { format: jpeg ? "jpeg" : "png", ...(jpeg ? { quality: quality === "tiny" ? 40 : 55 } : {}),
+      clip: { x, y, width, height, scale }, captureBeyondViewport: !!opts.fullPage && !crop }, tab.session, 60_000);
+    return { data: r.data as string, mimeType: jpeg ? "image/jpeg" : "image/png", width: Math.round(width * scale), height: Math.round(height * scale), cssWidth: width, cssHeight: height, scale, origin,
+      coordinates: "Viewport CSS px = origin + picture px / scale. Or pass picture px to click/hover/scroll with scale (and originX/originY).", ...this.where(tab.id) };
   }
 
-  private async locate(target: { x?: number; y?: number; ref?: number; selector?: string }, tabId?: string) {
-    if (typeof target.x === "number" && typeof target.y === "number") return { x: target.x, y: target.y, editable: undefined as boolean | undefined };
-    if (!target.ref && !target.selector) throw new Error("Give x/y coordinates, an element ref (from browser_elements) or a CSS selector");
-    const r = await this.evaluate(LOCATE_FN, [target.ref || null, target.selector || null], tabId);
+  /** Resolve a target to viewport coordinates, with a description of what is there. */
+  private async locate(target: Target, tabId?: string, scroll = true): Promise<Located> {
+    const scale = target.scale && target.scale > 0 ? target.scale : 1;
+    const point = typeof target.x === "number" && typeof target.y === "number" ? { x: (target.originX ?? 0) + target.x / scale, y: (target.originY ?? 0) + target.y / scale } : null;
+    if (!point && !target.ref && !target.selector && !target.name && !target.label) {
+      throw new Error("Give x/y coordinates, an element ref (from browser_elements), a CSS selector, or a visible name/label");
+    }
+    const spec = { ref: target.ref || null, selector: target.selector || null, name: target.name || null, label: target.label || null, role: target.role || null, nth: target.nth ?? 0, ...(point ?? {}) };
+    let r: any;
+    try { r = await this.evaluate(LOCATE_FN, [spec, scroll], tabId); }
+    catch (e) { if (point) return { x: point.x, y: point.y }; throw e; }
     if (r?.error) throw new Error(r.error);
-    await sleep(120);
-    return r as { x: number; y: number; editable?: boolean };
+    if (scroll && !point) await sleep(120);
+    return r as Located;
   }
 
+  private targetInfo(p: Located) {
+    const warnings: string[] = [];
+    if (p.matches && p.matches > 1) warnings.push(`${p.matches} elements matched; used the first. Pass ref (from browser_elements) or nth to choose another.`);
+    if (p.coveredBy) warnings.push(`The target is covered by another element (${p.coveredBy.tag} "${p.coveredBy.name}"); a click lands there instead.`);
+    if (p.hidden) warnings.push("The target has no visible size.");
+    return { target: p.target, ...(p.matches && p.matches > 1 ? { matches: p.matches } : {}), ...(p.coveredBy ? { coveredBy: p.coveredBy } : {}), ...(warnings.length ? { warning: warnings.join(" ") } : {}) };
+  }
+
+  /** After an action: let navigation and the requests it triggered finish (bounded). */
   private async settle(tabId?: string) {
     await sleep(250);
     const tab = this.tabs.get(tabId || this.activeTab || "");
-    for (let i = 0; i < 40 && tab?.loading; i++) await sleep(125);
+    if (!tab) return;
+    const start = Date.now();
+    while ((tab.loading && Date.now() - start < 5000) || (this.pendingCount(tab.id) > 0 && Date.now() - start < 3000)) await sleep(125);
   }
 
-  async click(t: { x?: number; y?: number; ref?: number; selector?: string; button?: "left" | "right" | "middle"; clickCount?: number; tab?: string; modifiers?: any }) {
+  async click(t: Target & { button?: "left" | "right" | "middle"; clickCount?: number; tab?: string; modifiers?: any; dryRun?: boolean }) {
     const cdp = this.need(), tab = this.tab(t.tab);
     if (t.tab && t.tab !== this.activeTab) await this.activate(t.tab);
     const p = await this.locate(t, tab.id);
+    const info = this.targetInfo(p);
+    if (t.dryRun) return { dryRun: true, wouldClick: { x: Math.round(p.x), y: Math.round(p.y) }, ...info, ...this.where(tab.id) };
+    this.actionSeq = this.netSeq;
     await this.glide(p.x, p.y, true);
     const button = t.button || "left", clickCount = Math.min(Math.max(t.clickCount || 1, 1), 3), modifiers = modBits(t.modifiers);
     await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: p.x, y: p.y, modifiers }, tab.session);
@@ -576,66 +690,181 @@ export class BrowserSession {
       await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: p.x, y: p.y, button, buttons: 0, clickCount: i, modifiers }, tab.session);
     }
     await this.settle(tab.id);
-    return { clicked: { x: Math.round(p.x), y: Math.round(p.y) }, ...this.where() };
+    return { clicked: { x: Math.round(p.x), y: Math.round(p.y) }, ...info, ...await this.observe(tab.id) };
   }
 
-  async hover(t: { x?: number; y?: number; ref?: number; selector?: string; tab?: string }) {
+  async hover(t: Target & { tab?: string }) {
     const cdp = this.need(), tab = this.tab(t.tab);
     const p = await this.locate(t, tab.id);
     await this.glide(p.x, p.y, false);
     await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: p.x, y: p.y }, tab.session);
-    return { hovered: { x: Math.round(p.x), y: Math.round(p.y) }, ...this.where(tab.id) };
+    return { hovered: { x: Math.round(p.x), y: Math.round(p.y) }, ...this.targetInfo(p), ...this.where(tab.id) };
   }
 
-  async type(t: { text: string; x?: number; y?: number; ref?: number; selector?: string; clear?: boolean; submit?: boolean; tab?: string; delayMs?: number }) {
+  /** What is at a point or behind a ref/selector/name, and is it covered? Never acts on the page. */
+  async inspect(t: Target & { tab?: string }) {
+    const tab = this.tab(t.tab);
+    const p = await this.locate(t, tab.id, false);
+    return { point: { x: Math.round(p.x), y: Math.round(p.y) }, ...(p.rect ? { rect: p.rect } : {}), ...this.targetInfo(p), ...this.where(tab.id) };
+  }
+
+  async type(t: Target & { text: string; clear?: boolean; submit?: boolean; tab?: string; delayMs?: number; dryRun?: boolean }) {
     const cdp = this.need(), tab = this.tab(t.tab);
-    if (t.ref || t.selector || typeof t.x === "number") await this.click({ x: t.x, y: t.y, ref: t.ref, selector: t.selector, tab: tab.id });
-    if (t.clear) await this.evaluate(CLEAR_FN, [t.ref || null, t.selector || null], tab.id);
     const text = String(t.text ?? "");
+    const hasTarget = !!(t.ref || t.selector || t.name || t.label || typeof t.x === "number");
+    // A visible name given for typing means the field with that label.
+    const target: Target = { ref: t.ref, selector: t.selector, label: t.label ?? t.name, role: t.role, nth: t.nth, x: t.x, y: t.y, scale: t.scale, originX: t.originX, originY: t.originY };
+    if (t.dryRun) return { ...(hasTarget ? await this.click({ ...target, tab: tab.id, dryRun: true }) : this.where(tab.id)), dryRun: true, wouldType: text.length };
+    if (hasTarget) await this.click({ ...target, tab: tab.id });
+    this.actionSeq = this.netSeq;
+    if (t.clear) {
+      const ok = await this.evaluate(CLEAR_FN, [null], tab.id).catch(() => false);
+      if (!ok) await this.pressKey("a", { meta: true }, tab.id);
+    }
     const delay = Math.min(Math.max(t.delayMs ?? 12, 0), 200);
     if (text.length > 200 || delay === 0) await cdp.send("Input.insertText", { text }, tab.session);
     else for (const ch of text) {
-      if (ch === "\n") { await this.press("Enter", {}, tab.id); continue; }
+      if (ch === "\n") { await this.pressKey("Enter", {}, tab.id); continue; }
       const def = keyDef(ch) || { key: ch, code: "", keyCode: 0 };
       await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: def.key, code: def.code, windowsVirtualKeyCode: def.keyCode, text: ch, unmodifiedText: ch }, tab.session);
       await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: def.key, code: def.code, windowsVirtualKeyCode: def.keyCode }, tab.session);
       if (delay) await sleep(delay);
     }
-    if (t.submit) await this.press("Enter", {}, tab.id);
+    // Read the field back before submitting so dropped or garbled input (a lagging page) is visible.
+    const back = await this.evaluate(READBACK_FN, [], tab.id).catch(() => null);
+    const squash = (v: string) => v.replace(/\s+/g, " ").trim();
+    const verified = back && typeof back.value === "string" ? (t.clear ? squash(back.value) === squash(text) : squash(back.value).endsWith(squash(text))) : undefined;
+    if (t.submit) await this.pressKey("Enter", {}, tab.id);
     await this.settle(tab.id);
-    return { typed: text.length, ...this.where(tab.id) };
+    return { typed: text.length, ...(back && typeof back.value === "string" ? { value: back.value.slice(0, 200) } : {}), ...(verified === undefined ? {} : { verified }),
+      ...(verified === false ? { warning: "The field does not contain the typed text; the page may have lagged or dropped input. Read the value, wait for the page to settle and retype if needed." } : {}),
+      ...await this.observe(tab.id) };
   }
 
-  async press(key: string, modifiers: { alt?: boolean; ctrl?: boolean; meta?: boolean; shift?: boolean } = {}, tabId?: string) {
+  private async pressKey(key: string, modifiers: { alt?: boolean; ctrl?: boolean; meta?: boolean; shift?: boolean } = {}, tabId?: string, holdMs = 0) {
     const cdp = this.need(), tab = this.tab(tabId);
-    const def = keyDef(key);
-    if (!def) throw new Error(`Unknown key ${key}; use names like Enter, Tab, Escape, ArrowDown, PageDown or a single character`);
-    const plain = !modifiers.ctrl && !modifiers.meta && !modifiers.alt;
+    let name = key;
+    const mods = { ...modifiers };
+    const MOD: Record<string, "ctrl" | "meta" | "alt" | "shift"> = { ctrl: "ctrl", control: "ctrl", cmd: "meta", command: "meta", meta: "meta", alt: "alt", option: "alt", shift: "shift" };
+    while (name.length > 1 && name.includes("+")) {
+      const head = MOD[name.slice(0, name.indexOf("+")).toLowerCase()];
+      if (!head) break;
+      mods[head] = true; name = name.slice(name.indexOf("+") + 1);
+    }
+    const def = keyDef(name);
+    if (!def) throw new Error(`Unknown key ${key}; use names like Enter, Tab, Escape, ArrowDown, PageDown or a single character, optionally with modifiers (Shift+Tab, Ctrl+A)`);
+    const plain = !mods.ctrl && !mods.meta && !mods.alt;
     const text = plain ? def.text : undefined;
     await cdp.send("Input.dispatchKeyEvent", { type: text ? "keyDown" : "rawKeyDown", key: def.key, code: def.code, windowsVirtualKeyCode: def.keyCode, text, unmodifiedText: text,
-      modifiers: modBits(modifiers), commands: editCommands(def, modifiers) }, tab.session);
-    await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: def.key, code: def.code, windowsVirtualKeyCode: def.keyCode, modifiers: modBits(modifiers) }, tab.session);
-    return { pressed: key, ...this.where(tab.id) };
+      modifiers: modBits(mods), commands: editCommands(def, mods) }, tab.session);
+    if (holdMs > 0) await sleep(Math.min(holdMs, 5000));
+    await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: def.key, code: def.code, windowsVirtualKeyCode: def.keyCode, modifiers: modBits(mods) }, tab.session);
+    return tab;
   }
 
-  async scroll(t: { deltaX?: number; deltaY?: number; x?: number; y?: number; ref?: number; selector?: string; tab?: string }) {
+  async press(key: string, modifiers: { alt?: boolean; ctrl?: boolean; meta?: boolean; shift?: boolean } = {}, tabId?: string, holdMs = 0) {
+    this.actionSeq = this.netSeq;
+    const tab = await this.pressKey(key, modifiers, tabId, holdMs);
+    return { pressed: key, ...await this.observe(tab.id) };
+  }
+
+  async scroll(t: Target & { deltaX?: number; deltaY?: number; to?: "top" | "bottom"; tab?: string }) {
     const cdp = this.need(), tab = this.tab(t.tab);
     let p = { x: this.viewport.width / 2, y: this.viewport.height / 2 };
-    if (t.ref || t.selector || typeof t.x === "number") p = await this.locate(t, tab.id);
-    await this.glide(p.x, p.y, false);
-    await cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: p.x, y: p.y, deltaX: t.deltaX || 0, deltaY: t.deltaY ?? this.viewport.height * 0.8 }, tab.session);
-    await sleep(300);
-    const pos = await this.evaluate("function(){return {x: scrollX, y: scrollY, height: document.documentElement.scrollHeight}}", [], tab.id);
-    return { scroll: pos, ...this.where(tab.id) };
+    if (t.ref || t.selector || t.name || t.label || typeof t.x === "number") p = await this.locate(t, tab.id);
+    const probe = (to: string | null = null) => this.evaluate(SCROLL_FN, [p.x, p.y, to], tab.id);
+    const before = await probe();
+    let after;
+    if (t.to) after = await probe(t.to);
+    else {
+      await this.glide(p.x, p.y, false);
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: p.x, y: p.y, deltaX: t.deltaX || 0, deltaY: t.deltaY ?? this.viewport.height * 0.8 }, tab.session);
+      // Smooth scrolling animates: wait until the position stops changing.
+      after = before;
+      for (let i = 0; i < 8; i++) {
+        await sleep(150);
+        const next = await probe();
+        const still = next.x === after.x && next.y === after.y;
+        after = next;
+        if (still && i > 0) break;
+      }
+    }
+    const scrolled = after.x !== before.x || after.y !== before.y;
+    return { scroll: after, scrolled, ...(scrolled ? {} : { note: after.atBottom || after.atTop ? "Nothing scrolled: already at the edge of this scroll area." : "Nothing scrolled: the pointer is not over a scrollable area. Target a ref/selector inside the scrolling panel, or try different coordinates." }), ...this.where(tab.id) };
   }
 
-  async waitFor(t: { selector?: string; text?: string; timeoutMs?: number; tab?: string }) {
-    const deadline = Date.now() + Math.min(Math.max(t.timeoutMs ?? 10_000, 100), 60_000);
-    while (Date.now() < deadline) {
-      if (await this.evaluate(WAIT_FN, [t.selector || null, t.text || null], t.tab).catch(() => false)) return { found: true, ...this.where(t.tab) };
+  /** Choose an option in a native <select> or a custom dropdown/combobox: open, optionally type to filter, pick by visible text. */
+  async select(t: Target & { option: string; search?: string; tab?: string }) {
+    const tab = this.tab(t.tab);
+    if (!t.option) throw new Error("option is required");
+    const target: Target = { ref: t.ref, selector: t.selector, name: t.name, label: t.label, role: t.role, nth: t.nth, x: t.x, y: t.y, scale: t.scale, originX: t.originX, originY: t.originY };
+    this.actionSeq = this.netSeq;
+    if (target.ref || target.selector || target.name || target.label) {
+      const native = await this.evaluate(SELECT_FN, [{ ref: target.ref || null, selector: target.selector || null, name: target.name || null, label: target.label || null, role: target.role || null, nth: target.nth ?? 0 }, t.option], tab.id);
+      if (native?.error) throw new Error(`${native.error}${native.options ? `. Options: ${native.options.join(" | ")}` : ""}`);
+      if (native?.native) return { selected: native.selected, value: native.value, native: true, ...await this.observe(tab.id) };
+    }
+    await this.click({ ...target, tab: tab.id });
+    if (t.search) await this.type({ text: t.search, tab: tab.id });
+    let found: any;
+    const end = Date.now() + 4000;
+    while (Date.now() < end) {
+      found = await this.evaluate(OPTION_FN, [t.option], tab.id).catch(() => null);
+      if (found && !found.error) break;
       await sleep(250);
     }
-    return { found: false, ...this.where(t.tab) };
+    if (!found || found.error) throw new Error(`${found?.error ?? `No visible option "${t.option}"`}${found?.available?.length ? `. Visible items: ${found.available.join(" | ")}` : ""}. The dropdown may need a search term (search) or may not have opened.`);
+    await this.click({ x: found.x, y: found.y, tab: tab.id });
+    return { selected: found.name, native: false, ...await this.observe(tab.id) };
+  }
+
+  /** Poll until every given condition holds. A timeout reports which conditions failed and whether the page was still loading. */
+  async waitFor(t: { selector?: string; text?: string; selectorGone?: string; textGone?: string; url?: string; request?: string; requestMethod?: string; sinceSeq?: number;
+    settled?: boolean; quietMs?: number; timeoutMs?: number; tab?: string }) {
+    const tab = this.tab(t.tab);
+    const started = Date.now();
+    const deadline = started + Math.min(Math.max(t.timeoutMs ?? 10_000, 100), 60_000);
+    const pageChecks = !!(t.selector || t.text || t.selectorGone || t.textGone);
+    const wantSettled = t.settled ?? !(pageChecks || t.url || t.request);
+    const sinceSeq = t.sinceSeq ?? this.actionSeq;
+    const method = t.requestMethod?.toUpperCase();
+    for (;;) {
+      const conditions: Record<string, boolean> = {};
+      let pageError: string | undefined;
+      if (pageChecks) {
+        try {
+          const r = await this.evaluate(WAIT_FN, [t.selector || null, t.text || null, t.selectorGone || null, t.textGone || null], tab.id);
+          for (const k of ["selector", "text", "selectorGone", "textGone"]) if (k in r) conditions[k] = !!r[k];
+        } catch (e) {
+          pageError = errMsg(e); // typically a navigation in progress
+          for (const k of ["selector", "text", "selectorGone", "textGone"] as const) if (t[k]) conditions[k] = false;
+        }
+      }
+      if (t.url) conditions.url = tab.url.includes(t.url);
+      let request: unknown;
+      if (t.request) {
+        const needle = t.request.toLowerCase();
+        const e = this.network.find(n => n.seq > sinceSeq && n.url.toLowerCase().includes(needle) && (!method || n.method === method) && (n.failed || n.encodedBytes !== undefined));
+        conditions.request = !!e;
+        if (e) request = { seq: e.seq, method: e.method, url: e.url, status: e.status, failed: e.failed, error: e.error, durationMs: e.durationMs };
+      }
+      let ready: Awaited<ReturnType<BrowserSession["readiness"]>> | undefined;
+      if (wantSettled) {
+        ready = await this.readiness(tab.id, t.quietMs ?? 500).catch(() => undefined);
+        conditions.settled = !!ready?.settled;
+      }
+      const found = Object.values(conditions).every(Boolean);
+      if (found || Date.now() >= deadline) {
+        const failed = Object.keys(conditions).filter(k => !conditions[k]);
+        const loading = ready ? !ready.settled : tab.loading;
+        const hint = found ? undefined : failed.includes("text") || failed.includes("selector")
+          ? (loading ? "The page was still loading when the wait ended; wait longer or until settled, then read it." : "Not found. The text/element may be worded differently, hidden, or inside a cross-origin iframe. Check browser_text or browser_elements.")
+          : failed.includes("request") ? "No finished request matching this URL started since the last action. Trigger the action first, or pass sinceSeq." : undefined;
+        const { focused: _focused, ...page } = ready ?? {} as any;
+        return { found, waitedMs: Date.now() - started, conditions, ...(request ? { request } : {}), ...(ready ? { ready: page } : {}), ...(pageError ? { pageError } : {}), ...(hint ? { hint } : {}), ...this.where(tab.id) };
+      }
+      await sleep(200);
+    }
   }
 
   networkLog(opts: { limit?: number; filter?: string; tab?: string; sinceSeq?: number; failedOnly?: boolean; headers?: boolean }) {
@@ -659,7 +888,15 @@ export class BrowserSession {
     return { requestId, url: e.url, status: e.status, mimeType: e.mimeType, base64Encoded: !!r.base64Encoded, body: body.slice(0, maxChars), total: body.length, truncated: body.length > maxChars };
   }
 
-  clearNetwork() { this.network = []; this.netIndex.clear(); this.netSeq++; this.changed(); }
+  clearNetwork() { this.network = []; this.netIndex.clear(); this.pending.clear(); this.netSeq++; this.changed(); }
+
+  consoleEntries(opts: { limit?: number; level?: string; sinceSeq?: number; tab?: string; clear?: boolean }) {
+    const levels = opts.level === "error" ? ["error", "exception", "assert"] : opts.level === "warn" ? ["warn", "error", "exception", "assert"] : null;
+    const rows = this.consoleLog.filter(e => (!opts.tab || e.tab === opts.tab) && (!opts.sinceSeq || e.seq > opts.sinceSeq) && (!levels || levels.includes(e.level)));
+    const out = rows.slice(-Math.min(Math.max(opts.limit ?? 100, 1), CONSOLE_LIMIT));
+    if (opts.clear) this.consoleLog = [];
+    return { entries: out, seq: this.consoleSeq };
+  }
 }
 
 export { processKey };
