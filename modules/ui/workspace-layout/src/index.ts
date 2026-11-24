@@ -25,6 +25,8 @@ import { normalizeTableStyle, listRowHeight, type TableStyle } from "@hato/sdk/u
 import { enforcePanelSharing, normalizePanelSharing, sharingOptions, showPanel, visibleIn, type PanelSharing } from "./panel-sharing";
 import { defaultSidebarButtons, defaultSidebarOrder, defaultPanelSharing, upgradeLegacy } from "./defaults";
 import { uiIcons } from "@hato/sdk/ui-icons";
+import { anchoredMotion, dockRevealMotion, interactionMotion, toastMotion, tooltipMotion } from "@hato/sdk/motion";
+import type { UiMotionMode } from "@hato/sdk/types";
 
 let fontFamily = "JetBrains Mono";
 let fontSize = "15";
@@ -34,6 +36,10 @@ let mode: "light" | "dark" | "system" = "system";
 const modeOptions = [{ value: "dark", label: "Dark" }, { value: "light", label: "Light" }, { value: "system", label: "Keep current" }];
 const weightOptions = [{ value: "400", label: "Regular" }, { value: "500", label: "Medium" }];
 let appearanceTheme = "classic";
+/** Interface motion; "system" follows the OS Reduce Motion preference (opacity-only when reduced). */
+let animations: UiMotionMode = "system";
+const animationOptions = [{ value: "system", label: "Follow system" }, { value: "on", label: "On" }, { value: "off", label: "Off" }];
+const animationsOf = (v: unknown): UiMotionMode => v === "on" || v === "off" ? v : "system";
 // Syntax color scheme: bundled ones plus user JSON files in <sharedDir>/syntax-schemes.
 let syntaxScheme = "default";
 let customSchemes: SyntaxScheme[] = [];
@@ -119,6 +125,13 @@ function subscribeSidebars(ctx: ModuleContext) {
 }
 
 const COLLAPSED_ROW = 0;
+// ---- panel motion ------------------------------------------------------------------------------
+// With animations on, collapsed docked panes stay in the tree at fixed 0 and the native split
+// reveal slides them open/closed from their docking edge. Off keeps the original instant layout.
+const panelMotion = () => animations !== "off";
+const reveal = (visible: boolean, edge: "start" | "end", extentPx: number) => ({ visible, edge, extentPx, transition: dockRevealMotion });
+/** Panels last visible in each fully collapsed column, so a closing column slides out as it looked. */
+const lastOpen = new Map<string, string[]>();
 const COLLAPSED_COL = 0;
 
 async function loadUpdates(ctx: ModuleContext, scan: boolean, full = false) {
@@ -179,7 +192,7 @@ function panelHeader(id: string, mode: "dock" | "float" | "window"): UiNode {
 }
 
 function panelBody(id: string, mode: "dock" | "float" | "window"): UiNode {
-  const collapsed = mode === "dock" && !!layout.collapsed[id];
+  const collapsed = mode === "dock" && !!layout.collapsed[id] && !panelMotion();
   return { type: "column", key: "panel-" + id, grow: true, bg: "panel", ...(appearanceTheme === "anime" ? { style: { radius: 16, borderWidth: 1, borderColor: "border", shadow: "lg" as const, padding: 6 } } : {}), children: [
     ...((mode === "dock" && (layout.showPanelTitles || collapsed)) || (mode !== "dock" && layout.showPanelControls) ? [panelHeader(id, mode)] : []),
     ...(collapsed ? [] : [{ type: "slot", key: "slot", module: PANELS[id].slot, grow: true } as UiNode]),
@@ -211,6 +224,7 @@ function collapsedPanels(): UiNode | null {
 
 function columnNode(ci: number): UiNode {
   const col = layout.columns[ci];
+  if (panelMotion()) return animatedColumn(ci);
   if (col.panels.every((p) => layout.collapsed[p])) return strip(col.panels, `col-strip-${ci}`);
   if (col.panels.length === 1) return dockedPanel(col.panels[0]);
   return { type: "split", key: `col:${ci}`, direction: "vertical", sizes: col.sizes, minSize: 80,
@@ -218,9 +232,32 @@ function columnNode(ci: number): UiNode {
     resizeAction: "resize", collapseAction: "collapse", children: col.panels.map(dockedPanel) } as UiNode;
 }
 
+/** Column content for animated layouts: every docked pane stays mounted in a stable split. */
+function animatedColumn(ci: number): UiNode {
+  const col = layout.columns[ci];
+  const memo = `col:${ci}:${col.panels.join(",")}`;
+  const open = col.panels.filter((p) => !layout.collapsed[p]);
+  if (open.length) lastOpen.set(memo, open);
+  const shown = open.length ? open : (lastOpen.get(memo) || col.panels);
+  if (col.panels.length === 1) return dockedPanel(col.panels[0]);
+  return { type: "split", key: `col:${ci}`, direction: "vertical", sizes: col.sizes, minSize: 80,
+    fixed: col.panels.map((p) => (shown.includes(p) ? null : COLLAPSED_ROW)), collapsible: col.panels.map(() => true),
+    reveal: Object.fromEntries(col.panels.map((p, i) => ["panel:" + p, reveal(shown.includes(p), i === 0 ? "start" : "end", 200)])),
+    resizeAction: "resize", collapseAction: "collapse", children: col.panels.map(dockedPanel) } as UiNode;
+}
+
 function bottomNode(): UiNode | null {
   const b = layout.bottom;
   if (!b.panels.length) return null;
+  if (panelMotion()) {
+    const all = b.panels.every((p) => layout.collapsed[p]);
+    const shown = (p: string) => all || !layout.collapsed[p];
+    if (b.panels.length === 1) return dockedPanel(b.panels[0]);
+    return { type: "split", key: "bottom", direction: "horizontal", sizes: b.sizes, minSize: 120,
+      fixed: b.panels.map((p) => (shown(p) ? null : COLLAPSED_COL)), collapsible: b.panels.map(() => true),
+      reveal: Object.fromEntries(b.panels.map((p, i) => ["panel:" + p, reveal(shown(p), i === 0 ? "start" : "end", 320)])),
+      resizeAction: "resize", collapseAction: "collapse", children: b.panels.map(dockedPanel) } as UiNode;
+  }
   if (b.collapsed || b.panels.every((p) => layout.collapsed[p])) return null;
   if (b.panels.length === 1) return dockedPanel(b.panels[0]);
   return { type: "split", key: "bottom", direction: "horizontal", sizes: b.sizes, minSize: 120,
@@ -237,15 +274,20 @@ function dockArea(): UiNode {
   } else if (cols.length === 1) {
     top = columnNode(0);
   } else {
+    const closed = (c: typeof cols[number]) => c.panels.every((p) => layout.collapsed[p]);
     top = { type: "split", key: "cols", direction: "horizontal", sizes: cols.map((c) => c.size), minSize: 120,
-      fixed: cols.map((c) => (c.panels.every((p) => layout.collapsed[p]) ? COLLAPSED_COL : null)), collapsible: cols.map(() => true),
-      resizeAction: "resize", collapseAction: "collapse", children: cols.map((_, i) => columnNode(i)) } as UiNode;
+      fixed: cols.map((c) => (closed(c) ? COLLAPSED_COL : null)), collapsible: cols.map(() => true),
+      ...(panelMotion() ? { reveal: Object.fromEntries(cols.map((c, i) => [`column:${i}`, reveal(!closed(c), i < cols.length / 2 ? "start" : "end", 320)])) } : {}),
+      resizeAction: "resize", collapseAction: "collapse",
+      children: cols.map((_, i) => panelMotion() ? { type: "column", key: `column:${i}`, grow: true, children: [columnNode(i)] } as UiNode : columnNode(i)) } as UiNode;
   }
-  const bottom = bottomNode();
+  const inner = bottomNode();
+  const bottom = inner && panelMotion() ? { type: "column", key: "bottom-dock", grow: true, children: [inner] } as UiNode : inner;
   if (!bottom) return { type: "column", key: "dock", grow: true, children: [top] };
   const bottomCollapsed = layout.bottom.collapsed || layout.bottom.panels.every((p) => layout.collapsed[p]);
   return { type: "split", key: "main", direction: "vertical", sizes: layout.mainSizes, minSize: 90, grow: true,
     fixed: [null, bottomCollapsed ? 0 : null], collapsible: [false, true],
+    ...(panelMotion() ? { reveal: { [bottom.key!]: reveal(!bottomCollapsed, "end", 240) } } : {}),
     resizeAction: "resize", collapseAction: "collapse", children: [top, bottom] } as UiNode;
 }
 
@@ -445,7 +487,7 @@ async function resetCustomization(ctx: ModuleContext) {
   groupBySpace = true; await ctx.modules.call("persistence", "settings.set", { key: "sidebar-grouping.v1", value: true });
   publishSharing(ctx);
   fontFamily = values["appearance.fontFamily"]; fontSize = values["appearance.fontSize"]; fontWeight = values["appearance.fontWeight"];
-  mode = values["appearance.mode"]; appearanceTheme = values["appearance.theme"]; panelOpacity = values["appearance.panelOpacity"];
+  mode = values["appearance.mode"]; animations = animationsOf(values["appearance.animations"]); appearanceTheme = values["appearance.theme"]; panelOpacity = values["appearance.panelOpacity"];
   projectsBackground = values["appearance.projectsBackground"]; syntaxScheme = values["appearance.syntaxScheme"];
   ctx.state.set("workspace-layout.projectsBackgroundOpacity", projectsBackgroundOpacity());
   ctx.state.set("workspace-layout.sidebarButtons", sidebarButtons);
@@ -491,6 +533,7 @@ const mod: AppModule = {
     fontWeight = weightOptions.some(option => option.value === savedWeight) ? savedWeight : "400";
     const savedMode = await ctx.modules.call("persistence", "settings.get", { key: "appearance.mode" });
     mode = savedMode === "light" || savedMode === "dark" ? savedMode : "system";
+    animations = animationsOf(await ctx.modules.call("persistence", "settings.get", { key: "appearance.animations" }));
     const savedTheme = await ctx.modules.call("persistence", "settings.get", { key: "appearance.theme" });
     appearanceTheme = themeOptions.some(option => option.value === savedTheme) ? savedTheme : "classic";
     const savedOpacity = await ctx.modules.call("persistence", "settings.get", { key: "appearance.panelOpacity" });
@@ -510,6 +553,8 @@ const mod: AppModule = {
         description: "Strength of the faint dove behind the project list. 0% hides it." },
       { key: "mode", label: "Color mode", type: "select", value: mode, options: modeOptions,
         description: "Classic follows this color mode. Sakura Twilight uses its own twilight palette." },
+      { key: "animations", label: "Animations", type: "select", value: animations, options: animationOptions,
+        description: "Menus, popovers, tooltips, notifications and buttons. Follow system uses fades only when Reduce Motion is on." },
     ] }, { key: "syntax", title: "Syntax colors", group: "Appearance", layout: "table", fields: [
       { key: "scheme", label: "Color scheme", type: "select", value: allSchemes().some(s => s.id === syntaxScheme) ? syntaxScheme : "default",
         options: allSchemes().map(s => ({ value: s.id, label: s.id.startsWith("custom:") ? `${s.name} (custom)` : s.name })),
@@ -616,6 +661,13 @@ const mod: AppModule = {
           ctx.ui.invalidate();
           return;
         }
+        if (key === "animations") {
+          if (!animationOptions.some(option => option.value === value)) throw new Error("Invalid animation preference");
+          await ctx.modules.call("persistence", "settings.set", { key: "appearance.animations", value });
+          animations = animationsOf(value);
+          ctx.ui.invalidate();
+          return;
+        }
         if (key !== "mode" || !modeOptions.some(option => option.value === value)) throw new Error("Invalid appearance preference");
         await ctx.modules.call("persistence", "settings.set", { key: "appearance.mode", value });
         mode = value as typeof mode;
@@ -679,7 +731,9 @@ const mod: AppModule = {
     resetLayout: (ctx) => { set(ctx, defaultLayout()); return layout; },
   },
   render(): UiNode {
-    const kids: UiNode[] = [{ type: "theme", key: "color-scheme", applicationIcon, controls: { listRowHeight: listRowHeight(tableStyle), stripedRows: tableStyle.stripes, rowDividers: tableStyle.dividers }, palette: appearanceTheme === "anime" ? animePalette(panelOpacity) : colorScheme, ...(appearanceTheme === "anime" ? { terminal: { light: animeTerminal, dark: animeTerminal } } : {}), typography: typography(fontFamily, fontSize, fontWeight), ...(mode === "system" ? {} : { mode }),
+    const kids: UiNode[] = [{ type: "theme", key: "color-scheme", applicationIcon,
+      motion: { mode: animations, experimentalDockReveal: panelMotion(), menu: anchoredMotion, tooltip: tooltipMotion, interaction: interactionMotion },
+      chrome: { toasts: { transition: toastMotion } }, controls: { listRowHeight: listRowHeight(tableStyle), stripedRows: tableStyle.stripes, rowDividers: tableStyle.dividers }, palette: appearanceTheme === "anime" ? animePalette(panelOpacity) : colorScheme, ...(appearanceTheme === "anime" ? { terminal: { light: animeTerminal, dark: animeTerminal } } : {}), typography: typography(fontFamily, fontSize, fontWeight), ...(mode === "system" ? {} : { mode }),
       ...(schemeNode(allSchemes().find(s => s.id === syntaxScheme)) ? { syntax: schemeNode(allSchemes().find(s => s.id === syntaxScheme)) } : {}) }];
     const top = barNode("top");
     if (top) kids.push(top);

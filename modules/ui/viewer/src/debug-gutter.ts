@@ -5,6 +5,7 @@ import type { ModuleContext, UiNode, WindowAnchor } from "@hato/sdk/types";
 import { childKey, describeValue, VALUE_PAGE, valueTreeRows, type ChildRange, type ValueVariable } from "@hato/sdk/debug-values";
 import { DEBUG_EVENTS, debugExpressionAt, inlineValues, type Breakpoint, type DebugSessionInfo, type DebugVariable } from "@hato/sdk/debug";
 import { errMsg } from "@hato/sdk/runtime";
+import { anchoredMotion } from "@hato/sdk/motion";
 
 const svg = (body: string) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">${body}</svg>`;
 // Shapes differ by kind so state never depends on color alone.
@@ -203,7 +204,7 @@ export function editorPopover(path: string | null, runMenu: UiNode[]): UiNode | 
     { type: "label", key: "label", text: label, size: "xs", weight: "medium", tooltip },
     { type: "textInput", key, value: value || "", placeholder, submitAction: "bpSave", cancelAction: "bpClose", style: { font: "mono" } },
   ] });
-  return { type: "popover", key: "bp-editor", width: 340, windowAnchor: ed.anchor, top: Math.max(36, ed.y + 54), left: 24, closeAction: "bpClose",
+  return { type: "popover", key: "bp-editor", transition: anchoredMotion, width: 340, windowAnchor: ed.anchor, top: Math.max(36, ed.y + 54), left: 24, closeAction: "bpClose",
     style: { background: "panel", padding: 10, radius: 8, borderWidth: 1, borderColor: "border", shadow: "md" }, children: [
       { type: "row", key: "head", gap: 6, align: "center", children: [
         { type: "label", key: "title", text: `${b ? "Breakpoint" : "New breakpoint"} · line ${ed.line + 1}`, weight: "semibold", size: "sm", grow: true },

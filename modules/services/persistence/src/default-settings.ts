@@ -131,6 +131,7 @@ export const defaultSettings: Record<string, any> = {
   "appearance.fontSize": "14",
   "appearance.fontWeight": "400",
   "appearance.mode": "light",
+  "appearance.animations": "system",
   "viewer.diffMode": "split",
   "appearance.theme": "classic",
   "appearance.panelOpacity": "solid",

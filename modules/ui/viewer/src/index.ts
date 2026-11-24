@@ -26,6 +26,7 @@ import { historyEvent, historySnapshot, historyWindow, mapToCommitted, openHisto
 import type { OpenLocation } from "@hato/sdk/run";
 import type { RunCandidate } from "@hato/sdk/run-configurations";
 import { bpEditor, debugAvailable, debugEditorFields, debugHoverFields, hoverEvent, debugTypes, editorEvent, editorPopover, gutterTooltip, hasRunMarker, initDebug, loadDebug, openEditor, toggleBreakpoint } from "./debug-gutter";
+import { anchoredMotion } from "@hato/sdk/motion";
 
 // ---- Git change markers -------------------------------------------------------------------
 // HEAD text per open file; hunks are recomputed locally as the buffer changes.
@@ -817,7 +818,7 @@ const mod: AppModule = {
     const bp = !diff ? editorPopover(current?.relativePath ?? null, runMenu && runMenu.path === current?.relativePath ? runButtons(runMenu.candidates) : []) : null;
     if (bp) kids.push(bp);
     else if (runMenu && runMenu.workspaceId === ws?.id && runMenu.path === current?.relativePath) {
-      kids.push({ type: "popover", key: "run-menu", width: 245, windowAnchor: runMenu.anchor, top: runMenu.y, left: 24, maxHeight: 155,
+      kids.push({ type: "popover", key: "run-menu", transition: anchoredMotion, width: 245, windowAnchor: runMenu.anchor, top: runMenu.y, left: 24, maxHeight: 155,
         style: { background: "panel", padding: 6, radius: 6, borderWidth: 1, borderColor: "border" }, closeAction: "closeRunMenu", children: runButtons(runMenu.candidates) });
     }
     if (hunkView) {
@@ -838,7 +839,7 @@ const mod: AppModule = {
       ] });
     }
     // Compact fallback for a host that has not yet loaded the native context-menu capability.
-    if (tabMenu && tabs.includes(tabMenu)) kids.push({ type: "popover", key: "tab-menu", width: 236, top: 34, left: 4, maxHeight: 124,
+    if (tabMenu && tabs.includes(tabMenu)) kids.push({ type: "popover", key: "tab-menu", transition: anchoredMotion, width: 236, top: 34, left: 4, maxHeight: 124,
       style: { background: "panel", padding: 6, radius: 6, borderWidth: 1, borderColor: "border" }, closeAction: "dismissTabMenu", children: [
         { type: "button", key: "others", text: "Close others", action: "closeOthers", value: tabMenu, variant: "ghost" },
         { type: "button", key: "right", text: "Close all to the right", action: "closeRight", value: tabMenu, variant: "ghost" },

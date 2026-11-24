@@ -5,6 +5,7 @@ import { DEBUG_EVENTS, DEBUG_UI_EVENTS, type Breakpoint, type DebugFrame, type D
 import { errMsg } from "@hato/sdk/runtime";
 import { uiIcons } from "@hato/sdk/ui-icons";
 import { childKey, describeValue, VALUE_PAGE, valueSnapshot, valueTreeRows, type ChildRange, type ValueVariable } from "@hato/sdk/debug-values";
+import { anchoredMotion } from "@hato/sdk/motion";
 
 const svg = (body: string, fill = false) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="${fill ? "currentColor" : "none"}" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
 const icons = {
@@ -289,7 +290,7 @@ const mod: AppModule = {
     const sessionTabs: UiNode[] = sessions.length > 1 ? [{ type: "tabStrip", key: "sessions", active: s.id, action: "session",
       tabs: sessions.map(x => ({ key: x.id, label: x.name, iconSvg: x.state === "paused" ? icons.paused : icons.bug,
         iconColor: x.state === "paused" ? "warning" : x.state === "ended" ? "muted" : "success", tooltip: `${x.name} · ${x.state}` })) }] : [];
-    const smart: UiNode[] = smartTargets ? [{ type: "popover", key: "smart", width: 320, top: 40, left: 120, closeAction: "smartClose", style: { background: "panel", padding: 6, radius: 8, borderWidth: 1, borderColor: "border" },
+    const smart: UiNode[] = smartTargets ? [{ type: "popover", key: "smart", transition: anchoredMotion, width: 320, top: 40, left: 120, closeAction: "smartClose", style: { background: "panel", padding: 6, radius: 8, borderWidth: 1, borderColor: "border" },
       children: smartTargets.length ? [{ type: "label", key: "t", text: "Step into which call?", size: "xs", color: "muted" } as UiNode, ...smartTargets.map((t, i): UiNode =>
         ({ type: "button", key: `t${i}`, text: t.label, action: "smartInto", value: t.id, small: true, variant: "ghost", style: { justify: "start", fullWidth: true, font: "mono" } }))]
         : [{ type: "label", key: "none", text: "No calls on this line to step into.", size: "sm", color: "muted" }] }] : [];

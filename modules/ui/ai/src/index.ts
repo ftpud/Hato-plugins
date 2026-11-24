@@ -14,6 +14,7 @@ import { debounce, errMsg } from "@hato/sdk/runtime";
 import { resolveWorkspaceLink } from "@hato/sdk/links";
 
 import { agentPolicy, agentSettings, modelChoices, providerLabel, type AgentSession, type AgentView } from "@hato/sdk/persistent-agents";
+import { anchoredAboveMotion, anchoredMotion } from "@hato/sdk/motion";
 let background:{workspaceId:string;id:string}|null=null;
 let backgroundPage:AgentView|null=null;
 let backgroundTimer:ReturnType<typeof setInterval>|null=null;
@@ -361,7 +362,7 @@ function connectionsPopover(conv: any, live: any, active: any, connected: boolea
   body.push({ type: "label", key: "agents", size: "xs", wrap: true, color: canAgents ? undefined : "muted",
     text: canAgents ? "Background agents: this chat can create, prompt and stop background agents in this workspace (Workspace tools)."
       : background ? "Background agents: not reachable. Enable Workspace tools to let this chat start and control them." : "Background agents: not available to desktop chats. Start a new chat to run it as a background agent." });
-  return { type: "popover", key: "mcp-picker", closeAction: "toggleMcpPicker", bottom: 56, heightFraction: 0.85, maxHeight: 640, style: { ...chatStyle.picker, background: "background" }, children: [
+  return { type: "popover", key: "mcp-picker", transition: anchoredAboveMotion, closeAction: "toggleMcpPicker", bottom: 56, heightFraction: 0.85, maxHeight: 640, style: { ...chatStyle.picker, background: "background" }, children: [
     { type: "row", key: "head", gap: 8, padding: 10, align: "center", children: [
       { type: "label", key: "t", text: "Connected to this chat", weight: "semibold", grow: true },
       { type: "button", key: "close-mcp", text: "", iconSvg: uiIcons.x, action: "toggleMcpPicker", tooltip: "Close", style: chatStyle.iconControl },
@@ -614,7 +615,7 @@ const mod: AppModule = {
       if (mcpOpen && conv) kids.push(connectionsPopover(conv, live, active, connected, skills, skillState, providerName, modelName, model.value || ""));
       if (modelsOpen) {
         const filtered = model.options.filter((o) => `${o.label} ${modelDetails(o.value)?.description || ""}`.toLowerCase().includes(modelQuery.toLowerCase()));
-        kids.push({ type: "popover", key: "model-picker", closeAction: "toggleModels", style: { ...chatStyle.picker, background: "background" }, children: [
+        kids.push({ type: "popover", key: "model-picker", transition: anchoredMotion, closeAction: "toggleModels", style: { ...chatStyle.picker, background: "background" }, children: [
           { type: "row", key: "search-row", gap: 8, padding: 10, children: [
             { type: "textInput", key: "model-search", ...filterInput, value: modelQuery, placeholder: "Search models", changeAction: "searchModels", grow: true },
             iconButton("close", "x", "toggleModels", "Close models"),
