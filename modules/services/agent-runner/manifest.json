@@ -21,7 +21,7 @@
     "internal-remote-mcp"
   ],
   "author": "Hato contributors",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "pluginPackage": "agents",
   "pluginType": "Automation"
 }
