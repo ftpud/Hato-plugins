@@ -8,7 +8,7 @@
       "type": "System",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.58",
+      "version": "0.1.59",
       "coreVersion": "^0.1.0",
       "description": "Hato essentials services and panels.",
       "dependencies": {},
@@ -175,7 +175,7 @@
       "type": "Automation",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.11",
+      "version": "0.1.12",
       "coreVersion": "^0.1.0",
       "description": "Visual workflow editor and execution runtime. Uses Background Agents to run agent steps.",
       "dependencies": {
@@ -195,7 +195,7 @@
       "type": "Connectivity",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.7",
+      "version": "0.1.8",
       "coreVersion": "^0.1.0",
       "description": "Remote workspaces services and panels.",
       "dependencies": {

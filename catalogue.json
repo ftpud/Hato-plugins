@@ -8,7 +8,7 @@
       "type": "System",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.58",
+      "version": "0.1.59",
       "coreVersion": "^0.1.0",
       "description": "Hato essentials services and panels.",
       "dependencies": {},
@@ -31,100 +31,100 @@
       "artifacts": [
         {
           "id": "persistence",
-          "manifest": "packages/foundation/0.1.58/persistence/manifest.json",
-          "bundle": "packages/foundation/0.1.58/persistence/dist/persistence.mjs",
-          "manifestSha256": "4522713af19ee594a92ea76d3de276a4d8252254f76068158966a3dfa26250dc",
+          "manifest": "packages/foundation/0.1.59/persistence/manifest.json",
+          "bundle": "packages/foundation/0.1.59/persistence/dist/persistence.mjs",
+          "manifestSha256": "cf5809f927e101bcb36c64bda50f2820309490c6317645735e57b66c2eb2791a",
           "bundleSha256": "c3708661c21293a38cb601fb7670f7d8ceb3c9a132b6ba8069a383ecc3cc848f"
         },
         {
           "id": "workspace",
-          "manifest": "packages/foundation/0.1.58/workspace/manifest.json",
-          "bundle": "packages/foundation/0.1.58/workspace/dist/workspace.mjs",
-          "manifestSha256": "8a533520e727a5916d90911f3580c49712f8d68208be9bdb38b343d8cdfca017",
+          "manifest": "packages/foundation/0.1.59/workspace/manifest.json",
+          "bundle": "packages/foundation/0.1.59/workspace/dist/workspace.mjs",
+          "manifestSha256": "3bc057891a5b44205dd7717bdac08f94ba89ba251ad53b99e937eb58abf0c509",
           "bundleSha256": "e9499aa3f75ca0620af9b98405d348fa49b64c8014e03b4c9bccedff10ee32ea"
         },
         {
           "id": "projects",
-          "manifest": "packages/foundation/0.1.58/projects/manifest.json",
-          "bundle": "packages/foundation/0.1.58/projects/dist/projects.mjs",
-          "manifestSha256": "81d16ec50b9d3e1c3cf4897fda31061b26536a17062160342bfc2a06220bd034",
+          "manifest": "packages/foundation/0.1.59/projects/manifest.json",
+          "bundle": "packages/foundation/0.1.59/projects/dist/projects.mjs",
+          "manifestSha256": "cd2bc38062d74e91affee48a5a52ed8c33ec3e1da574a6a27f298b0e5996b796",
           "bundleSha256": "3b3164f15fa89c15db0dd6900776f6966800cfa9fee275d933fa49a72bcd2b1d"
         },
         {
           "id": "files",
-          "manifest": "packages/foundation/0.1.58/files/manifest.json",
-          "bundle": "packages/foundation/0.1.58/files/dist/files.mjs",
-          "manifestSha256": "801503e810c245c5fa7e2aebd7edfcf4bf1d981fbcfdc357cdfc0c74ea3ca608",
+          "manifest": "packages/foundation/0.1.59/files/manifest.json",
+          "bundle": "packages/foundation/0.1.59/files/dist/files.mjs",
+          "manifestSha256": "0d86a665125c4f1e48f8e6b2f71f74a3a7aeca670f65867f176bfaa3b1e2ea6b",
           "bundleSha256": "6a5d40293ec352788cf9ff377cb939df307f0cdf5f66ac61766d75c8341fe3a4"
         },
         {
           "id": "terminals",
-          "manifest": "packages/foundation/0.1.58/terminals/manifest.json",
-          "bundle": "packages/foundation/0.1.58/terminals/dist/terminals.mjs",
-          "manifestSha256": "bca43cb9570f4d6dcea55d82b523b1d9727a7a815bf0ff8a6691b333751991cc",
+          "manifest": "packages/foundation/0.1.59/terminals/manifest.json",
+          "bundle": "packages/foundation/0.1.59/terminals/dist/terminals.mjs",
+          "manifestSha256": "e223f6683ff6d5573f1858272ac48f9a0e1950de003c826f40e7d057ef698d7c",
           "bundleSha256": "31740e0f20e7cc6e20beb80c158e52b826aa5853b32b227b583d20b3c94907fe"
         },
         {
           "id": "workspace-layout",
-          "manifest": "packages/foundation/0.1.58/workspace-layout/manifest.json",
-          "bundle": "packages/foundation/0.1.58/workspace-layout/dist/workspace-layout.mjs",
-          "manifestSha256": "ed22d178a105aa9ac0e4633bf2c0b2b01d500ee00aa0bf592f4f3978a1bd5fa7",
+          "manifest": "packages/foundation/0.1.59/workspace-layout/manifest.json",
+          "bundle": "packages/foundation/0.1.59/workspace-layout/dist/workspace-layout.mjs",
+          "manifestSha256": "632087c2bf86a532c1f382dbf4de8058a07032f528dfd9840490601b34759618",
           "bundleSha256": "6a73c6181e491815ff62a8603bf12df783734c2788667bc0819291caafb602a1"
         },
         {
           "id": "settings",
-          "manifest": "packages/foundation/0.1.58/settings/manifest.json",
-          "bundle": "packages/foundation/0.1.58/settings/dist/settings.mjs",
-          "manifestSha256": "bd3afc5658e1bdbe132d19dc62fbd95772b3ad767f08815c9b7e8eb46d32cd1f",
-          "bundleSha256": "9ec23967f52204d2ef71263e0c13f6e8a435c055e7d6e5abbe22399b3d62674b"
+          "manifest": "packages/foundation/0.1.59/settings/manifest.json",
+          "bundle": "packages/foundation/0.1.59/settings/dist/settings.mjs",
+          "manifestSha256": "8fbce035225d8c6971ea14ecb345e7436b09182a8935503047c9fd0f73808fe2",
+          "bundleSha256": "33e7cb2025bbd4f27a922ac77c04de45206ed45ba3c4c771a0285c43c5f3d468"
         },
         {
           "id": "module-dev",
-          "manifest": "packages/foundation/0.1.58/module-dev/manifest.json",
-          "bundle": "packages/foundation/0.1.58/module-dev/dist/module-dev.mjs",
-          "manifestSha256": "9ba637d79eb48b6526f66ed638892337ab5580ccef82e1f69030de5b65005412",
+          "manifest": "packages/foundation/0.1.59/module-dev/manifest.json",
+          "bundle": "packages/foundation/0.1.59/module-dev/dist/module-dev.mjs",
+          "manifestSha256": "e855ff1d2afedbad8e12c63ba31f5a579c8505048694618658368a6de30427b8",
           "bundleSha256": "2f4012665097f46a08db6bf352ededd4289dd34a9b0ca419e203ff7148549714"
         },
         {
           "id": "explorer",
-          "manifest": "packages/foundation/0.1.58/explorer/manifest.json",
-          "bundle": "packages/foundation/0.1.58/explorer/dist/explorer.mjs",
-          "manifestSha256": "fe238f21bd7aa699b4cff107b3260759f39035fc1051f0a979522c2008a9cad8",
+          "manifest": "packages/foundation/0.1.59/explorer/manifest.json",
+          "bundle": "packages/foundation/0.1.59/explorer/dist/explorer.mjs",
+          "manifestSha256": "b2e3f4e292aa1aab89feef877ec15b74ab14c4bc5b54e414eebf9671fd04505e",
           "bundleSha256": "7c0a07e104cfd8c8d7212670b13d3c09b44ff996977f72dfec1c44afb4a58ff4"
         },
         {
           "id": "viewer",
-          "manifest": "packages/foundation/0.1.58/viewer/manifest.json",
-          "bundle": "packages/foundation/0.1.58/viewer/dist/viewer.mjs",
-          "manifestSha256": "bb467765b31bfafb92c0b6cffa065536d11bc7cde9a32b7aa2c4a337d57c982e",
+          "manifest": "packages/foundation/0.1.59/viewer/manifest.json",
+          "bundle": "packages/foundation/0.1.59/viewer/dist/viewer.mjs",
+          "manifestSha256": "24752118c58bbfc01df3644d5ea5fb1093e20a7b4554c11ffd54e465e8846272",
           "bundleSha256": "9a881a66077e0700b5bccb718e9c6897d9ddd276b45632160ddbd361ff2a62ed"
         },
         {
           "id": "terminal-panel",
-          "manifest": "packages/foundation/0.1.58/terminal-panel/manifest.json",
-          "bundle": "packages/foundation/0.1.58/terminal-panel/dist/terminal-panel.mjs",
-          "manifestSha256": "f20355228920239a97f8e60eb6e757c212c44d1e6322c0ebfc75d7833ad118d5",
+          "manifest": "packages/foundation/0.1.59/terminal-panel/manifest.json",
+          "bundle": "packages/foundation/0.1.59/terminal-panel/dist/terminal-panel.mjs",
+          "manifestSha256": "5fb1fed90a72d2550a61c6928cfab8002228532744d73f59db4b1a2abbef6e25",
           "bundleSha256": "a82a36353538adc42d4b715a9bc20073776ff2c70a48e71496985302b522512e"
         },
         {
           "id": "projects-panel",
-          "manifest": "packages/foundation/0.1.58/projects-panel/manifest.json",
-          "bundle": "packages/foundation/0.1.58/projects-panel/dist/projects-panel.mjs",
-          "manifestSha256": "6e25acb36488315f7ad010fa672fa9a90d7de9f11643994185b2eba509b4e74a",
+          "manifest": "packages/foundation/0.1.59/projects-panel/manifest.json",
+          "bundle": "packages/foundation/0.1.59/projects-panel/dist/projects-panel.mjs",
+          "manifestSha256": "6698eb0771ea4d197a454df22791494d0b97e87dac81c89ee3e522313d8dac23",
           "bundleSha256": "79c17a676b3e17507d3a9b8508e63f1abefcbe78951e3ca3ce978963311c7846"
         },
         {
           "id": "left-sidebar",
-          "manifest": "packages/foundation/0.1.58/left-sidebar/manifest.json",
-          "bundle": "packages/foundation/0.1.58/left-sidebar/dist/left-sidebar.mjs",
-          "manifestSha256": "9c7b928a5679b19a34c02819bc500382343669f9c846118d48bced6086e64b99",
+          "manifest": "packages/foundation/0.1.59/left-sidebar/manifest.json",
+          "bundle": "packages/foundation/0.1.59/left-sidebar/dist/left-sidebar.mjs",
+          "manifestSha256": "ec270ec6762a54711f513a1635d27af27dd03299e913bd173d1351e8065cbfb1",
           "bundleSha256": "c0ec07ab1b04e7e7135556a9515ead3d456685aa10d0596cdf935536d893cd01"
         },
         {
           "id": "sidebar",
-          "manifest": "packages/foundation/0.1.58/sidebar/manifest.json",
-          "bundle": "packages/foundation/0.1.58/sidebar/dist/sidebar.mjs",
-          "manifestSha256": "02c0e035f1921fa926f1296945ca18ccc8a82b31d17ca81db7e877b7edafea69",
+          "manifest": "packages/foundation/0.1.59/sidebar/manifest.json",
+          "bundle": "packages/foundation/0.1.59/sidebar/dist/sidebar.mjs",
+          "manifestSha256": "73e369d54ebfeb93385b911f1d3362956d3cb7da8ee05b33e1beec733465a6dd",
           "bundleSha256": "4d0d33c4e57f94d9a108d74db2eb20f3761a9711344f279b0497a47c4c748fc7"
         }
       ]
@@ -499,7 +499,7 @@
       "type": "Automation",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.11",
+      "version": "0.1.12",
       "coreVersion": "^0.1.0",
       "description": "Visual workflow editor and execution runtime. Uses Background Agents to run agent steps.",
       "dependencies": {
@@ -515,23 +515,23 @@
       "artifacts": [
         {
           "id": "workflows",
-          "manifest": "packages/automation/0.1.11/workflows/manifest.json",
-          "bundle": "packages/automation/0.1.11/workflows/dist/workflows.mjs",
-          "manifestSha256": "6cf79ade960b8ae9cabf521fac820bb8b5431a374e3bfd810d26987dbdc414e5",
-          "bundleSha256": "7cea241223bc99232a42a298fc4bfc2ce064ba3d34367c4878f0404f5f5d797e"
+          "manifest": "packages/automation/0.1.12/workflows/manifest.json",
+          "bundle": "packages/automation/0.1.12/workflows/dist/workflows.mjs",
+          "manifestSha256": "89db4f7eb875298f7a96cca71fa23c9f8b140c9926acea616d0ba072d17d662b",
+          "bundleSha256": "0b057d7f1076a1be92b9f36df2d323ffc8831cd7ceb790cc597f0d6f35463e40"
         },
         {
           "id": "workflow-runner",
-          "manifest": "packages/automation/0.1.11/workflow-runner/manifest.json",
-          "bundle": "packages/automation/0.1.11/workflow-runner/dist/workflow-runner.mjs",
-          "manifestSha256": "ba7e90546fa91e53ccc1d53507e42e9e20ee643fb422d64357248d1aa78c9a26",
+          "manifest": "packages/automation/0.1.12/workflow-runner/manifest.json",
+          "bundle": "packages/automation/0.1.12/workflow-runner/dist/workflow-runner.mjs",
+          "manifestSha256": "0d7ca3008a4518731a19c58635a599b6d881786bbba4fa20e4bb8e51e2924311",
           "bundleSha256": "2b7d3b177e1334624698a324c02b41173db31bcadf5345cbd94c9c88098e38f0"
         },
         {
           "id": "workflows-panel",
-          "manifest": "packages/automation/0.1.11/workflows-panel/manifest.json",
-          "bundle": "packages/automation/0.1.11/workflows-panel/dist/workflows-panel.mjs",
-          "manifestSha256": "084ce914a0c547d1acc18f78efe86b4b0b83ed297a4080ad9df2c6b52a0295b4",
+          "manifest": "packages/automation/0.1.12/workflows-panel/manifest.json",
+          "bundle": "packages/automation/0.1.12/workflows-panel/dist/workflows-panel.mjs",
+          "manifestSha256": "a1b4f8770a91a275ba7325f80f130a1107a9982186a6932764038321e65963c6",
           "bundleSha256": "9e08870a53e748eca0e6c10b6aec761681c4b8959d857313e44d73b2c745a57a"
         }
       ]
@@ -542,7 +542,7 @@
       "type": "Connectivity",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.7",
+      "version": "0.1.8",
       "coreVersion": "^0.1.0",
       "description": "Remote workspaces services and panels.",
       "dependencies": {
@@ -555,16 +555,16 @@
       "artifacts": [
         {
           "id": "remote-runtime",
-          "manifest": "packages/remote/0.1.7/remote-runtime/manifest.json",
-          "bundle": "packages/remote/0.1.7/remote-runtime/dist/remote-runtime.mjs",
-          "manifestSha256": "d36228b45269d8ea869ee80f673178699ebcda849dac4a4da401941ccbd4954c",
-          "bundleSha256": "0be236eab73f32f8dba10302494ad0fcce5ff7a3846d3f05bec2527e0f670291"
+          "manifest": "packages/remote/0.1.8/remote-runtime/manifest.json",
+          "bundle": "packages/remote/0.1.8/remote-runtime/dist/remote-runtime.mjs",
+          "manifestSha256": "b2cfb0ab12bf3af55b4018503a3c5baf2da4a525144d64cdf59e0efc3e8ee1da",
+          "bundleSha256": "b4c553f4ed1dc2f0214f8eeaf3dcf39ca4cd0e8152a430fb1dcf71d355a4e252"
         },
         {
           "id": "remote-panel",
-          "manifest": "packages/remote/0.1.7/remote-panel/manifest.json",
-          "bundle": "packages/remote/0.1.7/remote-panel/dist/remote-panel.mjs",
-          "manifestSha256": "59248781aea80c97853d3800ed3e6751b86e425613a5aebf79ba6f9a4a6a8ee7",
+          "manifest": "packages/remote/0.1.8/remote-panel/manifest.json",
+          "bundle": "packages/remote/0.1.8/remote-panel/dist/remote-panel.mjs",
+          "manifestSha256": "5c48bb5fa81810c45e8ae9316fc024f085af490b754ceaa79493704c2b8a1a05",
           "bundleSha256": "ec7019e6c3f0d0b79021d6e87b6b4057466768c3f81bc59f33f982977aa21373"
         }
       ]
