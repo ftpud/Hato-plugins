@@ -1,5 +1,6 @@
 import type { AppModule,ModuleContext,Handle } from "@hato/sdk/types";
 import { JsonRpcPeer,errMsg,rpcError } from "@hato/sdk/runtime";
+import { mcpRelaySource } from "@hato/sdk/mcp-relay";
 import { isLibraryRef, textDigest } from "@hato/sdk/library";
 import { agentProgress, PROGRESS_INSTRUCTION, REPORT_PROGRESS_TOOL } from "@hato/sdk/persistent-agents";
 interface Scope {sessionId:string;workspaceId:string;root:string;skills:string[];inline?:Record<string,string>;daemon?:{bin:string;dir:string};token:string}
@@ -7,7 +8,8 @@ let db:Handle;
 let listener:{handle:string;port:number}|null=null;
 const scopes=new Map<string,Scope>();
 const connections=new Map<string,{token:string|null;buffer:string;peer:JsonRpcPeer|null}>();
-const proxy=`const net=require('node:net');const s=net.connect({host:'127.0.0.1',port:Number(process.env.HATO_MCP_PORT)},()=>{s.write(JSON.stringify({token:process.env.HATO_MCP_TOKEN})+'\\n');process.stdin.pipe(s)});s.pipe(process.stdout);s.on('error',e=>{console.error(e.message);process.exit(1)});s.on('close',()=>process.exit(0));process.stdin.on('end',()=>s.end());`;
+// The relay reconnects to the same port after a Hato restart; saved scopes keep its token valid.
+const proxy=mcpRelaySource({authKey:"token",format:"cjs",version:"v2"});
 const object=(properties:any,required:string[]=[])=>({type:"object",properties,required,additionalProperties:false});
 const AGENT={type:"object",description:"Background agent to start in the task",properties:{name:{type:"string",maxLength:120},prompt:{type:"string",description:"First prompt for the agent"},model:{type:"string",description:"Model id; defaults to this agent's model"}},required:["prompt"],additionalProperties:false};
 const tools=[
@@ -171,7 +173,12 @@ async function connection(ctx:ModuleContext,handle:string,token:string|null=null
 }
 async function listen(ctx:ModuleContext) {
   if(listener)return listener;
-  listener=await ctx.host.net.listenLoopback();
+  // Reuse the previous port so relays started before a restart find this server again.
+  const saved=Number((await ctx.host.db.query<any>(db,"SELECT value FROM meta WHERE key='port'"))[0]?.value)||0;
+  const port=saved>=1024&&saved<=65535?saved:0;
+  try{listener=await ctx.host.net.listenLoopback(port?{port}:undefined);}
+  catch(e){if(!port)throw e;ctx.log.warn(`MCP port ${port} unavailable; agents started earlier need a reconnect`,errMsg(e));listener=await ctx.host.net.listenLoopback();}
+  if(listener.port!==port)await ctx.host.db.exec(db,"INSERT INTO meta(key,value) VALUES('port',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[String(listener.port)]);
   await acceptLoop(ctx);return listener;
 }
 async function acceptLoop(ctx:ModuleContext) {
@@ -183,10 +190,12 @@ async function acceptLoop(ctx:ModuleContext) {
 }
 const mod:AppModule={id:"internal-remote-mcp",moduleApiVersion:1,
  async activate(ctx,prev){
-  db=await ctx.host.db.openNamespace("internal-remote-mcp");await ctx.host.db.exec(db,"CREATE TABLE IF NOT EXISTS scopes(token TEXT PRIMARY KEY,data TEXT NOT NULL)");
+  db=await ctx.host.db.openNamespace("internal-remote-mcp");await ctx.host.db.exec(db,"CREATE TABLE IF NOT EXISTS scopes(token TEXT PRIMARY KEY,data TEXT NOT NULL)");await ctx.host.db.exec(db,"CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
   for(const r of await ctx.host.db.query<any>(db,"SELECT data FROM scopes")){const s:Scope=JSON.parse(r.data);scopes.set(s.token,s);}
   // A swap hands over the listener and authenticated connections; agents keep their MCP sessions.
   if(prev?.listener){listener=prev.listener;await acceptLoop(ctx);for(const c of prev.conns||[])await connection(ctx,c.handle,c.token);}
+  // After a restart, listen right away so running agents' relays can reconnect.
+  else if(scopes.size)await listen(ctx).catch(e=>ctx.log.warn("cannot reopen MCP listener",errMsg(e)));
  },
  snapshot:()=>({listener,conns:[...connections].filter(([,c])=>c.token).map(([handle,c])=>({handle,token:c.token}))}),
  // Endpoints survive swaps (above); only running tool calls and pending task approvals hold one back.

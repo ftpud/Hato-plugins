@@ -16,7 +16,7 @@ export function matchingCommands(commands: unknown, draft: string, limit = 8): A
   if (query === null || !Array.isArray(commands)) return [];
   return commands.slice(0, 500).filter((command): command is AvailableCommand => !!command && typeof command === "object"
     && typeof command.name === "string" && /^[^\s/]+$/.test(command.name) && command.name.toLowerCase().startsWith(query))
-    .slice(0, Math.max(1, Math.min(limit, 20)));
+    .slice(0, Math.max(1, Math.min(limit, 50)));
 }
 
 export function applySlashCommand(draft: string, command: AvailableCommand): string {

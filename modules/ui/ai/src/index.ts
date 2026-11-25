@@ -107,12 +107,20 @@ function syncOrigin() {
     }
   }
 }
-function scopeTree(node: UiNode): UiNode {
+/** Text inputs rendered by the latest tree. The native host keeps an input widget (and the action
+ *  names it was created with) for as long as its key stays mounted, so origin tokens would go stale
+ *  after the first conversation change. Inputs keep plain action names; their events are accepted
+ *  only while that input key is still rendered. */
+let liveInputKeys = new Set<string>();
+function scopeTree(node: UiNode, inputs = new Set<string>(), root = true): UiNode {
   const n = node as any;
-  for(const key of Object.keys(n)) {
+  if (n.type === "textInput") {
+    if (typeof n.key === "string") inputs.add(n.key);
+  } else for(const key of Object.keys(n)) {
     if((key === "action" || key.endsWith("Action")) && typeof n[key] === "string" && n[key]) n[key] = `origin:${origin}:${n[key].replace(/^origin:[^:]+:/, "")}`;
   }
-  for(const child of n.children || []) scopeTree(child);
+  for(const child of n.children || []) scopeTree(child, inputs, false);
+  if (root) liveInputKeys = inputs;
   return node;
 }
 let error: string | null = null;
@@ -432,6 +440,14 @@ function connectionsPopover(conv: any, live: any, active: any, connected: boolea
   ] }, { type: "label", key: "where", text: `${statusText} · ${live?.machineId || view.workspace.machineId} · ${view.workspace.root}`, size: "xs", color: "muted", wrap: true, tooltip: view.workspace.root });
   // MCP servers
   body.push({ type: "divider", key: "d-mcp" }, heading("mcp-h", "MCP SERVERS", [...on].filter(id => servers.some(s => s.id === id)).length));
+  // Hato's own tool servers are reached through credentials that end with each Hato restart; a
+  // reconnect issues new ones and resumes the provider session.
+  if (!pending && (connected || background)) body.push({ type: "row", key: "reconnect-tools", gap: 8, align: "center", children: [
+    { type: "label", key: "t", text: "Hato tools not responding after a restart?", size: "xs", color: "muted", grow: true, wrap: true },
+    { type: "button", key: "b", text: "Reconnect MCPs", iconSvg: uiIcons.refresh, action: "reconnect", small: true, disabled: !idle || !!active.busy || !!busy,
+      tooltip: !idle || active.busy ? "Wait for the agent to finish its turn, or stop it, before reconnecting"
+        : "Restart this chat's MCP servers with fresh connections to Hato. The conversation resumes where it left off." },
+  ] });
   for (const sv of servers) {
     const isOn = on.has(sv.id), isApplied = applied.has(sv.id), open = toolsExpanded.has(toolKey(sv.id));
     const state = isOn && (isApplied || !connected) ? (connected ? ["connected", tone.ok] : ["enabled", tone.info]) : isOn ? ["reconnect to apply", tone.warn] : isApplied ? ["removing on reconnect", tone.warn] : ["off", tone.off];
@@ -662,7 +678,7 @@ const mod: AppModule = {
     const skillState = workspaceSkillState?.workspaceId === ws?.id ? workspaceSkillState : null;
     const skills: { name: string; description: string; path: string }[] = skillState?.skills || [];
     const config = selectors(live, connected);
-    const slashCommands = slashDismissed ? [] : matchingCommands(live?.commands, draft || "");
+    const slashCommands = slashDismissed ? [] : matchingCommands(live?.commands, draft || "", 50);
     const model = config.find((n) => n.key === "cfg-model") as Extract<UiNode, { type: "select" }>;
     const modelName = model.options.find((o) => o.value === model.value)?.label || (connected ? "Choose model" : "Connect to choose");
     const modelOption = (live?.configOptions || []).find((o: any) => o.category === "model");
@@ -841,8 +857,6 @@ const mod: AppModule = {
           { type: "image", key: "preview", image, width: 80, height: 64 },
           { type: "button", key: "remove", text: "× " + image.name, action: "removeImage", value: index, small: true, tooltip: "Remove picture" },
         ] })) });
-        if (slashCommands.length) composer.push({ type: "column", key: "slash-commands", gap: 2, maxHeight: 220, scroll: true, style: { ...chatStyle.picker, background: "background", padding: 4 }, children: slashCommands.map((command): UiNode => ({ type: "choice", key: command.name, text: `/${command.name}`,
-          description: [command.description, command.input?.hint].filter(Boolean).join(" · "), action: "chooseCommand", value: command.name })) });
         composer.push({ type: "textInput", key: "prompt", style: { ...chatStyle.textarea, minHeight: 56 }, changeAction:"draftChanged", cancelAction: "dismissCommands", pasteImageAction: "attachImages", maxFiles: 4, maxBytes: 5 * 1024 * 1024, placeholder: active.busy ? "Steer " + providerName + "…" : "Ask " + providerName + "…", multiline: true, fillHeight: true, grow: true, rows: 2, submitAction: "send", value: draft });
         // Two fixed rows that fit any panel width: what the chat uses (attachments, tools, model),
         // then how it runs (Auto, settings, context, send). The composer's minimum height fits both.
@@ -873,7 +887,16 @@ const mod: AppModule = {
           ...(active.busy ? [{ type: "button", key: "cancel", text: "Stop", action: "cancel", style: chatStyle.control } as UiNode] : []),
           { type: "button", key: "send", text: "", iconSvg: uiIcons.send, action: "send", style: chatStyle.iconPrimary, variant: "primary", disabled: busy === "send", tooltip: active.busy ? "Steer agent" : "Send message" },
         ] });
-        const transcript = kids.pop()!;
+        // The transcript pane anchors popovers that open upward from just above the composer.
+        const transcriptPane: UiNode = { type: "column", key: "transcript-pane", grow: true, style: { position: "relative", minHeight: 0 }, children: [kids.pop()!] };
+        // An in-layout layer pinned above the composer, not a popover: popovers take keyboard focus
+        // when they open, and this list follows typing in the composer. Explicit height = scrollable.
+        if (slashCommands.length) (transcriptPane as any).children.push({ type: "column", key: "slash-commands", scroll: true, gap: 2, padding: 4,
+          height: Math.min(slashCommands.length, 5) * 50 + 8,
+          style: { ...chatStyle.picker, background: "background", position: "absolute", bottom: 6, left: 8, right: 8 },
+          children: slashCommands.map((command): UiNode => ({ type: "choice", key: command.name, text: `/${command.name}`,
+            description: [command.description, command.input?.hint].filter(Boolean).join(" · "), action: "chooseCommand", value: command.name })) });
+        const transcript = transcriptPane;
         kids.push({ type: "split", key: "chat-composer-split", direction: "vertical", grow: true,
           fixed: attachments.length ? [null, 240] : undefined,
           sizes: [1 - Math.max(composerFraction, attachments.length ? 0.42 : 0), Math.max(composerFraction, attachments.length ? 0.42 : 0)], minSize: attachments.length ? 260 : 150, resizeAction: "resizeComposer",
@@ -1459,7 +1482,7 @@ mod.onEvent = (ctx, event) => {
     const [,token,...action] = event.action.split(":");
     if(token!==origin)return;
     event={...event,action:action.join(":")};
-  } else if(event.key) return; // Native events must carry the render's origin token.
+  } else if(event.key && !liveInputKeys.has(event.key)) return; // Other native events must carry the render's origin token.
   const eventOrigin=origin;
   if(["selectConv","backToChats","newChat"].includes(event.action)){loadGeneration++;origin=crypto.randomUUID();}
   pendingEvents++;

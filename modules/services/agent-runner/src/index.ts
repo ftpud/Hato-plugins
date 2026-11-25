@@ -70,6 +70,18 @@ function message(ctx:ModuleContext,s:AgentSession,role:ChatMessage["role"],text:
     return ctx.host.db.exec(db,"INSERT INTO messages(session_id, role, text, title, status, turn, images_json, tool_call_id, provider_message_id, provider_session_id) VALUES(?,?,?,?,?,?,?,?,?,?)",[s.id,role,text,title||null,status||null,turn,images?.length?JSON.stringify(images):null,toolCallId||null,messageId,providerSessionId]);
   });
 }
+function isProviderCommand(s:AgentSession,text:string) {
+  const name=/^\/([^\s/]+)/.exec(text)?.[1];
+  return !!name&&(s.commands||[]).some(c=>c.name===name);
+}
+const DESKTOP_MCP_IDS=["internal-remote-mcp-local","internal-local-mcp"];
+/** Slash commands the provider advertises; bounded plain data for the chat composer. */
+function providerCommands(list:unknown):NonNullable<AgentSession["commands"]> {
+  if(!Array.isArray(list))return [];
+  return list.slice(0,200).filter((c:any)=>c&&typeof c.name==="string"&&/^[^\s/]{1,80}$/.test(c.name)).map((c:any)=>({name:c.name,
+    ...(typeof c.description==="string"?{description:c.description.slice(0,400)}:{}),
+    ...(c.input&&typeof c.input==="object"?{input:typeof c.input.hint==="string"?{hint:c.input.hint.slice(0,200)}:{}}:{})}));
+}
 function publicSession(s:AgentSession) {
   // Secrets stay in the runner: env values and header values (e.g. OAuth bearer tokens) are redacted.
   const {inline,systemPrompt,progressInstruction,...rest}=s;
@@ -154,6 +166,7 @@ function update(ctx:ModuleContext,c:Live,u:any) {
   } else if(kind==="config_option_update") { c.session.configOptions=u.configOptions||[];void persist(ctx,c.session); }
   else if(kind==="current_mode_update"&&c.session.modes) { c.session.modes={...c.session.modes,currentModeId:u.currentModeId};void persist(ctx,c.session); }
   else if(kind==="usage_update") { c.session.usage=reportedUsage(u);void persist(ctx,c.session); }
+  else if(kind==="available_commands_update") { c.session.commands=providerCommands(u.availableCommands);void persist(ctx,c.session); }
 }
 function emitProviderTurn(ctx:ModuleContext,c:Live,event:Record<string,unknown>) {
   if(c.session.workflow)ctx.events.emit("agent-runner.providerTurn",{...event,sessionId:c.session.id,workflow:c.session.workflow});
@@ -527,9 +540,12 @@ const mod:AppModule={
       if(images.length&&!s.promptImages)throw new Error(`${s.profile.name} does not support image prompts. Choose a provider with image support.`);
       if(s.status==="busy"||s.status==="waiting") {
         if(a.steer!==true)throw new Error("Agent is busy; use Steer");
+        // A provider slash command runs as its own prompt: it waits for the turn instead of being
+        // injected into it or interrupting it.
+        const command=!images.length&&isProviderCommand(s,text);
         // Without steering support (or if it fails) a follow-up interrupts the turn, as before.
-        let interrupt=!c.steering;
-        if(c.steering&&!c.queued.length) {
+        let interrupt=!c.steering&&!command;
+        if(c.steering&&!c.queued.length&&!command) {
           // Inject into the running turn; only a turn that already ended needs a new prompt.
           let outcome="unsupported";
           try{const r=await request(c,"_session/steering",{sessionId:s.sessionId,prompt:promptBlocks(text,images),_meta:{steering:{idleBehavior:"promptRequired"}}},30000);outcome=r?.outcome==="promptRequired"?"promptRequired":"steered";}
@@ -566,6 +582,10 @@ const mod:AppModule={
       // Refreshed OAuth headers from the desktop replace the expired ones before reconnecting.
       const auth=a.authorization&&typeof a.authorization==="object"?a.authorization:{};
       s.mcps=(s.mcps as any[]).map(m=>typeof auth[m.id]==="string"&&Array.isArray(m.headers)?{...m,headers:[...m.headers.filter((h:any)=>String(h.name).toLowerCase()!=="authorization"),{name:"Authorization",value:auth[m.id]}]}:m);
+      // Desktop-hosted servers are reissued by the desktop on reconnect (new port and token); only
+      // servers the agent already uses can be replaced.
+      const fresh=new Map((Array.isArray(a.endpoints)?a.endpoints:[]).filter((m:any)=>m&&DESKTOP_MCP_IDS.includes(m.id)).map((m:any)=>[m.id,m]));
+      if(fresh.size)s.mcps=(s.mcps as any[]).map(m=>fresh.get(m.id)??m);
       await start(ctx,s);return s;
     }),
     stop:(ctx,a)=>serialize(String(a.id),()=>stop(ctx,String(a.id))),
@@ -640,7 +660,7 @@ const mod:AppModule={
       if(typeof p.customName==="boolean")s.customName=p.customName;
       if(configChanged) {
         Object.assign(s,{profile:p.profile,model:String(p.model||""),agentFile:p.agentFile||null,skills:p.skills,mcps:p.mcps,workspaceMcp:!!p.workspaceMcp,inline:p.inline&&typeof p.inline==="object"?p.inline:{},trackAutonomousClaudeTurns,contextSent:newProvider||(instructionsChanged&&!s.sentDigests)?false:s.contextSent});
-        if(newProvider){s.handoffPending=true;s.sessionId=null;s.configOptions=[];s.models=null;s.modes=null;s.usage=null;s.systemPrompt=null;s.systemPromptSent=false;s.progressInstruction=undefined;s.sentDigests=undefined;s.reasoning="";s.settings={};}
+        if(newProvider){s.handoffPending=true;s.sessionId=null;s.configOptions=[];s.models=null;s.modes=null;s.usage=null;s.commands=[];s.systemPrompt=null;s.systemPromptSent=false;s.progressInstruction=undefined;s.sentDigests=undefined;s.reasoning="";s.settings={};}
       }
       if(workflowUpdate) {
         try { await start(ctx,s,!newProvider); }

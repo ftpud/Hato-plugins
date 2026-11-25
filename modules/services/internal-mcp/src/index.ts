@@ -5,6 +5,7 @@
 // token bound to one conversation/workspace/machine. Tool logic delegates to `module-dev`, whose
 // mutating operations are approved natively by the kernel (Autopilot cannot bypass that).
 import { McpRegistry } from "./registry";
+import { mcpRelaySource, sha256Hex } from "@hato/sdk/mcp-relay";
 import { agentProgress, PROGRESS_INSTRUCTION, REPORT_PROGRESS_TOOL, type AgentProgress } from "@hato/sdk/persistent-agents";
 import type { AppModule, Handle, ModuleContext } from "@hato/sdk/types";
 import { errMsg, JsonRpcPeer, rpcError, sshConnect, type WorkspaceDescriptor } from "@hato/sdk/runtime";
@@ -16,33 +17,34 @@ import skActivate from "../skills/activate-and-verify.md";
 import skRollback from "../skills/rollback-module.md";
 
 const SERVER_VERSION = "1.0.0";
-const PROXY_VERSION = "v1";
+// v2 survives Hato restarts: it reconnects to the same port with the same token.
+const PROXY_VERSION = "v2";
 const SUPPORTED_PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const SKILLS: Record<string, string> = { "self-configure": skSelfConfigure, "inspect-module": skInspect, "patch-module": skPatch, "build-and-test-module": skBuild, "activate-and-verify": skActivate, "rollback-module": skRollback };
 
-export const PROXY_SOURCE = `#!/usr/bin/env node
-// hato-mcp-proxy ${PROXY_VERSION}: forwards newline-delimited MCP JSON-RPC between stdio and a loopback
-// socket. Contains no application logic. Env: HATO_MCP_PORT, HATO_MCP_TOKEN.
-import net from "node:net";
-const port = Number(process.env.HATO_MCP_PORT);
-const token = process.env.HATO_MCP_TOKEN || "";
-if (!port || !token) { process.stderr.write("hato-mcp-proxy: HATO_MCP_PORT/HATO_MCP_TOKEN missing\\n"); process.exit(2); }
-const s = net.connect({ host: "127.0.0.1", port }, () => {
-  s.write(JSON.stringify({ hatoAuth: token }) + "\\n");
-  process.stdin.pipe(s);
-});
-s.pipe(process.stdout);
-s.on("error", (e) => { process.stderr.write("hato-mcp-proxy: " + e.message + "\\n"); process.exit(1); });
-s.on("close", () => process.exit(0));
-process.stdin.on("end", () => s.end());
-`;
+export const PROXY_SOURCE = mcpRelaySource({ authKey: "hatoAuth", format: "esm", version: PROXY_VERSION });
 
 interface TokenInfo { conversationId: string; workspaceId: string; machineId: string; created: number; desktopOnly?: boolean }
 interface McpConn { handle: Handle; token: string | null; buf: string; peer: JsonRpcPeer | null; inflight: number; client: any }
 
 let registry: McpRegistry;
 let listener: { handle: Handle; port: number } | null = null;
+/** sha256(token) → scope. Only hashes are kept, in memory and at rest; agents hold the raw token. */
 const tokens = new Map<string, TokenInfo>();
+const TOKENS_KEY = "internal-mcp.tokens", PORT_KEY = "internal-mcp.port", MAX_TOKENS = 500;
+async function saveTokens(ctx: ModuleContext) {
+  const entries = Array.from(tokens.entries()).sort((a, b) => b[1].created - a[1].created).slice(0, MAX_TOKENS);
+  await ctx.modules.call("persistence", "settings.set", { key: TOKENS_KEY, value: entries }).catch((e: unknown) => ctx.log.warn("cannot save MCP tokens", errMsg(e)));
+}
+async function loadTokens(ctx: ModuleContext) {
+  try {
+    const saved = await ctx.modules.call("persistence", "settings.get", { key: TOKENS_KEY });
+    if (Array.isArray(saved)) for (const entry of saved) {
+      const [hash, info] = Array.isArray(entry) ? entry : [];
+      if (typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash) && info && typeof info.conversationId === "string") tokens.set(hash, info);
+    }
+  } catch (e) { ctx.log.warn("cannot load MCP tokens", errMsg(e)); }
+}
 const connsByHandle = new Map<Handle, McpConn>();
 const forwards = new Map<string, { handle: Handle; remotePort: number; proxyPath: string }>();
 let localProxyPath: string | null = null;
@@ -175,7 +177,7 @@ async function onConnection(ctx: ModuleContext, handle: Handle, restored?: Parti
     const rest = conn.buf.slice(i + 1);
     conn.buf = "";
     let tok: string | null = null;
-    try { tok = JSON.parse(first).hatoAuth; } catch { tok = null; }
+    try { const raw = JSON.parse(first).hatoAuth; tok = typeof raw === "string" && raw ? sha256Hex(raw) : null; } catch { tok = null; }
     if (!tok || !tokens.has(tok)) {
       stats.authFailures++;
       ctx.log.warn("rejected unauthenticated MCP connection");
@@ -190,7 +192,13 @@ async function onConnection(ctx: ModuleContext, handle: Handle, restored?: Parti
 
 async function ensureListener(ctx: ModuleContext) {
   if (listener) return listener;
-  listener = await ctx.host.net.listenLoopback();
+  // Reuse the previous port so relays started before a Hato restart find this server again.
+  let saved: unknown = null;
+  try { saved = await ctx.modules.call("persistence", "settings.get", { key: PORT_KEY }); } catch { saved = null; }
+  const port = typeof saved === "number" && saved >= 1024 && saved <= 65535 ? saved : 0;
+  try { listener = await ctx.host.net.listenLoopback(port ? { port } : undefined); }
+  catch (e) { if (!port) throw e; ctx.log.warn(`MCP port ${port} unavailable; agents started earlier need a reconnect`, errMsg(e)); listener = await ctx.host.net.listenLoopback(); }
+  if (listener.port !== port) await ctx.modules.call("persistence", "settings.set", { key: PORT_KEY, value: listener.port }).catch(() => {});
   await listenAccepts(ctx);
   return listener;
 }
@@ -251,14 +259,18 @@ const mod: AppModule = {
     await registry.start();
     if (prev && prev.listener) {
       listener = prev.listener;
-      for (const [k, v] of prev.tokens || []) tokens.set(k, v);
+      // Snapshots before v2 keyed tokens by their raw value.
+      const hashed = prev.tokenKeys === "sha256";
+      for (const [k, v] of prev.tokens || []) tokens.set(hashed ? k : sha256Hex(k), v);
       for (const [k, v] of prev.forwards || []) forwards.set(k, v);
       localProxyPath = prev.localProxyPath || null;
       stats = prev.stats || stats;
       await listenAccepts(ctx);
-      for (const c of prev.conns || []) await onConnection(ctx, c.handle, { token: c.token, client: c.client });
+      for (const c of prev.conns || []) await onConnection(ctx, c.handle, { token: hashed || !c.token ? c.token : sha256Hex(c.token), client: c.client });
+      if (!hashed) await saveTokens(ctx);
       ctx.log.info(`internal MCP re-attached: port ${listener!.port}, ${tokens.size} token(s), ${(prev.conns || []).length} connection(s)`);
     } else {
+      await loadTokens(ctx);
       await ensureListener(ctx);
       ctx.log.info(`internal MCP listening on 127.0.0.1:${listener!.port} (token-authenticated)`);
     }
@@ -268,14 +280,15 @@ const mod: AppModule = {
     for (const c of connsByHandle.values()) if (c.inflight > 0) return { ok: false, reason: "an MCP tool call is in flight" };
     return { ok: true };
   },
-  snapshot: () => ({ listener, tokens: Array.from(tokens.entries()), forwards: Array.from(forwards.entries()), localProxyPath, stats, conns: Array.from(connsByHandle.values()).filter((c) => c.token).map((c) => ({ handle: c.handle, token: c.token, client: c.client })) }),
+  snapshot: () => ({ listener, tokenKeys: "sha256", tokens: Array.from(tokens.entries()), forwards: Array.from(forwards.entries()), localProxyPath, stats, conns: Array.from(connsByHandle.values()).filter((c) => c.token).map((c) => ({ handle: c.handle, token: c.token, client: c.client })) }),
   methods: {
     /** MCP server config (ACP `mcpServers` stdio entry) for one conversation on its workspace machine. */
     async endpoint(ctx, a) {
       const desc: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
       for (const [t, info] of tokens) if (info.conversationId === a.conversationId) tokens.delete(t);
       const token = crypto.randomHex(32);
-      tokens.set(token, { conversationId: a.conversationId, workspaceId: desc.id, machineId: desc.machineId, created: Date.now(), desktopOnly: a.desktopOnly === true });
+      tokens.set(sha256Hex(token), { conversationId: a.conversationId, workspaceId: desc.id, machineId: desc.machineId, created: Date.now(), desktopOnly: a.desktopOnly === true });
+      await saveTokens(ctx);
       const l = await ensureListener(ctx);
       if (desc.location === "local") {
         const proxy = await deployLocalProxy(ctx);
@@ -288,6 +301,7 @@ const mod: AppModule = {
     async revoke(ctx, a) {
       let machine: string | null = null;
       for (const [t, info] of tokens) if (info.conversationId === a.conversationId) { machine = info.machineId; tokens.delete(t); for (const c of connsByHandle.values()) if (c.token === t) ctx.host.net.close(c.handle).catch(() => {}); }
+      await saveTokens(ctx);
       if (machine && machine !== "local" && ![...tokens.values()].some((i) => i.machineId === machine)) {
         const f = forwards.get(machine);
         if (f) { await ctx.host.ssh.cancelForward(f.handle).catch(() => {}); forwards.delete(machine); }

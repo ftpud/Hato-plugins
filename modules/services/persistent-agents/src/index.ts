@@ -126,15 +126,23 @@ async function agentConfig(ctx:ModuleContext,c:Awaited<ReturnType<typeof catalog
   const auth=await oauthHeaders(ctx,chosen);
   // Agents receive ACP-shaped entries; OAuth servers carry a short-lived token refreshed on reconnect.
   const servers:any[]=chosen.map(m=>({id:m.id,...acpServer(m,auth[m.id])}));
+  servers.push(...await desktopEndpoints(ctx,c.workspace.id,sessionId,ids,[agentFile,...skills],inline));
+  return {profile,model,agentFile,skills,mcps:servers,workspaceMcp:ids.includes("internal-remote-mcp"),inline};
+}
+/** Servers hosted by this desktop. Their loopback port and token live only as long as the desktop
+ *  process, so every connect after a desktop restart needs freshly issued entries. */
+const DESKTOP_MCP_IDS=["internal-remote-mcp-local","internal-local-mcp"];
+async function desktopEndpoints(ctx:ModuleContext,workspaceId:string,sessionId:string,ids:string[],skillPaths:(string|null)[],inline:Record<string,string>) {
+  const servers:any[]=[];
   if(ids.includes("internal-remote-mcp-local")) {
-    const endpoint=await ctx.modules.call("internal-remote-mcp","endpoint",{workspaceId:c.workspace.id,sessionId,skills:[...new Set([agentFile,...skills].filter(Boolean))],inline});
+    const endpoint=await ctx.modules.call("internal-remote-mcp","endpoint",{workspaceId,sessionId,skills:[...new Set(skillPaths.filter(Boolean))],inline});
     servers.push({...endpoint,id:"internal-remote-mcp-local",name:"internal-remote-mcp-local"});
   }
   if(ids.includes("internal-local-mcp")) {
-    const endpoint=await ctx.modules.call("internal-local-mcp","endpoint",{conversationId:sessionId,workspaceId:c.workspace.id});
+    const endpoint=await ctx.modules.call("internal-local-mcp","endpoint",{conversationId:sessionId,workspaceId});
     servers.push({id:"internal-local-mcp",...endpoint.server});
   }
-  return {profile,model,agentFile,skills,mcps:servers,workspaceMcp:ids.includes("internal-remote-mcp"),inline};
+  return servers;
 }
 // Git task requests from background agents' workspace MCP. The project always comes from the
 // agent's own workspace. Creating a task or starting an agent in one needs the user's native
@@ -559,7 +567,15 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     const used=new Set((v.session.mcps||[]).map((m:any)=>m.id));
     const authorization=await oauthHeaders(ctx,(await mcps(ctx)).filter(m=>used.has(m.id)));
     const subscription=await ctx.modules.call("persistence","settings.get",{key:"acp.claude.useSubscription"});
-    return invoke(ctx,a.workspaceId,"reconnect",{id:a.id,authorization,claudeSubscription:subscription!==false});
+    // Desktop-hosted tool servers get new credentials: the ones the agent holds die with each desktop restart.
+    const desktopIds=DESKTOP_MCP_IDS.filter(id=>used.has(id));
+    let endpoints:any[]=[];
+    if(desktopIds.length) {
+      const paths=[v.session.agentFile,...(v.session.skills||[])];
+      const inline=desktopIds.includes("internal-remote-mcp-local")&&paths.some(isLibraryRef)?libraryInline(await catalog(ctx,a.workspaceId),paths):{};
+      endpoints=await desktopEndpoints(ctx,a.workspaceId,v.session.id,desktopIds,paths,inline);
+    }
+    return invoke(ctx,a.workspaceId,"reconnect",{id:a.id,authorization,endpoints,claudeSubscription:subscription!==false});
   },
   async setModel(ctx,a) {
     const v=await owned(ctx,a);
