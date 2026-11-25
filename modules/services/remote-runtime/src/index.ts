@@ -13,6 +13,8 @@ const lastError = new Map<string, string>();
 const connected = new Map<string, DaemonTarget>();
 const tunnels = new Map<string, any>();
 const syncing = new Map<string, Promise<any>>();
+/** Machines whose daemon was ensured by a workspace selection in this module generation. */
+const ensuredMachines = new Set<string>();
 function sync(ctx: ModuleContext, machineId: string, target: DaemonTarget) {
   const previous = syncing.get(machineId) || Promise.resolve();
   const next = previous.catch(() => {}).then(async () => {
@@ -85,14 +87,16 @@ const mod: AppModule = {
       await ctx.modules.call("persistence", "settings.set", { key: "remote-runtime.prefs", value: next });
       autoStart = next.autoStart; autoPush = next.autoPush;
     });
-    // `workspace.selected` also changes with view state (open tabs, preview path). Ensuring costs
-    // several SSH round trips, so it runs once per workspace selection; a failure retries next time.
-    let ensuredFor: string | null = null;
+    // The daemon, its service plugins and machine-scoped settings belong to the machine, not the
+    // project: ensure them once per machine, so switching between projects on one host costs no
+    // SSH round trips. Project state (terminals, agents, chats) stays keyed by workspace in its own
+    // module. A failure, or the machine's connection being reset, retries on the next selection.
     ctx.state.watch("workspace.selected", (ws: any) => {
-      const id = autoStart && ws?.location === "ssh" && ws.id ? String(ws.id) : null;
-      if (id === ensuredFor) return;
-      ensuredFor = id;
-      if (id) ensure(ctx, id).catch((e) => { if (ensuredFor === id) ensuredFor = null; ctx.log.warn("daemon", errMsg(e)); });
+      if (!autoStart || ws?.location !== "ssh" || !ws.id || !ws.machineId) return;
+      const machineId = String(ws.machineId);
+      if (ensuredMachines.has(machineId)) return;
+      ensuredMachines.add(machineId);
+      ensure(ctx, String(ws.id)).catch((e) => { ensuredMachines.delete(machineId); ctx.log.warn("daemon", errMsg(e)); });
     });
     ctx.events.on("persistence.settingChanged", (event: any) => {
       if (!event?.scope?.startsWith("machine:")) return;
@@ -138,12 +142,13 @@ const mod: AppModule = {
       const { d, target } = await resolve(ctx, String(a.workspaceId));
       const daemon = await ctx.host.daemon.status(target);
       const base = { machineId: d.machineId, location: d.location, error: lastError.get(d.machineId) || null, candidates: (await workspacePlugins(ctx)).map((p) => p.id) };
-      if (!daemon) return { ...base, running: false };
+      if (!daemon) { ensuredMachines.delete(d.machineId); return { ...base, running: false }; }
       try {
         const hello = await ctx.host.daemon.request(target, "hello");
         const stale = !!daemon.status?.stale || (d.location === "cloud" && !hello.features?.includes("fs"));
         return { ...base, running: true, version: hello.version, pid: hello.pid, stale, resources: hello.resources, plugins: hello.plugins };
       } catch (e) {
+        ensuredMachines.delete(d.machineId); // ensure again on the next selection
         return { ...base, running: false, error: errMsg(e) };
       }
     },

@@ -13,6 +13,7 @@ import { WORKFLOW_TEMPLATES } from "@hato/sdk/workflow-templates";
 import { exportSettings } from "@hato/sdk/settings";
 
 const prepared = new Map<string, Promise<{ target: DaemonTarget; bin: string; dir: string }>>();
+const PREPARE_RETRY_MS = 15_000;
 const autonomousTurnsSetting = "workflows.trackAutonomousClaudeTurns";
 let trackAutonomousClaudeTurns = true;
 function pushPreferences(ctx: ModuleContext, target: DaemonTarget) {
@@ -63,14 +64,23 @@ async function daemon(ctx: ModuleContext, d: WorkspaceDescriptor) {
       return { target, bin: info.bin, dir: info.dir };
     })();
     prepared.set(d.machineId, pending);
-    void pending.catch(() => prepared.delete(d.machineId));
+    // Keep a failure briefly so polling callers share it instead of re-running ensure each tick.
+    const failed = pending;
+    void failed.catch(() => setTimeout(() => { if (prepared.get(d.machineId) === failed) prepared.delete(d.machineId); }, PREPARE_RETRY_MS));
   }
   return pending;
+}
+/** Whether a failed daemon call means the daemon or the runtime plugin is gone (prepare again),
+ *  as opposed to the runtime rejecting the request (keep the preparation). The panel polls every
+ *  1.2 s, so re-preparing on ordinary errors re-ran `daemon.ensure` in a loop. */
+function runtimeGone(e: any) {
+  if (["ENOTCONN", "EBADF", "ESTALE", "ESHUTDOWN", "EUNAVAILABLE", "ECLOUD"].includes(e?.code)) return true;
+  return /no module '|is unavailable|has no active generation|is not running|daemon ctl failed|daemon socket|not connected/i.test(errMsg(e));
 }
 async function daemonCall(ctx: ModuleContext, d: WorkspaceDescriptor, target: string, method: string, args: any = {}, timeoutMs = 120_000) {
   const t = await daemon(ctx, d);
   try { return await ctx.host.daemon.request(t.target, "modules.call", { target, method, args, timeoutMs }); }
-  catch (e) { prepared.delete(d.machineId); throw e; }
+  catch (e) { if (runtimeGone(e)) prepared.delete(d.machineId); throw e; }
 }
 const runner = (ctx: ModuleContext, d: WorkspaceDescriptor, method: string, args: any = {}, timeoutMs?: number) =>
   daemonCall(ctx, d, "workflow-runner", method, { projectId: d.projectId, ...args }, timeoutMs);
