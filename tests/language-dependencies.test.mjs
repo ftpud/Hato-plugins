@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -6,7 +7,7 @@ import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {build} from 'esbuild';
 async function load(name){
- const code=(await build({entryPoints:[new URL('../modules/services/language-service/src/'+name,import.meta.url).pathname],bundle:true,format:'esm',platform:'node',write:false})).outputFiles[0].text;
+ const code=(await build({entryPoints:[fileURLToPath(new URL('../modules/services/language-service/src/'+name,import.meta.url))],bundle:true,format:'esm',platform:'node',write:false})).outputFiles[0].text;
  return import('data:text/javascript;base64,'+Buffer.from(code).toString('base64')+'#'+Math.random());
 }
 const {DEPENDENCY_SCRIPT}=await load('dependency-script.ts');

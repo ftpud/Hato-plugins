@@ -1,7 +1,8 @@
+import { fileURLToPath } from "node:url";
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
-const code=(await build({entryPoints:[new URL('../modules/ui/language-tools/src/panel.ts',import.meta.url).pathname],bundle:true,format:'esm',write:false})).outputFiles[0].text;
+const code=(await build({entryPoints:[fileURLToPath(new URL('../modules/ui/language-tools/src/panel.ts',import.meta.url))],bundle:true,format:'esm',write:false})).outputFiles[0].text;
 const {LanguagePanel}=await import('data:text/javascript;base64,'+Buffer.from(code).toString('base64'));
 const project=()=>({config:{enabled:true,values:{sourcePaths:[]},settings:{}},schema:{title:'Java project',fields:[{key:'sourcePaths',type:'paths',directory:true},{key:'outputPath',type:'text',directory:true}]},status:{phase:'idle'}});
 const event=(action,value,key='',inputs={})=>({action,value,key,inputs});

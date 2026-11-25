@@ -1,8 +1,9 @@
+import { fileURLToPath } from "node:url";
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 const root = new URL('../', import.meta.url);
-const code = (await build({ entryPoints: [new URL('modules/ui/viewer/src/assist.ts', root).pathname], bundle: true, format: 'esm', platform: 'node', write: false })).outputFiles[0].text;
+const code = (await build({ entryPoints: [fileURLToPath(new URL('modules/ui/viewer/src/assist.ts', root))], bundle: true, format: 'esm', platform: 'node', write: false })).outputFiles[0].text;
 const a = await import('data:text/javascript;base64,' + Buffer.from(code).toString('base64'));
 
 // Shapes recorded from Eclipse JDT LS 1.63.

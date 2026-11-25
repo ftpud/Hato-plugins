@@ -1,7 +1,8 @@
+import { fileURLToPath } from "node:url";
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
-const load=async id=>import('data:text/javascript;base64,'+Buffer.from((await build({entryPoints:[new URL(`../modules/ui/${id}/src/index.ts`,import.meta.url).pathname],bundle:true,format:'esm',write:false,alias:{'@hato/sdk':new URL('../../sdk',import.meta.url).pathname}})).outputFiles[0].text).toString('base64'));
+const load=async id=>import('data:text/javascript;base64,'+Buffer.from((await build({entryPoints:[fileURLToPath(new URL(`../modules/ui/${id}/src/index.ts`,import.meta.url))],bundle:true,format:'esm',write:false,alias:{'@hato/sdk':fileURLToPath(new URL('../../sdk',import.meta.url))}})).outputFiles[0].text).toString('base64'));
 const walk=n=>[n,...(n.children||[]).flatMap(walk)];
 test('lng-srv exposes project settings on a separate row and opens the chosen disabled language',async()=>{
  const {default:tools}=await load('language-tools'),{default:status}=await load('language-status');

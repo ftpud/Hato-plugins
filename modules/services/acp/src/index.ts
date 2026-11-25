@@ -1,21 +1,17 @@
 import { providerMcpLaunch } from "@hato/sdk/provider-mcp";
+import { authMethods, sessionPage, terminalAuthEnvironment, acpSystemPrompt } from "@hato/sdk/acp-protocol";
 // acp: Agent Client Protocol (agentclientprotocol.com) client implemented in TS over generic
 // process stdio streams. The agent process runs ON the workspace's machine with cwd = the exact
 // project root / worktree: local child process for local workspaces, SSH exec for remote ones.
 // No local fallback, no implicit clone, no auto-install.
 import { agentProviders, providerProfiles, type AgentProvider } from "@hato/sdk/agent-providers";
 import { imageAttachments } from "@hato/sdk/images";
+import { reportedUsage, type ReportedUsage } from "@hato/sdk/context-usage";
 import { type LimitProvider, type LimitsSnapshot } from "@hato/sdk/usage-limits";
 import type { AppModule, Handle, ModuleContext } from "@hato/sdk/types";
 import { errMsg, JsonRpcPeer, rpcError, targetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 
 const PROTOCOL_VERSION = 1;
-interface ReportedUsage { used: number; size: number; cost?: number }
-function reportedUsage(value: any): ReportedUsage | null {
-  if (!value || typeof value.used !== "number" || !Number.isFinite(value.used) || value.used < 0
-    || typeof value.size !== "number" || !Number.isFinite(value.size) || value.size < 0) return null;
-  return { used: value.used, size: value.size, ...(typeof value.cost === "number" && Number.isFinite(value.cost) && value.cost >= 0 ? { cost: value.cost } : {}) };
-}
 async function providers(ctx: ModuleContext) { return agentProviders((await ctx.host.plugins.list()).plugins); }
 async function providerById(ctx: ModuleContext, id: string): Promise<AgentProvider> {
   const found = (await providers(ctx)).find(p => p.id === id);
@@ -36,14 +32,13 @@ async function environmentPolicy(ctx: ModuleContext, profile: any) {
 }
 
 /** Capabilities understood by this client. OpenCode uses agent-side filesystem/shell tools, so
- * generic ACP fs/terminal methods stay disabled; terminal authentication is a separate capability. */
+ * generic ACP fs/terminal methods stay disabled. Terminal authentication stays disabled until arbitrary-argv PTY launch is supported.
+ * Form elicitation is supported by the desktop UI. */
 const CLIENT_CAPABILITIES = {
   fs: { readTextFile: false, writeTextFile: false },
   terminal: false,
-  auth: { terminal: true },
-  _meta: { "terminal-auth": true },
   elicitation: { form: {} },
-  session: { compaction: {} },
+  session: { configOptions: { boolean: {} } },
 };
 
 function additionalDirectories(value: any): string[] {
@@ -59,8 +54,24 @@ function additionalDirectories(value: any): string[] {
   return [...out];
 }
 
+function terminalAuthMethod(method: any): any | null {
+  const legacy = method?._meta?.["terminal-auth"];
+  return method?.type === "terminal" || legacy ? { ...legacy, ...method, args: Array.isArray(method.args) ? method.args : Array.isArray(legacy?.args) ? legacy.args : undefined,
+    env: method.env && typeof method.env === "object" ? method.env : legacy?.env } : null;
+}
+
+function supportsAdditionalDirectories(c: Conn): boolean {
+  return !!c.agentCapabilities?.sessionCapabilities?.additionalDirectories;
+}
+
+function requireAdditionalDirectories(c: Conn, dirs: string[]) {
+  if (dirs.length && !supportsAdditionalDirectories(c)) {
+    throw new Error("This agent does not support additionalDirectories; remove the additional workspace roots or choose an agent that advertises sessionCapabilities.additionalDirectories");
+  }
+}
+
 function sessionMatches(c: Conn, params: any): boolean {
-  return !params?.sessionId || params.sessionId === c.sessionId;
+  return !params?.sessionId || params.sessionId === c.sessionId || (c.loadingHistory === true && params.sessionId === c.loadingSessionId);
 }
 
 function promptBlocks(a: any, c: Conn): any[] {
@@ -75,17 +86,19 @@ function promptBlocks(a: any, c: Conn): any[] {
           return block;
         case "image":
           if (!c.agentCapabilities?.promptCapabilities?.image) throw new Error("This agent does not support image prompts");
-          if (typeof block.data !== "string" && typeof block.uri !== "string") throw new Error("Image blocks require data or uri");
+          if (typeof block.data !== "string" || typeof block.mimeType !== "string") throw new Error("Image blocks require data and mimeType");
           return block;
         case "resource":
-          if (typeof block.text !== "string" && typeof block.blob !== "string") throw new Error("Resource blocks require text or blob");
-          if (typeof block.blob === "string" && typeof block.mimeType !== "string") throw new Error("Blob resources require mimeType");
+          if (!c.agentCapabilities?.promptCapabilities?.embeddedContext) throw new Error("This agent does not support embedded context");
+          if (!block.resource || typeof block.resource.uri !== "string" || (typeof block.resource.text !== "string" && typeof block.resource.blob !== "string")) throw new Error("Embedded resource requires nested resource uri and text or blob");
+          if (typeof block.resource.blob === "string" && typeof block.resource.mimeType !== "string") throw new Error("Blob resources require mimeType");
           return block;
         case "resource_link":
-          if (typeof block.uri !== "string") throw new Error("Resource links require uri");
+          if (typeof block.uri !== "string" || typeof block.name !== "string") throw new Error("Resource links require uri and name");
           return block;
         case "audio":
           if (!c.agentCapabilities?.promptCapabilities?.audio) throw new Error("This agent does not support audio prompts");
+          if (typeof block.data !== "string" || typeof block.mimeType !== "string") throw new Error("Audio blocks require data and mimeType");
           return block;
         default:
           throw new Error(`Unsupported ACP prompt block '${String(block.type)}'`);
@@ -109,6 +122,7 @@ function deferred<T>() {
 
 interface Conn {
   loadingHistory?: boolean;
+  loadingSessionId?: string | null;
   conversationId: string;
   workspaceId: string;
   machineId: string;
@@ -125,12 +139,14 @@ interface Conn {
   sessionId: string | null;
   sessionClosed?: boolean;
   additionalDirectories: string[];
+  systemPrompt: string | null;
   agentInfo: any;
   agentCapabilities: any;
   /** Agent advertised the `_session/steering` extension (inject into the running turn). */
   steering: boolean;
   authMethods: any[];
-  authProcess?: { handle: Handle; pid: number; methodId: string } | null;
+  authPlan?: any;
+  authProcess?: { attemptId?: string; kind?: "pty"; handle: Handle; pid: number; methodId: string; command: string; args: string[]; envKeys: string[]; cwd: string; machineId: string; label: string; startedAt: number } | null;
   configOptions: any[] | null;
   modes: any | null;
   models: any | null;
@@ -154,6 +170,23 @@ interface Conn {
 }
 
 const conns = new Map<string, Conn>();
+const startups = new Map<string, Promise<any>>();
+const operations = new Map<string, string>();
+
+function sessionNotFound(error: any): boolean { return error?.rpcCode === -32002; }
+function requireSessionId(value: any): string {
+  if (typeof value !== "string" || !value.trim() || value.length > 4096) throw new Error("A nonempty sessionId is required");
+  return value;
+}
+
+async function start(ctx: ModuleContext, a: any) {
+  const pending = startups.get(a.conversationId);
+  if (pending) return pending;
+  if (operations.has(a.conversationId)) throw new Error("A provider operation is already running");
+  const task = startConnection(ctx, a);
+  startups.set(a.conversationId, task);
+  try { return await task; } finally { startups.delete(a.conversationId); }
+}
 
 // ---- plan usage limits ---------------------------------------------------------------------------
 // Published at `acp.limits`, keyed by contributed provider IDs. Providers own usage commands
@@ -332,9 +365,9 @@ async function sessionMcp(ctx: ModuleContext, a: any, desc: WorkspaceDescriptor)
   return { servers, state };
 }
 
-async function start(ctx: ModuleContext, a: any) {
+async function startConnection(ctx: ModuleContext, a: any) {
   const existing = conns.get(a.conversationId);
-  if (existing && (existing.status === "ready" || existing.status === "busy" || existing.status === "starting")) return publicState(existing);
+  if (existing && ((existing.status === "ready" && existing.sessionId && !existing.sessionClosed) || existing.status === "busy" || existing.status === "starting")) return publicState(existing);
   if (existing) {
     existing.stopping = true;
     await ctx.host.process.closeStdin(existing.proc).catch(() => {});
@@ -376,6 +409,7 @@ async function start(ctx: ModuleContext, a: any) {
   const c: Conn = {
     conversationId: a.conversationId, workspaceId: desc.id, machineId: desc.machineId, cwd: desc.rootAbsolutePath, profileId: profile.id, providerId: profile.provider, providerModule: profile.providerModule,
     profile, env, envRemove, proc: spawned.handle, pid: spawned.pid, peer: null as any, sessionId: null, sessionClosed: false, additionalDirectories: dirs,
+    systemPrompt: typeof a.systemPrompt === "string" ? a.systemPrompt : null,
     agentInfo: null, agentCapabilities: null, steering: false, authMethods: [], authProcess: null,
     configOptions: null, modes: null, models: null, commands: [], usage: null, turnUsage: null, sessionInfo: null, childSessions: {}, compaction: null,
     status: "starting", error: null, stderrTail: "", activeTurn: null, pendingPermissions: new Map(), pendingElicitations: new Map(),
@@ -385,15 +419,15 @@ async function start(ctx: ModuleContext, a: any) {
   await wire(ctx, c, 1);
   emitStatus(ctx, c);
   try {
-    const init: any = await withTimeout(c.peer.request("initialize", {
+    const init: any = await sessionRequest(ctx, c, "initialize", {
       protocolVersion: PROTOCOL_VERSION,
-      clientCapabilities: CLIENT_CAPABILITIES,
+      clientCapabilities: { ...CLIENT_CAPABILITIES, ...(ctx.host.env.info().hostFeatures?.includes("pty.spawn") ? { auth: { terminal: true }, _meta: { "terminal-auth": true } } : {}) },
       clientInfo: { name: "hato", title: "Hato", version: "0.1.0" },
-    }), 60000, "initialize");
+    }, 60000);
     c.agentInfo = init.agentInfo || null;
     c.agentCapabilities = init.agentCapabilities || {};
     c.steering = init._meta?.steering?.supported === true;
-    c.authMethods = init.authMethods || [];
+    c.authMethods = authMethods(init.authMethods, !!ctx.host.env.info().hostFeatures?.includes("pty.spawn"));
     if (init.protocolVersion !== PROTOCOL_VERSION) throw new Error(`agent negotiated unsupported ACP protocol version ${init.protocolVersion}`);
     const configuredMcp = preparedMcp || await sessionMcp(ctx, a, desc);
     const mcpServers = configuredMcp.servers;
@@ -405,31 +439,50 @@ async function start(ctx: ModuleContext, a: any) {
       if (server.type === "http" && !caps.http) throw new Error(`Agent does not support HTTP MCP server “${server.name}”`);
       if (server.type === "sse" && !caps.sse) throw new Error(`Agent does not support SSE MCP server “${server.name}”`);
     }
-    const lifecycle = { cwd: c.cwd, mcpServers: sessionServers, ...(c.additionalDirectories.length ? { additionalDirectories: c.additionalDirectories } : {}) };
+    requireAdditionalDirectories(c, c.additionalDirectories);
+    const systemPrompt = acpSystemPrompt(c.agentCapabilities, c.systemPrompt);
+    const lifecycle = { cwd: c.cwd, mcpServers: sessionServers, ...(c.additionalDirectories.length ? { additionalDirectories: c.additionalDirectories } : {}), ...(systemPrompt ? { systemPrompt } : {}) };
     let res: any;
     if (a.forkSessionId) {
       if (!c.agentCapabilities.sessionCapabilities?.fork) throw new Error("This agent does not support session forking");
-      res = await withTimeout(c.peer.request("session/fork", { ...lifecycle, sessionId: String(a.forkSessionId) }), 120000, "session/fork");
-      c.sessionId = res.sessionId;
+      res = await sessionRequest(ctx, c, "session/fork", { ...lifecycle, sessionId: String(a.forkSessionId) }, 120000);
+      validateSessionResult(res);
+      c.sessionId = requireSessionId(res?.sessionId);
     } else if (a.resumeSessionId) {
       const sessionId = String(a.resumeSessionId);
-      const method = a.resumeMode === "resume" && c.agentCapabilities.sessionCapabilities?.resume
-        ? "session/resume"
-        : c.agentCapabilities.loadSession ? "session/load" : c.agentCapabilities.sessionCapabilities?.resume ? "session/resume" : null;
-      if (method) {
+      const canResume = !!c.agentCapabilities.sessionCapabilities?.resume;
+      const canLoad = !!c.agentCapabilities.loadSession;
+      const copilot = c.profile?.provider === "copilot" || c.providerId === "copilot";
+      const preferred = a.resumeMode === "load" || (copilot && canLoad) ? ["session/load", "session/resume"] : ["session/resume", "session/load"];
+      const methods = preferred.filter((method, index) => (method === "session/resume" ? canResume : canLoad) && preferred.indexOf(method) === index);
+      let lastError: string | null = "the agent advertises neither session/resume nor session/load";
+      for (const method of methods) {
+        let success = false;
         try {
-          c.loadingHistory = true;
-          res = await withTimeout(c.peer.request(method, { ...lifecycle, sessionId }), 120000, method);
+          c.loadingHistory = method === "session/load";
+          c.loadingSessionId = sessionId;
+          res = await sessionRequest(ctx, c, method, { ...lifecycle, sessionId }, 120000);
+          validateSessionResult(res, sessionId);
           c.sessionId = sessionId;
+          success = true;
+          lastError = null;
+          break;
         } catch (e) {
-          ctx.log.warn(`${method} failed; starting a new session`, errMsg(e));
-          ctx.events.emit("acp.update", { conversationId: c.conversationId, update: { sessionUpdate: "_hato_notice", text: `Could not resume the previous agent session (${errMsg(e)}); started a new one. A bounded dialogue handoff will accompany the next prompt.` } });
-        } finally { c.loadingHistory = false; }
+          if (!sessionNotFound(e)) throw e;
+          lastError = errMsg(e);
+          ctx.log.warn(`${method} failed${methods.indexOf(method) < methods.length - 1 ? "; trying the other resume method" : "; starting a new session"}`, lastError);
+        } finally {
+          c.loadingHistory = false;
+          c.loadingSessionId = null;
+          if (method === "session/load") ctx.events.emit("acp.replayEnded", { conversationId: c.conversationId, sessionId, success });
+        }
       }
+      if (!c.sessionId) ctx.events.emit("acp.update", { conversationId: c.conversationId, update: { sessionUpdate: "_hato_notice", text: `Could not resume the previous agent session (${lastError}); started a new one. A bounded dialogue handoff will accompany the next prompt.` } });
     }
     if (!c.sessionId) {
-      res = await withTimeout(c.peer.request("session/new", lifecycle), 120000, "session/new");
-      c.sessionId = res.sessionId;
+      res = await sessionRequest(ctx, c, "session/new", lifecycle, 120000);
+      validateSessionResult(res);
+      c.sessionId = requireSessionId(res?.sessionId);
     }
     c.sessionClosed = false;
     c.configOptions = res && Array.isArray(res.configOptions) ? res.configOptions : null;
@@ -440,13 +493,27 @@ async function start(ctx: ModuleContext, a: any) {
     c.status = "error";
     const auth = c.authMethods && c.authMethods.length && /auth/i.test(errMsg(e));
     c.error = auth ? `Agent requires authentication on ${c.machineId} (${c.authMethods.map((m: any) => m.name || m.id).join(", ")}). Authenticate the adapter there then reconnect. Details: ${errMsg(e)}` : errMsg(e);
+    const message = c.error;
     emitStatus(ctx, c);
     if (!auth) await ctx.host.process.terminate(c.proc).catch(() => {});
     if (a.mcp) await ctx.modules.call("internal-mcp", "revoke", { conversationId: a.conversationId }).catch(() => {});
-    throw new Error(c.error!);
+    throw new Error(message);
   }
   emitStatus(ctx, c);
   return publicState(c);
+}
+
+async function sessionRequest(ctx: ModuleContext, c: Conn, method: string, params: any, ms: number): Promise<any> {
+  const id = c.peer.nextRequestId;
+  try { return await withTimeout(c.peer.request(method, params), ms, method); }
+  catch (error) {
+    if (/timed out/.test(errMsg(error))) {
+      c.peer.cancelRequest(id, `${method} timed out`);
+      c.status = "error"; c.error = `${method} timed out; reconnect before continuing`; c.sessionClosed = true;
+      emitStatus(ctx, c);
+    }
+    throw error;
+  }
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
@@ -454,6 +521,18 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
     const t = setTimeout(() => reject(new Error(`${what} timed out after ${ms} ms`)), ms);
     p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
   });
+}
+
+async function withReplay<T>(ctx: ModuleContext, c: Conn, sessionId: string, request: () => Promise<T>) {
+  c.loadingHistory = true;
+  c.loadingSessionId = sessionId;
+  let success = false;
+  try { const result = await request(); success = true; return result; }
+  finally {
+    c.loadingHistory = false;
+    c.loadingSessionId = null;
+    ctx.events.emit("acp.replayEnded", { conversationId: c.conversationId, sessionId, success });
+  }
 }
 
 function finishTurn(ctx: ModuleContext, c: Conn, result: { stopReason?: string; usage?: any; error?: string }) {
@@ -521,7 +600,7 @@ async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
       }
       const child = u._meta?.["opencode/child-session"] || params._meta?.["opencode/child-session"];
       if (child?.id) { c.childSessions = { ...c.childSessions, [child.id]: child }; emitStatus(ctx, c); }
-      ctx.events.emit("acp.update", { conversationId: c.conversationId, sessionId: params.sessionId, update: u });
+      ctx.events.emit("acp.update", { conversationId: c.conversationId, sessionId: params.sessionId, update: u, replayed: c.loadingHistory === true });
       return;
     }
     ctx.events.emit("acp.notification", { conversationId: c.conversationId, method, params });
@@ -540,6 +619,7 @@ async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
     }
     if (method === "elicitation/create") {
       if (params?.mode !== "form") throw rpcError(-32602, "Only form elicitation is supported");
+      if (!params.requestedSchema || typeof params.requestedSchema !== "object" || Array.isArray(params.requestedSchema)) throw rpcError(-32602, "Form elicitation requires an object requestedSchema");
       const pending = deferred<any>();
       const timer = setTimeout(() => {
         c.pendingElicitations.delete(id);
@@ -548,7 +628,10 @@ async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
       c.pendingElicitations.set(id, { params, resolve: pending.resolve, reject: pending.reject, timer });
       ctx.events.emit("acp.elicitation", { conversationId: c.conversationId, requestId: id, request: params });
       try { return await pending.promise; }
-      finally { clearTimeout(timer); c.pendingElicitations.delete(id); }
+      finally {
+        clearTimeout(timer); c.pendingElicitations.delete(id);
+        ctx.events.emit("acp.elicitationComplete", { conversationId: c.conversationId, requestId: id });
+      }
     }
     // fs/* and terminal/* capabilities are not advertised by this client.
     throw rpcError(-32601, `method not supported by client: ${method}`);
@@ -573,17 +656,43 @@ async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
 }
 
 function lifecycleParams(c: Conn) {
-  return { cwd: c.cwd, mcpServers: c.mcpServers, ...(c.additionalDirectories.length ? { additionalDirectories: c.additionalDirectories } : {}) };
+  requireAdditionalDirectories(c, c.additionalDirectories);
+  const systemPrompt = acpSystemPrompt(c.agentCapabilities, c.systemPrompt);
+  return { cwd: c.cwd, mcpServers: c.mcpServers, ...(c.additionalDirectories.length ? { additionalDirectories: c.additionalDirectories } : {}), ...(systemPrompt ? { systemPrompt } : {}) };
+}
+
+function updateAdditionalDirectories(c: Conn, value: any) {
+  const dirs = additionalDirectories(value ?? c.additionalDirectories);
+  requireAdditionalDirectories(c, dirs);
+  c.additionalDirectories = dirs;
+}
+
+function requireIdleSession(c: Conn) {
+  if (c.status === "busy" || c.status === "starting" || c.activeTurn || c.loadingHistory || c.authProcess) {
+    throw new Error("Wait for the active agent turn, session load, or authentication to finish before changing provider sessions");
+  }
+}
+
+function validateSessionResult(res: any, expected?: string) {
+  if(!res || typeof res!=="object" || Array.isArray(res) || res.sessionId!=null && expected && res.sessionId!==expected) throw new Error("Invalid session setup response");
+  requireSessionId(expected || res.sessionId);
+  if(res.configOptions!=null && !Array.isArray(res.configOptions))throw new Error("Invalid session setup response: configOptions");
+  return res;
 }
 
 function applySessionResult(ctx: ModuleContext, c: Conn, res: any, sessionId?: string) {
-  c.sessionId = sessionId || res?.sessionId || null;
+  validateSessionResult(res, sessionId);
+  c.sessionId = requireSessionId(sessionId || res.sessionId);
   c.sessionClosed = false;
   c.configOptions = res && Array.isArray(res.configOptions) ? res.configOptions : null;
   c.modes = res && res.modes ? res.modes : null;
   c.models = res && res.models ? res.models : null;
+  c.commands = [];
   c.usage = null;
   c.turnUsage = null;
+  c.sessionInfo = null;
+  c.compaction = null;
+  c.childSessions = {};
   emitStatus(ctx, c);
 }
 
@@ -613,6 +722,7 @@ const mod: AppModule = {
   },
   /** Defer swaps while a prompt turn or an agent request is in flight (parser state would be lost). */
   canSwap() {
+    if (startups.size || operations.size) return { ok: false, reason: "An ACP operation is running" };
     if (probes.size) return { ok: false, reason: "a usage-limit probe is running" };
     for (const c of conns.values()) {
       if (c.status === "busy" || c.status === "starting" || c.authProcess || c.pendingPermissions.size || c.pendingElicitations.size || (c.peer && c.peer.pendingCount > 0)) return { ok: false, reason: `ACP session ${c.conversationId} is busy` };
@@ -620,7 +730,7 @@ const mod: AppModule = {
     return { ok: true };
   },
   snapshot() {
-    return { limits, limitScopes, conns: Array.from(conns.values()).map((c) => ({ ...publicState(c), proc: c.proc, providerId: c.providerId, providerModule: c.providerModule, profile: c.profile, env: c.env, envRemove: c.envRemove, mcpServers: c.mcpServers, stderrTail: c.stderrTail, nextId: c.peer ? c.peer.nextRequestId : 1, partial: c.peer ? c.peer.partial : "" })) };
+    return { limits, limitScopes, conns: Array.from(conns.values()).map((c) => ({ ...publicState(c), proc: c.proc, providerId: c.providerId, providerModule: c.providerModule, profile: c.profile, env: c.env, envRemove: c.envRemove, systemPrompt: c.systemPrompt, mcpServers: c.mcpServers, stderrTail: c.stderrTail, nextId: c.peer ? c.peer.nextRequestId : 1, partial: c.peer ? c.peer.partial : "" })) };
   },
   methods: {
     profiles: async (ctx, a) => {
@@ -647,22 +757,25 @@ const mod: AppModule = {
     async prompt(ctx, a) {
       const c = conns.get(a.conversationId);
       if (!c || c.status !== "ready" || !c.sessionId || c.sessionClosed) throw new Error(`agent session is ${c ? c.status : "not started"}`);
+      if (operations.has(a.conversationId) || startups.has(a.conversationId)) throw new Error("A provider operation is already running");
       if (c.activeTurn) throw new Error("A prompt is already running for this session");
       const blocks = promptBlocks(a, c);
       const timeoutMs = Number.isFinite(a.timeoutMs) ? Math.max(1000, Math.min(30 * 60 * 1000, Number(a.timeoutMs))) : 30 * 60 * 1000;
       c.status = "busy";
       c.error = null;
       c.turnUsage = null;
-      c.activeTurn = { cancelled: false };
+      const turn = c.activeTurn = { cancelled: false, timer: undefined as any };
       emitStatus(ctx, c);
+      const requestId = c.peer.nextRequestId;
       c.activeTurn.timer = setTimeout(() => {
-        if (!c.activeTurn) return;
+        if (c.activeTurn !== turn) return;
+        c.peer.cancelRequest(requestId, "Prompt timed out");
         void cancelInternal(ctx, c);
         finishTurn(ctx, c, { error: `prompt timed out after ${timeoutMs} ms` });
       }, timeoutMs);
       c.peer.request("session/prompt", { sessionId: c.sessionId, prompt: blocks }).then(
-        (r: any) => finishTurn(ctx, c, { stopReason: r && r.stopReason, usage: r && r.usage }),
-        (e) => finishTurn(ctx, c, { error: errMsg(e) }),
+        (r: any) => { if (c.activeTurn === turn) finishTurn(ctx, c, { stopReason: r && r.stopReason, usage: r && r.usage }); },
+        (e) => { if (c.activeTurn === turn) finishTurn(ctx, c, { error: errMsg(e) }); },
       );
       return { accepted: true };
     },
@@ -670,9 +783,9 @@ const mod: AppModule = {
      *  Returns `steered`, `promptRequired` (the turn already ended) or `unsupported`. */
     async steer(ctx, a) {
       const c = conns.get(a.conversationId);
-      if (!c || !c.sessionId || !c.steering) return { outcome: "unsupported" };
+      if (!c || !c.sessionId || !c.steering || operations.has(a.conversationId) || startups.has(a.conversationId)) return { outcome: "unsupported" };
       const blocks = promptBlocks(a, c);
-      const r: any = await withTimeout(c.peer.request("_session/steering", { sessionId: c.sessionId, prompt: blocks, _meta: { steering: { idleBehavior: "promptRequired" } } }), 30000, "steering");
+      const r: any = await sessionRequest(ctx, c, "_session/steering", { sessionId: c.sessionId, prompt: blocks, _meta: { steering: { idleBehavior: "promptRequired" } } }, 30000);
       return { outcome: r?.outcome === "promptRequired" ? "promptRequired" : "steered" };
     },
     async cancel(ctx, a) {
@@ -688,6 +801,7 @@ const mod: AppModule = {
       if (!pending) throw new Error("Unknown or completed elicitation request");
       const action = a.response?.action;
       if (!["accept", "decline", "cancel"].includes(action)) throw new Error("Elicitation response action must be accept, decline, or cancel");
+      if (action === "accept" && a.response.content != null && (typeof a.response.content !== "object" || Array.isArray(a.response.content))) throw new Error("Accepted elicitation content must be an object");
       clearTimeout(pending.timer);
       pending.resolve(a.response);
       c!.pendingElicitations.delete(a.requestId);
@@ -701,53 +815,56 @@ const mod: AppModule = {
       if (!c.agentCapabilities.sessionCapabilities?.list) throw new Error("This agent does not support session listing");
       const params: any = { cwd: c.cwd };
       if (a.cursor != null) params.cursor = String(a.cursor);
-      if (Number.isSafeInteger(a.limit) && a.limit > 0) params.limit = Math.min(100, a.limit);
-      return withTimeout(c.peer.request("session/list", params), 60000, "session/list");
+      // ACP session/list is cursor-paginated and has no standard limit field. Callers page with
+      // nextCursor; never send adapter-specific parameters that would break honest negotiation.
+      return sessionPage(await sessionRequest(ctx, c, "session/list", params, 60000));
     },
     async newSession(ctx, a) {
       const c = conns.get(a.conversationId);
       if (!c) throw new Error("agent session not started");
-      const dirs = additionalDirectories(a.additionalDirectories ?? c.additionalDirectories);
-      c.additionalDirectories = dirs;
-      const res: any = await withTimeout(c.peer.request("session/new", lifecycleParams(c)), 120000, "session/new");
+      requireIdleSession(c);
+      updateAdditionalDirectories(c, a.additionalDirectories ?? c.additionalDirectories);
+      const res: any = await sessionRequest(ctx, c, "session/new", lifecycleParams(c), 120000);
       applySessionResult(ctx, c, res);
       return publicState(c);
     },
     async resumeSession(ctx, a) {
       const c = conns.get(a.conversationId);
       if (!c) throw new Error("agent session not started");
+      requireIdleSession(c);
       if (!c.agentCapabilities.sessionCapabilities?.resume) throw new Error("This agent does not support session resume");
-      const dirs = additionalDirectories(a.additionalDirectories ?? c.additionalDirectories);
-      c.additionalDirectories = dirs;
-      const res: any = await withTimeout(c.peer.request("session/resume", { ...lifecycleParams(c), sessionId: String(a.sessionId) }), 120000, "session/resume");
-      applySessionResult(ctx, c, res, String(a.sessionId));
+      updateAdditionalDirectories(c, a.additionalDirectories ?? c.additionalDirectories);
+      const res: any = await sessionRequest(ctx, c, "session/resume", { ...lifecycleParams(c), sessionId: requireSessionId(a.sessionId) }, 120000);
+      applySessionResult(ctx, c, res, requireSessionId(a.sessionId));
       return publicState(c);
     },
     async loadSession(ctx, a) {
       const c = conns.get(a.conversationId);
       if (!c) throw new Error("agent session not started");
+      requireIdleSession(c);
       if (!c.agentCapabilities.loadSession) throw new Error("This agent does not support session loading");
-      const dirs = additionalDirectories(a.additionalDirectories ?? c.additionalDirectories);
-      c.additionalDirectories = dirs;
-      const res: any = await withTimeout(c.peer.request("session/load", { ...lifecycleParams(c), sessionId: String(a.sessionId) }), 120000, "session/load");
-      applySessionResult(ctx, c, res, String(a.sessionId));
+      updateAdditionalDirectories(c, a.additionalDirectories ?? c.additionalDirectories);
+      const sessionId = requireSessionId(a.sessionId);
+      const res: any = await withReplay(ctx, c, sessionId, async () => validateSessionResult(await sessionRequest(ctx, c, "session/load", { ...lifecycleParams(c), sessionId }, 120000), sessionId));
+      applySessionResult(ctx, c, res, requireSessionId(a.sessionId));
       return publicState(c);
     },
     async forkSession(ctx, a) {
       const c = conns.get(a.conversationId);
       if (!c) throw new Error("agent session not started");
+      requireIdleSession(c);
       if (!c.agentCapabilities.sessionCapabilities?.fork) throw new Error("This agent does not support session forking");
-      const dirs = additionalDirectories(a.additionalDirectories ?? c.additionalDirectories);
-      c.additionalDirectories = dirs;
-      const res: any = await withTimeout(c.peer.request("session/fork", { ...lifecycleParams(c), sessionId: String(a.sessionId) }), 120000, "session/fork");
+      updateAdditionalDirectories(c, a.additionalDirectories ?? c.additionalDirectories);
+      const res: any = await sessionRequest(ctx, c, "session/fork", { ...lifecycleParams(c), sessionId: requireSessionId(a.sessionId) }, 120000);
       applySessionResult(ctx, c, res);
       return publicState(c);
     },
     async closeSession(ctx, a) {
       const c = conns.get(a.conversationId);
       if (!c || !c.sessionId) throw new Error("agent session not started");
+      requireIdleSession(c);
       if (!c.agentCapabilities.sessionCapabilities?.close) throw new Error("This agent does not support session close");
-      await withTimeout(c.peer.request("session/close", { sessionId: c.sessionId }), 60000, "session/close");
+      await sessionRequest(ctx, c, "session/close", { sessionId: c.sessionId }, 60000).catch(e => { if (!sessionNotFound(e)) throw e; });
       c.sessionClosed = true;
       emitStatus(ctx, c);
       return publicState(c);
@@ -755,42 +872,64 @@ const mod: AppModule = {
     async deleteSession(ctx, a) {
       const c = conns.get(a.conversationId);
       if (!c) throw new Error("agent session not started");
+      requireIdleSession(c);
       if (!c.agentCapabilities.sessionCapabilities?.delete) throw new Error("This agent does not support session deletion");
-      const sessionId = String(a.sessionId || c.sessionId || "");
+      const sessionId = requireSessionId(a.sessionId ?? c.sessionId);
       if (!sessionId) throw new Error("sessionId is required");
-      await withTimeout(c.peer.request("session/delete", { sessionId }), 60000, "session/delete");
+      await sessionRequest(ctx, c, "session/delete", { sessionId }, 60000).catch(e => { if (!sessionNotFound(e)) throw e; });
       if (sessionId === c.sessionId) { c.sessionId = null; c.sessionClosed = true; emitStatus(ctx, c); }
       return null;
     },
     async authenticate(ctx, a) {
       const c = conns.get(a.conversationId);
       if (!c) throw new Error("agent session not started");
+      if (c.authProcess) throw new Error("An authentication process is already running");
       const method = c.authMethods.find((entry: any) => entry.id === a.methodId);
       if (!method) throw new Error(`Unknown authentication method '${String(a.methodId)}'`);
-      const terminal = method._meta?.["terminal-auth"];
-      if (terminal || a.terminal) {
-        const desc: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: c.workspaceId });
-        const profile = c.profile || await resolveProfile(ctx, c.profileId, desc.machineId);
-        const command = typeof terminal?.command === "string" ? terminal.command : desc.location === "local" ? c.executablePath : profile.executable;
-        const args = Array.isArray(terminal?.args) ? terminal.args.map(String) : [...(profile.args || []), "--login"];
-        const g = await workspaceGrant(ctx, desc, "process");
-        const proc = await ctx.host.process.spawn(g.grant, {
-          target: await targetFor(ctx, desc), executable: command, args, cwd: desc.rootAbsolutePath,
-          env: c.env || { ...(profile.envRefs || {}) }, envRemove: c.envRemove || [], loginShell: desc.location !== "local",
-        });
-        c.authProcess = { handle: proc.handle, pid: proc.pid, methodId: method.id };
+      const terminal = terminalAuthMethod(method);
+      if (terminal) {
+        if (!ctx.host.env.info().hostFeatures?.includes("pty.spawn")) throw new Error("This host needs an update for interactive authentication");
+        if (!a.confirmToken) {
+          const desc: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: c.workspaceId });
+          const profile = c.profile || await resolveProfile(ctx, c.profileId, desc.machineId);
+          const configured = terminalAuthEnvironment(c.env || profile.envRefs || {}, terminal.env, c.envRemove || []);
+          const extra = terminal.args ?? (method._meta?.["terminal-auth"] ? ["--login"] : []);
+          if (!Array.isArray(extra) || extra.length > 128 || extra.some(v => typeof v !== "string" || v.includes("\0") || v.length > 16384)) throw new Error("Invalid authentication arguments");
+          // Use the configured provider invocation; descriptors never choose a command.
+          const launch = providerMcpLaunch(profile.mcpLaunch, desc.location === "local" ? c.executablePath : profile.executable, profile.args || [], configured.env, []);
+          const token = crypto.randomUUID();
+          c.authPlan = { token, methodId: method.id, desc, launch, args: [...launch.args, ...extra], envKeys: configured.keys, expires: Date.now() + 300000 };
+          return { outcome: "prepared", confirmToken: token, methodId: method.id, label: method.name || method.id, command: launch.executable, args: c.authPlan.args, envKeys: configured.keys, display: [launch.executable, ...c.authPlan.args.map((a: string) => JSON.stringify(a))].join(" ") };
+        }
+        const plan = c.authPlan;
+        if (!plan || plan.token !== a.confirmToken || plan.methodId !== method.id || plan.expires < Date.now()) throw new Error("Authentication launch expired; choose the method again");
+        c.authPlan = null;
+        const g = await workspaceGrant(ctx, plan.desc, "process");
+        const pty = await ctx.host.pty.spawn(g.grant, { target: await targetFor(ctx, plan.desc), executable: plan.launch.executable, args: plan.args, cwd: plan.desc.rootAbsolutePath, env: plan.launch.env, envRemove: c.envRemove || [], loginShell: plan.desc.location !== "local", columns: 100, rows: 24 });
+        const attemptId = crypto.randomUUID();
+        c.authProcess = { kind: "pty", attemptId, handle: pty.handle, pid: 0, methodId: method.id, command: plan.launch.executable, args: plan.args, envKeys: plan.envKeys, cwd: plan.desc.rootAbsolutePath, machineId: plan.desc.machineId, label: method.name || method.id, startedAt: Date.now() };
         emitStatus(ctx, c);
-        const subOut = await ctx.host.streams.listen(proc.handle, { channel: "stdout" }, (chunk) => ctx.events.emit("acp.authOutput", { conversationId: c.conversationId, methodId: method.id, channel: "stdout", data: chunk }));
-        const subErr = await ctx.host.streams.listen(proc.handle, { channel: "stderr" }, (chunk) => ctx.events.emit("acp.authOutput", { conversationId: c.conversationId, methodId: method.id, channel: "stderr", data: chunk }));
-        void ctx.host.process.wait(proc.handle).then((result) => {
-          void subOut.close().catch(() => {}); void subErr.close().catch(() => {});
-          if (c.authProcess?.handle === proc.handle) c.authProcess = null;
-          emitStatus(ctx, c);
-          ctx.events.emit("acp.authCompleted", { conversationId: c.conversationId, methodId: method.id, code: result?.code ?? null, signal: result?.signal ?? null });
-        }).catch(() => {});
-        return { outcome: "terminal", pid: proc.pid, command, args, label: terminal?.label || method.name || method.id };
+        let cursor = 0;
+        const poll = async () => {
+          if (c.authProcess?.attemptId !== attemptId) return;
+          try {
+            const output = await ctx.host.pty.read(pty.handle, { cursor, limitBytes: 16384 });
+            if(c.authProcess?.attemptId!==attemptId)return;
+            cursor = output.cursor;
+            if (output.text) ctx.events.emit("acp.authOutput", { conversationId: c.conversationId, methodId: method.id, attemptId, data: output.text });
+            if (output.exit) {
+              c.authProcess = null; emitStatus(ctx, c);
+              const code = /^exited with code (\d+)$/.exec(output.exit)?.[1];
+              ctx.events.emit("acp.authCompleted", { conversationId: c.conversationId, methodId: method.id, attemptId, code: code === undefined ? null : Number(code), signal: null });
+              await ctx.host.pty.close(pty.handle).catch(() => {}); return;
+            }
+            setTimeout(() => void poll(), 250);
+          } catch { if(c.authProcess?.attemptId===attemptId){ c.authProcess=null; emitStatus(ctx,c); ctx.events.emit("acp.authCompleted",{conversationId:c.conversationId,methodId:method.id,attemptId,code:null,signal:null}); } }
+        };
+        setTimeout(() => void poll(), 250);
+        return { outcome: "terminal", ...c.authProcess, display: [plan.launch.executable, ...plan.args.map((a: string) => JSON.stringify(a))].join(" ") };
       }
-      await withTimeout(c.peer.request("authenticate", { methodId: method.id }), 120000, "authenticate");
+      await sessionRequest(ctx, c, "authenticate", { methodId: method.id }, 120000);
       c.error = null;
       emitStatus(ctx, c);
       return { outcome: "authenticated", methodId: method.id };
@@ -798,17 +937,19 @@ const mod: AppModule = {
     async authInput(ctx, a) {
       const c = conns.get(a.conversationId);
       if (!c?.authProcess) throw new Error("No terminal authentication is running");
-      await ctx.host.process.write(c.authProcess.handle, String(a.data || ""));
+      if (a.attemptId !== c.authProcess.attemptId) throw new Error("Stale authentication input");
+      await ctx.host.pty.write(c.authProcess.handle, String(a.data || ""));
       return null;
     },
     async cancelAuth(ctx, a) {
       const c = conns.get(a.conversationId);
       const auth = c?.authProcess;
       if (!auth) return null;
-      await ctx.host.process.closeStdin(auth.handle).catch(() => {});
-      await ctx.host.process.terminate(auth.handle).catch(() => {});
+      if (a.attemptId !== auth.attemptId) throw new Error("Stale authentication cancellation");
+      await ctx.host.pty.close(auth.handle).catch(() => {});
       if (c.authProcess?.handle === auth.handle) c.authProcess = null;
       emitStatus(ctx, c);
+      ctx.events.emit("acp.authCompleted", { conversationId: c.conversationId, methodId: auth.methodId, attemptId: auth.attemptId, code: null, signal: null, cancelled: true });
       return null;
     },
     /** Change a negotiated session setting. Uses configOptions when advertised; legacy modes/models otherwise. */
@@ -824,7 +965,10 @@ const mod: AppModule = {
         } else if (typeof value !== "string") {
           throw new Error(`Setting '${a.configId}' requires a string value`);
         }
-        const r: any = await c.peer.request("session/set_config_option", { sessionId: c.sessionId, configId: a.configId, value });
+        const r: any = await c.peer.request("session/set_config_option", {
+          sessionId: c.sessionId, configId: a.configId,
+          ...(option?.type === "boolean" ? { type: "boolean", value } : { value }),
+        });
         if (r && Array.isArray(r.configOptions)) c.configOptions = r.configOptions;
       } else if (a.configId === "__mode" && c.modes) {
         await c.peer.request("session/set_mode", { sessionId: c.sessionId, modeId: a.value });
@@ -850,8 +994,9 @@ const mod: AppModule = {
       for (const pending of c.pendingElicitations.values()) { clearTimeout(pending.timer); pending.resolve({ action: "cancel" }); }
       c.pendingElicitations.clear();
       const auth = c.authProcess;
-      if (auth) await ctx.host.process.terminate(auth.handle).catch(() => {});
+      if (auth) await ctx.host.pty.close(auth.handle).catch(() => {});
       c.authProcess = null;
+      if (auth) ctx.events.emit("acp.authCompleted", { conversationId: c.conversationId, methodId: auth.methodId, attemptId: auth.attemptId, code: null, signal: null, cancelled: true });
       await ctx.host.process.closeStdin(c.proc).catch(() => {});
       await ctx.host.process.terminate(c.proc).catch(() => {});
       c.status = "exited";
@@ -936,4 +1081,24 @@ const mod: AppModule = {
     },
   },
 };
+for (const name of ["newSession", "resumeSession", "loadSession", "forkSession", "closeSession", "deleteSession", "setConfig", "authenticate", "stop"]) {
+  const original = mod.methods![name];
+  mod.methods![name] = async (ctx, a, meta) => {
+    const id = a.conversationId;
+    if (startups.has(id) || operations.has(id)) throw new Error("A provider operation is already running");
+    const c = conns.get(id);
+    if (c && name !== "stop") {
+      requireIdleSession(c);
+      if(name!=="authenticate" && c.status!=="ready")throw new Error("Reconnect the agent before changing its session");
+    }
+    const previousDirectories = c?.additionalDirectories;
+    operations.set(id, name);
+    try { return await original(ctx, a, meta); }
+    catch (e) {
+      if(c && /Invalid session setup response/.test(errMsg(e))){c.status="error";c.sessionClosed=true;c.error=errMsg(e);emitStatus(ctx,c);}
+      if (c && previousDirectories) c.additionalDirectories = previousDirectories; throw e;
+    }
+    finally { operations.delete(id); }
+  };
+}
 export default mod;

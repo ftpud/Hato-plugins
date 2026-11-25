@@ -1,12 +1,13 @@
+import { fileURLToPath } from "node:url";
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { build } from 'esbuild';
 import { spawn } from 'node:child_process';
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
-const sdk = new URL('../../sdk', import.meta.url).pathname;
+const sdk = fileURLToPath(new URL('../../sdk', import.meta.url));
 const load = async path => import('data:text/javascript;base64,' + Buffer.from((await build({
-  entryPoints: [new URL(path, import.meta.url).pathname], bundle: true, platform: 'node', format: 'esm', write: false, alias: { '@hato/sdk': sdk },
+  entryPoints: [fileURLToPath(new URL(path, import.meta.url))], bundle: true, platform: 'node', format: 'esm', write: false, alias: { '@hato/sdk': sdk },
 })).outputFiles[0].text).toString('base64'));
 if (!globalThis.crypto) globalThis.crypto = { randomUUID };
 

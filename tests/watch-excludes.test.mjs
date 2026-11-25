@@ -1,14 +1,15 @@
+import { fileURLToPath } from "node:url";
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
-const sdk = new URL('../../sdk', import.meta.url).pathname;
-const gitignore = new URL('../modules/services/files/src/gitignore.ts', import.meta.url).pathname;
+const sdk = fileURLToPath(new URL('../../sdk', import.meta.url));
+const gitignore = fileURLToPath(new URL('../modules/services/files/src/gitignore.ts', import.meta.url));
 // `ignoredSet` is stubbed: tests set `globalThis.ignoredDirs` to Git's answer (null = no repository).
 const stub = { name: 'stub-gitignore', setup(b) {
   b.onResolve({ filter: /\.\/gitignore$/ }, () => ({ path: gitignore, namespace: 'stub' }));
   b.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({ contents: 'export const ignoredSet = async () => globalThis.ignoredDirs ? { dirs: globalThis.ignoredDirs, files: new Set() } : null;', loader: 'js' }));
 } };
-const load = async (path, plugins = []) => import('data:text/javascript;base64,' + Buffer.from((await build({ entryPoints: [new URL(path, import.meta.url).pathname], bundle: true, format: 'esm', write: false, alias: { '@hato/sdk': sdk }, plugins })).outputFiles[0].text).toString('base64'));
+const load = async (path, plugins = []) => import('data:text/javascript;base64,' + Buffer.from((await build({ entryPoints: [fileURLToPath(new URL(path, import.meta.url))], bundle: true, format: 'esm', write: false, alias: { '@hato/sdk': sdk }, plugins })).outputFiles[0].text).toString('base64'));
 const ex = await load('../modules/services/files/src/watch-excludes.ts', [stub]);
 const { fileWatch } = await load('../../sdk/file-watch.ts');
 
