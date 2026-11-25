@@ -68,6 +68,7 @@ features are installed from Marketplace as complete plugins:
 | --- | --- |
 | Claude | Provider definitions, adapter/authentication policy and usage parser; usage bar |
 | Codex | Provider definitions, adapter/authentication policy and usage parser; usage bar |
+| OpenCode | Native OpenCode ACP provider and model-free OpenCode Go plan-usage meter |
 | GitHub Copilot | Native Copilot CLI ACP provider for AI Chat and Background Agents |
 | Background Agents | Agent runner, workspace tools, persistent agent gateway and agent panel |
 | Workflows | Workflow service, execution runtime and visual editor; depends on Background Agents |
