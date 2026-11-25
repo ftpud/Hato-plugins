@@ -3,7 +3,6 @@ import { providerMcpLaunch } from "@hato/sdk/provider-mcp";
 // process stdio streams. The agent process runs ON the workspace's machine with cwd = the exact
 // project root / worktree: local child process for local workspaces, SSH exec for remote ones.
 // No local fallback, no implicit clone, no auto-install.
-import { reportedUsage, type ReportedUsage } from "@hato/sdk/context-usage";
 import { agentProviders, providerProfiles, type AgentProvider } from "@hato/sdk/agent-providers";
 import { imageAttachments } from "@hato/sdk/images";
 import { type LimitProvider, type LimitsSnapshot } from "@hato/sdk/usage-limits";
@@ -11,6 +10,12 @@ import type { AppModule, Handle, ModuleContext } from "@hato/sdk/types";
 import { errMsg, JsonRpcPeer, rpcError, targetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 
 const PROTOCOL_VERSION = 1;
+interface ReportedUsage { used: number; size: number; cost?: number }
+function reportedUsage(value: any): ReportedUsage | null {
+  if (!value || typeof value.used !== "number" || !Number.isFinite(value.used) || value.used < 0
+    || typeof value.size !== "number" || !Number.isFinite(value.size) || value.size < 0) return null;
+  return { used: value.used, size: value.size, ...(typeof value.cost === "number" && Number.isFinite(value.cost) && value.cost >= 0 ? { cost: value.cost } : {}) };
+}
 async function providers(ctx: ModuleContext) { return agentProviders((await ctx.host.plugins.list()).plugins); }
 async function providerById(ctx: ModuleContext, id: string): Promise<AgentProvider> {
   const found = (await providers(ctx)).find(p => p.id === id);
@@ -30,6 +35,78 @@ async function environmentPolicy(ctx: ModuleContext, profile: any) {
   return (saved == null ? auth.default : !!saved) ? auth.envRemove : [];
 }
 
+/** Capabilities understood by this client. OpenCode uses agent-side filesystem/shell tools, so
+ * generic ACP fs/terminal methods stay disabled; terminal authentication is a separate capability. */
+const CLIENT_CAPABILITIES = {
+  fs: { readTextFile: false, writeTextFile: false },
+  terminal: false,
+  auth: { terminal: true },
+  _meta: { "terminal-auth": true },
+  elicitation: { form: {} },
+  session: { compaction: {} },
+};
+
+function additionalDirectories(value: any): string[] {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new Error("additionalDirectories must be an array");
+  const out = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== "string" || !/^(?:\/|[A-Za-z]:[\\/])/.test(entry) || /[*?]/.test(entry)) {
+      throw new Error("additionalDirectories entries must be absolute paths without wildcards");
+    }
+    out.add(entry);
+  }
+  return [...out];
+}
+
+function sessionMatches(c: Conn, params: any): boolean {
+  return !params?.sessionId || params.sessionId === c.sessionId;
+}
+
+function promptBlocks(a: any, c: Conn): any[] {
+  const raw = Array.isArray(a.prompt) ? a.prompt : Array.isArray(a.content) ? a.content : null;
+  if (raw) {
+    if (!raw.length) throw new Error("empty prompt");
+    return raw.map((block: any) => {
+      if (!block || typeof block !== "object") throw new Error("Invalid ACP prompt block");
+      switch (block.type) {
+        case "text":
+          if (typeof block.text !== "string") throw new Error("Invalid text prompt block");
+          return block;
+        case "image":
+          if (!c.agentCapabilities?.promptCapabilities?.image) throw new Error("This agent does not support image prompts");
+          if (typeof block.data !== "string" && typeof block.uri !== "string") throw new Error("Image blocks require data or uri");
+          return block;
+        case "resource":
+          if (typeof block.text !== "string" && typeof block.blob !== "string") throw new Error("Resource blocks require text or blob");
+          if (typeof block.blob === "string" && typeof block.mimeType !== "string") throw new Error("Blob resources require mimeType");
+          return block;
+        case "resource_link":
+          if (typeof block.uri !== "string") throw new Error("Resource links require uri");
+          return block;
+        case "audio":
+          if (!c.agentCapabilities?.promptCapabilities?.audio) throw new Error("This agent does not support audio prompts");
+          return block;
+        default:
+          throw new Error(`Unsupported ACP prompt block '${String(block.type)}'`);
+      }
+    });
+  }
+  const images = imageAttachments(a.images);
+  if (images.length && !c.agentCapabilities?.promptCapabilities?.image) throw new Error("This agent does not support image prompts. Choose an agent with image support.");
+  const blocks: any[] = a.text ? [{ type: "text", text: String(a.text) }] : [];
+  blocks.push(...images.map((image) => ({ type: "image", mimeType: image.mimeType, data: image.data })));
+  if (!blocks.length) throw new Error("empty prompt");
+  return blocks;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: any) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
 interface Conn {
   loadingHistory?: boolean;
   conversationId: string;
@@ -39,25 +116,39 @@ interface Conn {
   profileId: string;
   providerId?: string;
   providerModule?: string;
+  profile?: any;
+  env?: Record<string, string>;
+  envRemove?: string[];
   proc: Handle;
   pid: number;
   peer: JsonRpcPeer;
   sessionId: string | null;
+  sessionClosed?: boolean;
+  additionalDirectories: string[];
   agentInfo: any;
   agentCapabilities: any;
   /** Agent advertised the `_session/steering` extension (inject into the running turn). */
   steering: boolean;
   authMethods: any[];
+  authProcess?: { handle: Handle; pid: number; methodId: string } | null;
   configOptions: any[] | null;
   modes: any | null;
   models: any | null;
   commands: any[];
   usage: ReportedUsage | null;
+  turnUsage: any | null;
+  sessionInfo: any | null;
+  childSessions: Record<string, any>;
+  compaction: any | null;
   status: "starting" | "ready" | "busy" | "exited" | "error";
   error: string | null;
   stderrTail: string;
   stopping?: boolean;
+  activeTurn?: { cancelled?: boolean; timer?: any } | null;
+  pendingPermissions: Map<number | string, (outcome: any) => void>;
+  pendingElicitations: Map<number | string, { params: any; resolve: (value: any) => void; reject: (error: any) => void; timer: any }>;
   mcp: { enabled: boolean; status: string; selection?: string[] };
+  mcpServers: any[];
   executablePath: string;
   startedAt: number;
 }
@@ -66,11 +157,18 @@ const conns = new Map<string, Conn>();
 
 // ---- plan usage limits ---------------------------------------------------------------------------
 // Published at `acp.limits`, keyed by contributed provider IDs. Providers own usage commands
-// and parsing; the shared transport runs probes and forwards session updates.
+// and parsing; the shared transport runs probes and forwards session updates. Cache reuse and
+// probe coalescing are workspace-scoped so one workspace can never receive another's snapshot.
 let limits: Record<LimitProvider, LimitsSnapshot | null> = {};
-const probes = new Map<LimitProvider, Promise<LimitsSnapshot>>();
+let limitScopes: Record<LimitProvider, string> = {};
+const probes = new Map<string, Promise<LimitsSnapshot>>();
+const probeKey = (provider: string, workspaceId: string) => `${provider}\u0000${workspaceId}`;
 function publishLimits(ctx: ModuleContext) { ctx.state.set("acp.limits", limits as any); }
-function setLimits(ctx: ModuleContext, provider: LimitProvider, snap: LimitsSnapshot) { limits = { ...limits, [provider]: snap }; publishLimits(ctx); }
+function setLimits(ctx: ModuleContext, provider: LimitProvider, snap: LimitsSnapshot, workspaceId?: string) {
+  limits = { ...limits, [provider]: snap };
+  if (workspaceId) limitScopes = { ...limitScopes, [provider]: workspaceId };
+  publishLimits(ctx);
+}
 
 async function probeLimits(ctx: ModuleContext, providerId: LimitProvider, workspaceId: string): Promise<LimitsSnapshot> {
   const definition = await providerById(ctx, providerId);
@@ -81,13 +179,17 @@ async function probeLimits(ctx: ModuleContext, providerId: LimitProvider, worksp
   if (!profile) throw new Error(`no enabled ${providerId} agent profile for ${desc.machineId}`);
   const det = await detect(ctx, desc, profile.executable);
   if (!det.found) throw new Error(`${profile.executable} was not found on ${desc.machineId}`);
-  const g = await workspaceGrant(ctx, desc, "process");
   const env: Record<string, string> = { ...(profile.envRefs || {}) };
   if (det.pathEnv) env.PATH = det.pathEnv;
   const envRemove = await environmentPolicy(ctx, profile);
   for (const key of envRemove) delete env[key];
+  const execution = { workspaceId, executablePath: desc.location === "local" ? det.path : profile.executable, env, envRemove, cwd: desc.rootAbsolutePath };
+  if (definition.usageCommand.startsWith("module:")) {
+    return ctx.modules.call(definition.module, definition.usageCommand.slice(7), execution);
+  }
+  const g = await workspaceGrant(ctx, desc, "process");
   const proc = await ctx.host.process.spawn(g.grant, {
-    target: await targetFor(ctx, desc), executable: desc.location !== "local" ? profile.executable : det.path,
+    target: await targetFor(ctx, desc), executable: execution.executablePath,
     args: profile.args || [], cwd: desc.rootAbsolutePath, env, envRemove, loginShell: desc.location !== "local",
   });
   const peer = new JsonRpcPeer((line) => ctx.host.process.write(proc.handle, line + "\n"), 1);
@@ -102,7 +204,7 @@ async function probeLimits(ctx: ModuleContext, providerId: LimitProvider, worksp
     await ctx.host.streams.listen(proc.handle, { channel: "stdout" }, (chunk) => peer.feed(chunk), () => peer.failAll("agent process exited")),
   ];
   try {
-    await withTimeout(peer.request("initialize", { protocolVersion: PROTOCOL_VERSION, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+    await withTimeout(peer.request("initialize", { protocolVersion: PROTOCOL_VERSION, clientCapabilities: CLIENT_CAPABILITIES,
       clientInfo: { name: "hato", title: "Hato usage meter", version: "0.1.0" } }), 60000, "initialize");
     const session: any = await withTimeout(peer.request("session/new", { cwd: desc.rootAbsolutePath, mcpServers: [] }), 120000, "session/new");
     await withTimeout(peer.request("session/prompt", { sessionId: session.sessionId, prompt: [{ type: "text", text: definition.usageCommand }] }), 90000, definition.usageCommand);
@@ -120,9 +222,11 @@ function publicState(c: Conn | undefined) {
   if (!c) return null;
   return {
     conversationId: c.conversationId, workspaceId: c.workspaceId, machineId: c.machineId, cwd: c.cwd, profileId: c.profileId,
-    pid: c.pid, sessionId: c.sessionId, agentInfo: c.agentInfo, agentCapabilities: c.agentCapabilities, authMethods: c.authMethods,
-    configOptions: c.configOptions, modes: c.modes, models: c.models, commands: c.commands, usage: c.usage || null, status: c.status, error: c.error,
-    stderrTail: c.stderrTail.slice(-2000), mcp: c.mcp, executablePath: c.executablePath, startedAt: c.startedAt,
+    pid: c.pid, sessionId: c.sessionId, sessionClosed: !!c.sessionClosed, additionalDirectories: c.additionalDirectories,
+    agentInfo: c.agentInfo, agentCapabilities: c.agentCapabilities, authMethods: c.authMethods, authProcess: c.authProcess || null,
+    configOptions: c.configOptions, modes: c.modes, models: c.models, commands: c.commands, usage: c.usage || null,
+    turnUsage: c.turnUsage || null, sessionInfo: c.sessionInfo || null, childSessions: c.childSessions, compaction: c.compaction || null,
+    status: c.status, error: c.error, stderrTail: c.stderrTail.slice(-2000), mcp: c.mcp, executablePath: c.executablePath, startedAt: c.startedAt,
   };
 }
 
@@ -165,7 +269,7 @@ export async function detect(ctx: ModuleContext, desc: WorkspaceDescriptor, exec
     return interactive.found ? interactive : login;
   }
   // Local: the GUI process may not inherit the user's shell PATH; ask the login shell.
-  const shell = "/bin/zsh";
+  const shell = (globalThis as any).process?.env?.SHELL || "/bin/sh";
   const r = await ctx.host.process.run(g.grant, { target, executable: shell, args: ["-lc", 'command -v -- "$1"; printf "\\n__PATH__=%s" "$PATH"', "hato-detect", executable], cwd: desc.rootAbsolutePath }, { timeoutMs: 20000 });
   const pathEnv = (/__PATH__=(.*)$/m.exec(r.stdout) || [])[1] || null;
   const found = r.stdout.split("\n").map((l) => l.trim()).find((l) => l.startsWith("/")) || "";
@@ -209,16 +313,21 @@ async function authSettings(ctx: ModuleContext): Promise<Record<string, boolean>
 }
 
 async function sessionMcp(ctx: ModuleContext, a: any, desc: WorkspaceDescriptor) {
-  const servers: any[] = [...(a.mcpServers || [])];
-  let state: Conn["mcp"] = { enabled: !!a.mcp, status: a.mcp ? "pending" : "disabled" };
-  if (a.mcp) {
+  const selection = Array.isArray(a.mcpSelection) ? new Set<string>(a.mcpSelection) : null;
+  const servers: any[] = (a.mcpServers || []).filter((server: any) => !selection || selection.has(server.id) || selection.has(server.name));
+  const wantInternal = !!a.mcp && (!selection || selection.has("internal"));
+  let state: Conn["mcp"] = { enabled: false, status: "disabled", selection: [...(selection || [])] };
+  if (wantInternal) {
     try {
       const ep = await ctx.modules.call("internal-mcp", "endpoint", { conversationId: a.conversationId, workspaceId: desc.id }, { timeoutMs: 300000 });
-      servers.push(ep.server); state = { enabled: true, status: `internal MCP via ${ep.transport}` };
+      servers.push(ep.server); state = { enabled: true, status: `internal MCP via ${ep.transport}`, selection: [...(selection || ["internal"])] };
     } catch (e) {
-      state = { enabled: true, status: `unavailable: ${errMsg(e)}` };
+      state = { enabled: true, status: `unavailable: ${errMsg(e)}`, selection: [...(selection || ["internal"])] };
       ctx.log.warn("internal MCP unavailable for", a.conversationId, errMsg(e));
     }
+  } else if (servers.length) {
+    state.enabled = true;
+    state.status = `${servers.length} external MCP server${servers.length === 1 ? "" : "s"}`;
   }
   return { servers, state };
 }
@@ -226,6 +335,13 @@ async function sessionMcp(ctx: ModuleContext, a: any, desc: WorkspaceDescriptor)
 async function start(ctx: ModuleContext, a: any) {
   const existing = conns.get(a.conversationId);
   if (existing && (existing.status === "ready" || existing.status === "busy" || existing.status === "starting")) return publicState(existing);
+  if (existing) {
+    existing.stopping = true;
+    await ctx.host.process.closeStdin(existing.proc).catch(() => {});
+    await ctx.host.process.terminate(existing.proc).catch(() => {});
+    conns.delete(a.conversationId);
+    await ctx.modules.call("internal-mcp", "revoke", { conversationId: a.conversationId }).catch(() => {});
+  }
   const desc: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
   const profile = await resolveProfile(ctx, a.profileId, desc.machineId);
   const det = await detect(ctx, desc, profile.executable);
@@ -237,6 +353,7 @@ async function start(ctx: ModuleContext, a: any) {
   if (det.pathEnv) env.PATH = det.pathEnv;
   const envRemove = await environmentPolicy(ctx, profile);
   for (const key of envRemove) delete env[key];
+  const dirs = additionalDirectories(a.additionalDirectories);
   const preparedMcp = profile.mcpLaunch ? await sessionMcp(ctx, a, desc) : null;
   let launch = providerMcpLaunch(undefined, desc.location !== "local" ? profile.executable : det.path, profile.args || [], env, preparedMcp?.servers || []);
   let spawned;
@@ -258,9 +375,11 @@ async function start(ctx: ModuleContext, a: any) {
   }
   const c: Conn = {
     conversationId: a.conversationId, workspaceId: desc.id, machineId: desc.machineId, cwd: desc.rootAbsolutePath, profileId: profile.id, providerId: profile.provider, providerModule: profile.providerModule,
-    proc: spawned.handle, pid: spawned.pid, peer: null as any, sessionId: null, agentInfo: null, agentCapabilities: null, steering: false, authMethods: [],
-    configOptions: null, modes: null, models: null, commands: [], usage: null, status: "starting", error: null, stderrTail: "",
-    mcp: { enabled: !!a.mcp, status: a.mcp ? "pending" : "disabled" }, executablePath: det.path, startedAt: Date.now(),
+    profile, env, envRemove, proc: spawned.handle, pid: spawned.pid, peer: null as any, sessionId: null, sessionClosed: false, additionalDirectories: dirs,
+    agentInfo: null, agentCapabilities: null, steering: false, authMethods: [], authProcess: null,
+    configOptions: null, modes: null, models: null, commands: [], usage: null, turnUsage: null, sessionInfo: null, childSessions: {}, compaction: null,
+    status: "starting", error: null, stderrTail: "", activeTurn: null, pendingPermissions: new Map(), pendingElicitations: new Map(),
+    mcp: { enabled: !!a.mcp, status: a.mcp ? "pending" : "disabled" }, mcpServers: [], executablePath: det.path, startedAt: Date.now(),
   };
   conns.set(c.conversationId, c);
   await wire(ctx, c, 1);
@@ -268,7 +387,7 @@ async function start(ctx: ModuleContext, a: any) {
   try {
     const init: any = await withTimeout(c.peer.request("initialize", {
       protocolVersion: PROTOCOL_VERSION,
-      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+      clientCapabilities: CLIENT_CAPABILITIES,
       clientInfo: { name: "hato", title: "Hato", version: "0.1.0" },
     }), 60000, "initialize");
     c.agentInfo = init.agentInfo || null;
@@ -280,27 +399,39 @@ async function start(ctx: ModuleContext, a: any) {
     const mcpServers = configuredMcp.servers;
     c.mcp = configuredMcp.state;
     const sessionServers = launch.wrapped ? launch.sessionServers : mcpServers;
+    c.mcpServers = sessionServers;
     const caps = c.agentCapabilities.mcpCapabilities || {};
     for (const server of sessionServers) {
       if (server.type === "http" && !caps.http) throw new Error(`Agent does not support HTTP MCP server “${server.name}”`);
       if (server.type === "sse" && !caps.sse) throw new Error(`Agent does not support SSE MCP server “${server.name}”`);
     }
-    c.mcp.selection = (a.mcpSelection || (a.mcp ? ["internal"] : [])).filter((id: string) => id !== "internal" || mcpServers.some(s => s.name === "hato-internal"));
+    const lifecycle = { cwd: c.cwd, mcpServers: sessionServers, ...(c.additionalDirectories.length ? { additionalDirectories: c.additionalDirectories } : {}) };
     let res: any;
-    if (a.resumeSessionId && c.agentCapabilities.loadSession) {
-      try {
-        c.loadingHistory = true;
-        res = await withTimeout(c.peer.request("session/load", { sessionId: a.resumeSessionId, cwd: c.cwd, mcpServers: sessionServers }), 120000, "session/load");
-        c.sessionId = a.resumeSessionId;
-      } catch (e) {
-        ctx.log.warn("session/load failed; starting a new session", errMsg(e));
-        ctx.events.emit("acp.update", { conversationId: c.conversationId, update: { sessionUpdate: "_hato_notice", text: `Could not resume the previous agent session (${errMsg(e)}); started a new one. A bounded dialogue handoff will accompany the next prompt.` } });
-      } finally { c.loadingHistory = false; }
+    if (a.forkSessionId) {
+      if (!c.agentCapabilities.sessionCapabilities?.fork) throw new Error("This agent does not support session forking");
+      res = await withTimeout(c.peer.request("session/fork", { ...lifecycle, sessionId: String(a.forkSessionId) }), 120000, "session/fork");
+      c.sessionId = res.sessionId;
+    } else if (a.resumeSessionId) {
+      const sessionId = String(a.resumeSessionId);
+      const method = a.resumeMode === "resume" && c.agentCapabilities.sessionCapabilities?.resume
+        ? "session/resume"
+        : c.agentCapabilities.loadSession ? "session/load" : c.agentCapabilities.sessionCapabilities?.resume ? "session/resume" : null;
+      if (method) {
+        try {
+          c.loadingHistory = true;
+          res = await withTimeout(c.peer.request(method, { ...lifecycle, sessionId }), 120000, method);
+          c.sessionId = sessionId;
+        } catch (e) {
+          ctx.log.warn(`${method} failed; starting a new session`, errMsg(e));
+          ctx.events.emit("acp.update", { conversationId: c.conversationId, update: { sessionUpdate: "_hato_notice", text: `Could not resume the previous agent session (${errMsg(e)}); started a new one. A bounded dialogue handoff will accompany the next prompt.` } });
+        } finally { c.loadingHistory = false; }
+      }
     }
     if (!c.sessionId) {
-      res = await withTimeout(c.peer.request("session/new", { cwd: c.cwd, mcpServers: sessionServers }), 120000, "session/new");
+      res = await withTimeout(c.peer.request("session/new", lifecycle), 120000, "session/new");
       c.sessionId = res.sessionId;
     }
+    c.sessionClosed = false;
     c.configOptions = res && Array.isArray(res.configOptions) ? res.configOptions : null;
     c.modes = res && res.modes ? res.modes : null;
     c.models = res && res.models ? res.models : null;
@@ -310,7 +441,7 @@ async function start(ctx: ModuleContext, a: any) {
     const auth = c.authMethods && c.authMethods.length && /auth/i.test(errMsg(e));
     c.error = auth ? `Agent requires authentication on ${c.machineId} (${c.authMethods.map((m: any) => m.name || m.id).join(", ")}). Authenticate the adapter there then reconnect. Details: ${errMsg(e)}` : errMsg(e);
     emitStatus(ctx, c);
-    await ctx.host.process.terminate(c.proc).catch(() => {});
+    if (!auth) await ctx.host.process.terminate(c.proc).catch(() => {});
     if (a.mcp) await ctx.modules.call("internal-mcp", "revoke", { conversationId: a.conversationId }).catch(() => {});
     throw new Error(c.error!);
   }
@@ -325,14 +456,47 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   });
 }
 
+function finishTurn(ctx: ModuleContext, c: Conn, result: { stopReason?: string; usage?: any; error?: string }) {
+  if (!c.activeTurn) return;
+  if (c.activeTurn.timer) clearTimeout(c.activeTurn.timer);
+  c.activeTurn = null;
+  if (c.stopping || c.status === "exited") return;
+  if (c.status === "busy") c.status = "ready";
+  if (result.usage) c.turnUsage = result.usage;
+  if (result.error) c.error = result.error;
+  emitStatus(ctx, c);
+  ctx.events.emit("acp.turnEnded", {
+    conversationId: c.conversationId,
+    ...(result.error ? { error: result.error } : { stopReason: result.stopReason }),
+    ...(result.usage ? { usage: result.usage } : {}),
+  });
+}
+
+async function cancelInternal(ctx: ModuleContext, c: Conn) {
+  if (c.activeTurn) c.activeTurn.cancelled = true;
+  for (const resolve of c.pendingPermissions.values()) resolve({ outcome: { outcome: "cancelled" } });
+  c.pendingPermissions.clear();
+  for (const pending of c.pendingElicitations.values()) {
+    clearTimeout(pending.timer);
+    pending.resolve({ action: "cancel" });
+  }
+  c.pendingElicitations.clear();
+  if (c.sessionId) await c.peer.notify("session/cancel", { sessionId: c.sessionId }).catch(() => {});
+}
+
 /** Connect the JSON-RPC peer to the process streams (also used after a hot swap). */
 async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
   c.peer = new JsonRpcPeer((line) => ctx.host.process.write(c.proc, line + "\n"), nextId);
   c.peer.restore(partial);
   c.peer.onNotification = (method, params) => {
+    if (method === "$/cancel_request") { void cancelInternal(ctx, c); return; }
+    if (method === "elicitation/complete") {
+      ctx.events.emit("acp.elicitationComplete", { conversationId: c.conversationId, ...params });
+      return;
+    }
     if (method === "session/update" && params && params.update) {
+      if (!sessionMatches(c, params)) { ctx.log.warn(`ignored ACP update for foreign session ${String(params.sessionId)}`); return; }
       const u = params.update;
-      if (c.loadingHistory && ["user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan"].includes(u.sessionUpdate)) return;
       if (u.sessionUpdate === "config_option_update" && Array.isArray(u.configOptions)) { c.configOptions = u.configOptions; emitStatus(ctx, c); }
       else if (u.sessionUpdate === "current_mode_update" && c.modes) { c.modes = { ...c.modes, currentModeId: u.currentModeId }; emitStatus(ctx, c); }
       else if (u.sessionUpdate === "usage_update") {
@@ -340,17 +504,51 @@ async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
         if (c.providerModule && c.providerId) {
           const providerId = c.providerId;
           void providerSessionLimits(ctx, providerId, u, limits[providerId] || null)
-            .then((next: LimitsSnapshot | null) => { if (next) setLimits(ctx, providerId, next); })
+            .then((next: LimitsSnapshot | null) => { if (next) setLimits(ctx, providerId, next, c.workspaceId); })
             .catch((e) => ctx.log.warn('Provider usage update:', errMsg(e)));
         }
       }
-      else if (u.sessionUpdate === "available_commands_update") { c.commands = u.availableCommands || []; }
-      ctx.events.emit("acp.update", { conversationId: c.conversationId, update: u });
+      else if (u.sessionUpdate === "available_commands_update") { c.commands = u.availableCommands || []; emitStatus(ctx, c); }
+      else if (u.sessionUpdate === "session_info_update") {
+        c.sessionInfo = u;
+        const marker = u._meta?.["opencode/compaction"] || params._meta?.["opencode/compaction"];
+        if (marker) c.compaction = marker;
+        emitStatus(ctx, c);
+      }
+      else if (u.sessionUpdate === "compaction_update" || u.sessionUpdate === "compaction_summary_chunk") {
+        c.compaction = u;
+        emitStatus(ctx, c);
+      }
+      const child = u._meta?.["opencode/child-session"] || params._meta?.["opencode/child-session"];
+      if (child?.id) { c.childSessions = { ...c.childSessions, [child.id]: child }; emitStatus(ctx, c); }
+      ctx.events.emit("acp.update", { conversationId: c.conversationId, sessionId: params.sessionId, update: u });
+      return;
     }
+    ctx.events.emit("acp.notification", { conversationId: c.conversationId, method, params });
   };
-  c.peer.onRequest = async (method, params) => {
+  c.peer.onRequest = async (method, params, id) => {
+    if (!sessionMatches(c, params)) throw rpcError(-32602, "ACP request targets a different session");
     if (method === "session/request_permission") {
-      return ctx.modules.call("ai-sessions", "permissionRequest", { conversationId: c.conversationId, request: params }, { timeoutMs: 30 * 60 * 1000 });
+      const pending = deferred<any>();
+      c.pendingPermissions.set(id, pending.resolve);
+      try {
+        return await Promise.race([
+          ctx.modules.call("ai-sessions", "permissionRequest", { conversationId: c.conversationId, request: params }, { timeoutMs: 30 * 60 * 1000 }),
+          pending.promise,
+        ]);
+      } finally { c.pendingPermissions.delete(id); }
+    }
+    if (method === "elicitation/create") {
+      if (params?.mode !== "form") throw rpcError(-32602, "Only form elicitation is supported");
+      const pending = deferred<any>();
+      const timer = setTimeout(() => {
+        c.pendingElicitations.delete(id);
+        pending.resolve({ action: "cancel" });
+      }, 30 * 60 * 1000);
+      c.pendingElicitations.set(id, { params, resolve: pending.resolve, reject: pending.reject, timer });
+      ctx.events.emit("acp.elicitation", { conversationId: c.conversationId, requestId: id, request: params });
+      try { return await pending.promise; }
+      finally { clearTimeout(timer); c.pendingElicitations.delete(id); }
     }
     // fs/* and terminal/* capabilities are not advertised by this client.
     throw rpcError(-32601, `method not supported by client: ${method}`);
@@ -359,6 +557,12 @@ async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
   await ctx.host.streams.listen(c.proc, { channel: "stdout" }, (chunk) => c.peer.feed(chunk), (err) => {
     const wasBusy = c.status === "busy";
     c.status = "exited";
+    if (c.activeTurn?.timer) clearTimeout(c.activeTurn.timer);
+    c.activeTurn = null;
+    for (const resolve of c.pendingPermissions.values()) resolve({ outcome: { outcome: "cancelled" } });
+    c.pendingPermissions.clear();
+    for (const pending of c.pendingElicitations.values()) { clearTimeout(pending.timer); pending.resolve({ action: "cancel" }); }
+    c.pendingElicitations.clear();
     if (c.stopping) { c.peer.failAll("agent stopped"); return; }
     c.error = c.error || (err ? errMsg(err) : "agent process exited");
     c.peer.failAll("agent process exited");
@@ -368,11 +572,27 @@ async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
   await ctx.host.streams.listen(c.proc, { channel: "stderr" }, (chunk) => { c.stderrTail = (c.stderrTail + chunk).slice(-8000); });
 }
 
+function lifecycleParams(c: Conn) {
+  return { cwd: c.cwd, mcpServers: c.mcpServers, ...(c.additionalDirectories.length ? { additionalDirectories: c.additionalDirectories } : {}) };
+}
+
+function applySessionResult(ctx: ModuleContext, c: Conn, res: any, sessionId?: string) {
+  c.sessionId = sessionId || res?.sessionId || null;
+  c.sessionClosed = false;
+  c.configOptions = res && Array.isArray(res.configOptions) ? res.configOptions : null;
+  c.modes = res && res.modes ? res.modes : null;
+  c.models = res && res.models ? res.models : null;
+  c.usage = null;
+  c.turnUsage = null;
+  emitStatus(ctx, c);
+}
+
 const mod: AppModule = {
   id: "acp",
   moduleApiVersion: 1,
   async activate(ctx, prev) {
     if (prev?.limits) limits = { ...prev.limits };
+    if (prev?.limitScopes) limitScopes = { ...prev.limitScopes };
     for (const k of Object.keys(limits)) if (limits[k]?.loading) limits[k] = { ...limits[k]!, loading: false };
     publishLimits(ctx);
     // Hot-swap hand-over: re-attach live agent processes; the kernel replays buffered stdout.
@@ -380,7 +600,11 @@ const mod: AppModule = {
       const available = await profiles(ctx);
       for (const s of prev.conns) {
         const p = available.find((p: any) => p.id === s.profileId);
-        const c: Conn = { ...s, providerId: s.providerId || p?.provider, providerModule: s.providerModule || p?.providerModule, peer: null as any };
+        const c: Conn = {
+          ...s, providerId: s.providerId || p?.provider, providerModule: s.providerModule || p?.providerModule,
+          peer: null as any, pendingPermissions: new Map(), pendingElicitations: new Map(), activeTurn: null,
+          childSessions: s.childSessions || {}, additionalDirectories: s.additionalDirectories || [],
+        };
         conns.set(c.conversationId, c);
         if (c.status === "ready" || c.status === "busy") await wire(ctx, c, s.nextId, s.partial);
       }
@@ -391,12 +615,12 @@ const mod: AppModule = {
   canSwap() {
     if (probes.size) return { ok: false, reason: "a usage-limit probe is running" };
     for (const c of conns.values()) {
-      if (c.status === "busy" || c.status === "starting" || (c.peer && c.peer.pendingCount > 0)) return { ok: false, reason: `ACP session ${c.conversationId} is busy` };
+      if (c.status === "busy" || c.status === "starting" || c.authProcess || c.pendingPermissions.size || c.pendingElicitations.size || (c.peer && c.peer.pendingCount > 0)) return { ok: false, reason: `ACP session ${c.conversationId} is busy` };
     }
     return { ok: true };
   },
   snapshot() {
-    return { limits, conns: Array.from(conns.values()).map((c) => ({ ...publicState(c), proc: c.proc, providerId: c.providerId, providerModule: c.providerModule, stderrTail: c.stderrTail, nextId: c.peer ? c.peer.nextRequestId : 1, partial: c.peer ? c.peer.partial : "" })) };
+    return { limits, limitScopes, conns: Array.from(conns.values()).map((c) => ({ ...publicState(c), proc: c.proc, providerId: c.providerId, providerModule: c.providerModule, profile: c.profile, env: c.env, envRemove: c.envRemove, mcpServers: c.mcpServers, stderrTail: c.stderrTail, nextId: c.peer ? c.peer.nextRequestId : 1, partial: c.peer ? c.peer.partial : "" })) };
   },
   methods: {
     profiles: async (ctx, a) => {
@@ -422,17 +646,23 @@ const mod: AppModule = {
     state: (_ctx, a) => publicState(conns.get(a.conversationId)),
     async prompt(ctx, a) {
       const c = conns.get(a.conversationId);
-      if (!c || c.status !== "ready") throw new Error(`agent session is ${c ? c.status : "not started"}`);
-      const images = imageAttachments(a.images);
-      if (images.length && !c.agentCapabilities?.promptCapabilities?.image) throw new Error("This agent does not support image prompts. Choose an agent with image support.");
-      const blocks: any[] = a.text ? [{ type: "text", text: String(a.text) }] : [];
-      blocks.push(...images.map((image) => ({ type: "image", mimeType: image.mimeType, data: image.data })));
-      if (!blocks.length) throw new Error("empty prompt");
+      if (!c || c.status !== "ready" || !c.sessionId || c.sessionClosed) throw new Error(`agent session is ${c ? c.status : "not started"}`);
+      if (c.activeTurn) throw new Error("A prompt is already running for this session");
+      const blocks = promptBlocks(a, c);
+      const timeoutMs = Number.isFinite(a.timeoutMs) ? Math.max(1000, Math.min(30 * 60 * 1000, Number(a.timeoutMs))) : 30 * 60 * 1000;
       c.status = "busy";
+      c.error = null;
+      c.turnUsage = null;
+      c.activeTurn = { cancelled: false };
       emitStatus(ctx, c);
+      c.activeTurn.timer = setTimeout(() => {
+        if (!c.activeTurn) return;
+        void cancelInternal(ctx, c);
+        finishTurn(ctx, c, { error: `prompt timed out after ${timeoutMs} ms` });
+      }, timeoutMs);
       c.peer.request("session/prompt", { sessionId: c.sessionId, prompt: blocks }).then(
-        (r: any) => { if (c.stopping || c.status === "exited") return; if (c.status === "busy") c.status = "ready"; emitStatus(ctx, c); ctx.events.emit("acp.turnEnded", { conversationId: c.conversationId, stopReason: r && r.stopReason }); },
-        (e) => { if (c.stopping || c.status === "exited") return; if (c.status === "busy") c.status = "ready"; c.error = errMsg(e); emitStatus(ctx, c); ctx.events.emit("acp.turnEnded", { conversationId: c.conversationId, error: errMsg(e) }); },
+        (r: any) => finishTurn(ctx, c, { stopReason: r && r.stopReason, usage: r && r.usage }),
+        (e) => finishTurn(ctx, c, { error: errMsg(e) }),
       );
       return { accepted: true };
     },
@@ -441,18 +671,144 @@ const mod: AppModule = {
     async steer(ctx, a) {
       const c = conns.get(a.conversationId);
       if (!c || !c.sessionId || !c.steering) return { outcome: "unsupported" };
-      const images = imageAttachments(a.images);
-      if (images.length && !c.agentCapabilities?.promptCapabilities?.image) throw new Error("This agent does not support image prompts. Choose an agent with image support.");
-      const blocks: any[] = a.text ? [{ type: "text", text: String(a.text) }] : [];
-      blocks.push(...images.map((image) => ({ type: "image", mimeType: image.mimeType, data: image.data })));
-      if (!blocks.length) throw new Error("empty prompt");
+      const blocks = promptBlocks(a, c);
       const r: any = await withTimeout(c.peer.request("_session/steering", { sessionId: c.sessionId, prompt: blocks, _meta: { steering: { idleBehavior: "promptRequired" } } }), 30000, "steering");
       return { outcome: r?.outcome === "promptRequired" ? "promptRequired" : "steered" };
     },
     async cancel(ctx, a) {
       const c = conns.get(a.conversationId);
       if (!c || !c.sessionId) return null;
-      await c.peer.notify("session/cancel", { sessionId: c.sessionId });
+      await cancelInternal(ctx, c);
+      return null;
+    },
+    /** Respond to a form elicitation previously emitted as `acp.elicitation`. */
+    respondElicitation(ctx, a) {
+      const c = conns.get(a.conversationId);
+      const pending = c?.pendingElicitations.get(a.requestId);
+      if (!pending) throw new Error("Unknown or completed elicitation request");
+      const action = a.response?.action;
+      if (!["accept", "decline", "cancel"].includes(action)) throw new Error("Elicitation response action must be accept, decline, or cancel");
+      clearTimeout(pending.timer);
+      pending.resolve(a.response);
+      c!.pendingElicitations.delete(a.requestId);
+      return null;
+    },
+    /** ACP session lifecycle surface. These methods intentionally return raw protocol data so
+     * a future Hato UI can build session browsers and management controls without another adapter. */
+    async listSessions(ctx, a) {
+      const c = conns.get(a.conversationId);
+      if (!c) throw new Error("agent session not started");
+      if (!c.agentCapabilities.sessionCapabilities?.list) throw new Error("This agent does not support session listing");
+      const params: any = { cwd: c.cwd };
+      if (a.cursor != null) params.cursor = String(a.cursor);
+      if (Number.isSafeInteger(a.limit) && a.limit > 0) params.limit = Math.min(100, a.limit);
+      return withTimeout(c.peer.request("session/list", params), 60000, "session/list");
+    },
+    async newSession(ctx, a) {
+      const c = conns.get(a.conversationId);
+      if (!c) throw new Error("agent session not started");
+      const dirs = additionalDirectories(a.additionalDirectories ?? c.additionalDirectories);
+      c.additionalDirectories = dirs;
+      const res: any = await withTimeout(c.peer.request("session/new", lifecycleParams(c)), 120000, "session/new");
+      applySessionResult(ctx, c, res);
+      return publicState(c);
+    },
+    async resumeSession(ctx, a) {
+      const c = conns.get(a.conversationId);
+      if (!c) throw new Error("agent session not started");
+      if (!c.agentCapabilities.sessionCapabilities?.resume) throw new Error("This agent does not support session resume");
+      const dirs = additionalDirectories(a.additionalDirectories ?? c.additionalDirectories);
+      c.additionalDirectories = dirs;
+      const res: any = await withTimeout(c.peer.request("session/resume", { ...lifecycleParams(c), sessionId: String(a.sessionId) }), 120000, "session/resume");
+      applySessionResult(ctx, c, res, String(a.sessionId));
+      return publicState(c);
+    },
+    async loadSession(ctx, a) {
+      const c = conns.get(a.conversationId);
+      if (!c) throw new Error("agent session not started");
+      if (!c.agentCapabilities.loadSession) throw new Error("This agent does not support session loading");
+      const dirs = additionalDirectories(a.additionalDirectories ?? c.additionalDirectories);
+      c.additionalDirectories = dirs;
+      const res: any = await withTimeout(c.peer.request("session/load", { ...lifecycleParams(c), sessionId: String(a.sessionId) }), 120000, "session/load");
+      applySessionResult(ctx, c, res, String(a.sessionId));
+      return publicState(c);
+    },
+    async forkSession(ctx, a) {
+      const c = conns.get(a.conversationId);
+      if (!c) throw new Error("agent session not started");
+      if (!c.agentCapabilities.sessionCapabilities?.fork) throw new Error("This agent does not support session forking");
+      const dirs = additionalDirectories(a.additionalDirectories ?? c.additionalDirectories);
+      c.additionalDirectories = dirs;
+      const res: any = await withTimeout(c.peer.request("session/fork", { ...lifecycleParams(c), sessionId: String(a.sessionId) }), 120000, "session/fork");
+      applySessionResult(ctx, c, res);
+      return publicState(c);
+    },
+    async closeSession(ctx, a) {
+      const c = conns.get(a.conversationId);
+      if (!c || !c.sessionId) throw new Error("agent session not started");
+      if (!c.agentCapabilities.sessionCapabilities?.close) throw new Error("This agent does not support session close");
+      await withTimeout(c.peer.request("session/close", { sessionId: c.sessionId }), 60000, "session/close");
+      c.sessionClosed = true;
+      emitStatus(ctx, c);
+      return publicState(c);
+    },
+    async deleteSession(ctx, a) {
+      const c = conns.get(a.conversationId);
+      if (!c) throw new Error("agent session not started");
+      if (!c.agentCapabilities.sessionCapabilities?.delete) throw new Error("This agent does not support session deletion");
+      const sessionId = String(a.sessionId || c.sessionId || "");
+      if (!sessionId) throw new Error("sessionId is required");
+      await withTimeout(c.peer.request("session/delete", { sessionId }), 60000, "session/delete");
+      if (sessionId === c.sessionId) { c.sessionId = null; c.sessionClosed = true; emitStatus(ctx, c); }
+      return null;
+    },
+    async authenticate(ctx, a) {
+      const c = conns.get(a.conversationId);
+      if (!c) throw new Error("agent session not started");
+      const method = c.authMethods.find((entry: any) => entry.id === a.methodId);
+      if (!method) throw new Error(`Unknown authentication method '${String(a.methodId)}'`);
+      const terminal = method._meta?.["terminal-auth"];
+      if (terminal || a.terminal) {
+        const desc: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: c.workspaceId });
+        const profile = c.profile || await resolveProfile(ctx, c.profileId, desc.machineId);
+        const command = typeof terminal?.command === "string" ? terminal.command : desc.location === "local" ? c.executablePath : profile.executable;
+        const args = Array.isArray(terminal?.args) ? terminal.args.map(String) : [...(profile.args || []), "--login"];
+        const g = await workspaceGrant(ctx, desc, "process");
+        const proc = await ctx.host.process.spawn(g.grant, {
+          target: await targetFor(ctx, desc), executable: command, args, cwd: desc.rootAbsolutePath,
+          env: c.env || { ...(profile.envRefs || {}) }, envRemove: c.envRemove || [], loginShell: desc.location !== "local",
+        });
+        c.authProcess = { handle: proc.handle, pid: proc.pid, methodId: method.id };
+        emitStatus(ctx, c);
+        const subOut = await ctx.host.streams.listen(proc.handle, { channel: "stdout" }, (chunk) => ctx.events.emit("acp.authOutput", { conversationId: c.conversationId, methodId: method.id, channel: "stdout", data: chunk }));
+        const subErr = await ctx.host.streams.listen(proc.handle, { channel: "stderr" }, (chunk) => ctx.events.emit("acp.authOutput", { conversationId: c.conversationId, methodId: method.id, channel: "stderr", data: chunk }));
+        void ctx.host.process.wait(proc.handle).then((result) => {
+          void subOut.close().catch(() => {}); void subErr.close().catch(() => {});
+          if (c.authProcess?.handle === proc.handle) c.authProcess = null;
+          emitStatus(ctx, c);
+          ctx.events.emit("acp.authCompleted", { conversationId: c.conversationId, methodId: method.id, code: result?.code ?? null, signal: result?.signal ?? null });
+        }).catch(() => {});
+        return { outcome: "terminal", pid: proc.pid, command, args, label: terminal?.label || method.name || method.id };
+      }
+      await withTimeout(c.peer.request("authenticate", { methodId: method.id }), 120000, "authenticate");
+      c.error = null;
+      emitStatus(ctx, c);
+      return { outcome: "authenticated", methodId: method.id };
+    },
+    async authInput(ctx, a) {
+      const c = conns.get(a.conversationId);
+      if (!c?.authProcess) throw new Error("No terminal authentication is running");
+      await ctx.host.process.write(c.authProcess.handle, String(a.data || ""));
+      return null;
+    },
+    async cancelAuth(ctx, a) {
+      const c = conns.get(a.conversationId);
+      const auth = c?.authProcess;
+      if (!auth) return null;
+      await ctx.host.process.closeStdin(auth.handle).catch(() => {});
+      await ctx.host.process.terminate(auth.handle).catch(() => {});
+      if (c.authProcess?.handle === auth.handle) c.authProcess = null;
+      emitStatus(ctx, c);
       return null;
     },
     /** Change a negotiated session setting. Uses configOptions when advertised; legacy modes/models otherwise. */
@@ -461,7 +817,14 @@ const mod: AppModule = {
       if (!c || !c.sessionId) throw new Error("agent session not started");
       const changesModel = a.configId === "__model" || c.configOptions?.some((o: any) => o.id === a.configId && o.category === "model");
       if (c.configOptions && c.configOptions.some((o: any) => o.id === a.configId)) {
-        const r: any = await c.peer.request("session/set_config_option", { sessionId: c.sessionId, configId: a.configId, value: a.value });
+        const option = c.configOptions.find((o: any) => o.id === a.configId);
+        let value = a.value;
+        if (option?.type === "boolean") {
+          if (typeof value !== "boolean") throw new Error(`Setting '${a.configId}' requires a boolean value`);
+        } else if (typeof value !== "string") {
+          throw new Error(`Setting '${a.configId}' requires a string value`);
+        }
+        const r: any = await c.peer.request("session/set_config_option", { sessionId: c.sessionId, configId: a.configId, value });
         if (r && Array.isArray(r.configOptions)) c.configOptions = r.configOptions;
       } else if (a.configId === "__mode" && c.modes) {
         await c.peer.request("session/set_mode", { sessionId: c.sessionId, modeId: a.value });
@@ -480,6 +843,15 @@ const mod: AppModule = {
       const c = conns.get(a.conversationId);
       if (!c) return null;
       c.stopping = true;
+      if (c.activeTurn?.timer) clearTimeout(c.activeTurn.timer);
+      c.activeTurn = null;
+      for (const resolve of c.pendingPermissions.values()) resolve({ outcome: { outcome: "cancelled" } });
+      c.pendingPermissions.clear();
+      for (const pending of c.pendingElicitations.values()) { clearTimeout(pending.timer); pending.resolve({ action: "cancel" }); }
+      c.pendingElicitations.clear();
+      const auth = c.authProcess;
+      if (auth) await ctx.host.process.terminate(auth.handle).catch(() => {});
+      c.authProcess = null;
       await ctx.host.process.closeStdin(c.proc).catch(() => {});
       await ctx.host.process.terminate(c.proc).catch(() => {});
       c.status = "exited";
@@ -495,15 +867,17 @@ const mod: AppModule = {
     async limits(ctx, a) {
       const provider = String(a?.provider || '');
       await providerById(ctx, provider);
+      const workspaceId = a?.workspaceId ? String(a.workspaceId) : null;
       const cur = limits[provider];
       const maxAge = Number.isFinite(a?.maxAgeMs) ? Number(a.maxAgeMs) : 60000;
-      if (!a?.workspaceId || (!a.force && cur && !cur.error && Date.now() - cur.updatedAt < maxAge)) return cur;
-      let p = probes.get(provider);
+      if (!workspaceId || (!a.force && cur && !cur.error && limitScopes[provider] === workspaceId && Date.now() - cur.updatedAt < maxAge)) return cur;
+      const key = probeKey(provider, workspaceId);
+      let p = probes.get(key);
       if (!p) {
-        setLimits(ctx, provider, { ...(cur || { provider, windows: [], plan: null, updatedAt: 0, source: "probe", error: null }), loading: true });
-        p = probeLimits(ctx, provider, String(a.workspaceId)).catch((e) => ({ ...(limits[provider] || { provider, windows: [], plan: null, source: "probe" as const }), updatedAt: Date.now(), error: errMsg(e) }));
-        probes.set(provider, p);
-        p.then((snap) => { probes.delete(provider); setLimits(ctx, provider, { ...snap, loading: false }); });
+        setLimits(ctx, provider, { ...(cur || { provider, windows: [], plan: null, updatedAt: 0, source: "probe", error: null }), loading: true }, workspaceId);
+        p = probeLimits(ctx, provider, workspaceId).catch((e) => ({ ...(limits[provider] || { provider, windows: [], plan: null, source: "probe" as const }), updatedAt: Date.now(), error: errMsg(e) }));
+        probes.set(key, p);
+        p.then((snap) => { probes.delete(key); setLimits(ctx, provider, { ...snap, loading: false }, workspaceId); });
       }
       return p;
     },

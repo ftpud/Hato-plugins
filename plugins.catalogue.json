@@ -8,7 +8,7 @@
       "type": "System",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.59",
+      "version": "0.1.60",
       "coreVersion": "^0.1.0",
       "description": "Hato essentials services and panels.",
       "dependencies": {},
@@ -35,7 +35,7 @@
       "type": "AI",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.19",
+      "version": "0.1.20",
       "coreVersion": "^0.1.0",
       "description": "Provider-independent ACP sessions, chat UI and MCP tools. Install AI providers separately.",
       "dependencies": {
@@ -132,6 +132,24 @@
       ]
     },
     {
+      "id": "opencode-acp",
+      "name": "OpenCode",
+      "type": "AI providers",
+      "core": false,
+      "author": "Hato contributors",
+      "version": "0.1.3",
+      "coreVersion": "^0.1.0",
+      "description": "OpenCode CLI using its native ACP server, plus inline OpenCode Go plan-token allowance remaining in the Assistant rail. Available in AI Chat and Background Agents; install and authenticate OpenCode on the workspace machine.",
+      "dependencies": {
+        "foundation": "^0.1.59",
+        "core-acp": "^0.1.20"
+      },
+      "modules": [
+        "opencode-provider",
+        "opencode-usage"
+      ]
+    },
+    {
       "id": "copilot-acp",
       "name": "GitHub Copilot",
       "type": "AI providers",
@@ -154,7 +172,7 @@
       "type": "Automation",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.14",
+      "version": "0.1.15",
       "coreVersion": "^0.1.0",
       "description": "Persistent agent runtime, background agent panel and workspace tools. Supports local and SSH machines.",
       "dependencies": {
@@ -175,7 +193,7 @@
       "type": "Automation",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.12",
+      "version": "0.1.13",
       "coreVersion": "^0.1.0",
       "description": "Visual workflow editor and execution runtime. Uses Background Agents to run agent steps.",
       "dependencies": {
@@ -212,7 +230,7 @@
       "type": "Languages",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.15",
+      "version": "0.1.16",
       "coreVersion": "^0.1.0",
       "description": "Shared language support for local and SSH workspaces.",
       "dependencies": {

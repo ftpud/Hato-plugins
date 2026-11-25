@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 2,
+  "id": "opencode-provider",
+  "name": "OpenCode provider",
+  "kind": "service",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [
+    "workspace"
+  ],
+  "calls": [
+    "workspace",
+    "cloud"
+  ],
+  "capabilities": [
+    "process.scope",
+    "ssh.connect"
+  ],
+  "provides": [
+    "ai.provider"
+  ],
+  "distribution": "marketplace",
+  "contributes": {
+    "agentProviders": [
+      {
+        "id": "opencode",
+        "name": "OpenCode",
+        "profile": {
+          "id": "opencode",
+          "name": "OpenCode (ACP)",
+          "executable": "opencode",
+          "args": [
+            "acp"
+          ]
+        },
+        "adapter": {
+          "pkg": "@opencode/cli",
+          "bin": "opencode"
+        },
+        "usageCommand": "module:limits"
+      }
+    ]
+  },
+  "version": "0.1.3",
+  "pluginPackage": "opencode-acp",
+  "pluginType": "AI providers",
+  "description": "OpenCode CLI over native ACP stdio, with workspace-scoped launch and model-free OpenCode Go plan-usage probes."
+}
