@@ -1,8 +1,9 @@
+import { fileURLToPath } from "node:url";
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
 const load=async path=>{
- const r=await build({entryPoints:[new URL(path,import.meta.url).pathname],bundle:true,format:'esm',write:false,alias:{'@hato/sdk':new URL('../../sdk',import.meta.url).pathname}});
+ const r=await build({entryPoints:[fileURLToPath(new URL(path,import.meta.url))],bundle:true,format:'esm',write:false,alias:{'@hato/sdk':fileURLToPath(new URL('../../sdk',import.meta.url))}});
  return import('data:text/javascript;base64,'+Buffer.from(r.outputFiles[0].text).toString('base64'));
 };
 const sdk=await load('../../sdk/file-presentation.ts');

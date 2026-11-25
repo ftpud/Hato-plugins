@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
@@ -5,7 +6,7 @@ import { mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-const load = async path => import('data:text/javascript;base64,' + Buffer.from((await build({entryPoints:[new URL(path,import.meta.url).pathname],bundle:true,format:'esm',write:false,alias:{'@hato/sdk':new URL('../../sdk',import.meta.url).pathname}})).outputFiles[0].text).toString('base64'));
+const load = async path => import('data:text/javascript;base64,' + Buffer.from((await build({entryPoints:[fileURLToPath(new URL(path,import.meta.url))],bundle:true,format:'esm',write:false,alias:{'@hato/sdk':fileURLToPath(new URL('../../sdk',import.meta.url))}})).outputFiles[0].text).toString('base64'));
 const {gitOperations} = await load('../modules/services/git/src/operations.ts');
 async function fixture(fn) {
  const root=await mkdtemp(join(tmpdir(),'hato-git-'));

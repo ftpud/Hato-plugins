@@ -1,3 +1,4 @@
+import { sessionPage } from "@hato/sdk/acp-protocol";
 import { filterInput } from "@hato/sdk/filter-style";
 // ai: ACP chat panel. Layout and control handlers only; conversation state lives in ai-sessions,
 // protocol in acp, and approval authority in the kernel's native chrome.
@@ -12,6 +13,8 @@ import { LIBRARY_STATE, isLibraryRef, libraryInstructions, libraryItemsFor, libr
 import { exportSettings } from "@hato/sdk/settings";
 import { debounce, errMsg } from "@hato/sdk/runtime";
 import { resolveWorkspaceLink } from "@hato/sdk/links";
+import { applySlashCommand, matchingCommands } from "./commands";
+import { enumChoices, initialElicitationValues, normalizeElicitationSchema, validateElicitation, type ElicitationSchema, type ElicitationValues } from "./elicitation";
 
 import { agentPolicy, agentSettings, modelChoices, providerLabel, type AgentSession, type AgentView } from "@hato/sdk/persistent-agents";
 import { anchoredAboveMotion, anchoredMotion } from "@hato/sdk/motion";
@@ -55,7 +58,7 @@ function persistent(ctx:ModuleContext,method:string,args:any={}) {
     ctx.events.emit("ai.persistentRequest",{requestId,method,args:{...selection,...args}});
   });
 }
-function resetChatWindows(){historyBefore=[];historyLimit=CHAT_MESSAGE_LIMIT;settingsOpen=false;modelsOpen=false;historyOpen=false;mcpOpen=false;skillsOpen=false;deleteChat=null;error=null;}
+function resetChatWindows(){historyBefore=[];historyLimit=CHAT_MESSAGE_LIMIT;settingsOpen=false;modelsOpen=false;historyOpen=false;mcpOpen=false;skillsOpen=false;deleteChat=null;error=null;authPickerOpen=false;providerSessionsOpen=false;providerSessionDelete=null;invalidateProviderSessions();slashDismissed=false;activeElicitation=null;}
 function publishSession(ctx:ModuleContext){ctx.state.set("ai.session",background?{kind:"background",...background}:{kind:"chat"});}
 async function openBackground(ctx:ModuleContext,selection:any) {
   if(!ws||selection?.workspaceId!==ws.id||typeof selection.id!=="string")return;
@@ -91,8 +94,30 @@ async function restoreComposer(ctx: ModuleContext) {
 }
 let ws: any = null;
 let view: any = null;
+let loadGeneration = 0, pendingLoads = 0, pendingEvents = 0;
+let origin = crypto.randomUUID(), originSignature = "";
+function syncOrigin() {
+  const next = JSON.stringify([ws?.id, background?.id, view?.active?.conversation?.id, view?.active?.live?.sessionId, view?.active?.live?.startedAt, authConsole?.uiKey]);
+  if (next !== originSignature) {
+    const oldConversation = originSignature ? JSON.parse(originSignature)[2] : null;
+    originSignature = next; origin = crypto.randomUUID();
+    if (oldConversation !== view?.active?.conversation?.id) {
+      authConsole = null; authPickerOpen = false; providerSessionsOpen = false; providerSessionDelete = null;
+      invalidateProviderSessions(); providerSessions = []; providerSessionsCursor = null;
+    }
+  }
+}
+function scopeTree(node: UiNode): UiNode {
+  const n = node as any;
+  for(const key of Object.keys(n)) {
+    if((key === "action" || key.endsWith("Action")) && typeof n[key] === "string" && n[key]) n[key] = `origin:${origin}:${n[key].replace(/^origin:[^:]+:/, "")}`;
+  }
+  for(const child of n.children || []) scopeTree(child);
+  return node;
+}
 let error: string | null = null;
 let busy: string | null = null;
+let busyOwner: string | null = null;
 let settingsOpen = false;
 let mcpOpen = false;
 let modelsOpen = false;
@@ -113,6 +138,7 @@ let libraryState: unknown = null;
 let attachments: ImageAttachment[] = [];
 const connectionAttempts = new Set<string>();
 let draft: string | undefined = undefined;
+let slashDismissed = false;
 let refresh: () => void = () => {};
 // ACP adapter install/update, shown in Settings → AI & tools → ACP adapters.
 const ADAPTERS_SECTION = "acp-adapters";
@@ -121,6 +147,64 @@ let adapters: { machineId: string; list: any[] } | null = null;
 let adaptersBusy: string | null = null;
 let adaptersMsg: string | null = null;
 let publishSettings: (error?: string | null) => void = () => {};
+interface AuthConsole { attemptId?: string; pty?: string; confirmToken?: string; conversationId: string; methodId: string; label: string; display: string; envKeys: string[]; output: string; uiKey: string; inputKey: string; inputPending?: boolean; cancelled?: boolean; completed?: { code: number | null; signal: number | null } }
+let authPickerOpen = false;
+let authConsole: AuthConsole | null = null;
+let refreshAuth: () => void = () => {};
+let providerSessionsOpen = false;
+let providerSessions: any[] = [];
+let providerSessionsCursor: string | null = null;
+let providerSessionsLoading = false;
+let providerSessionsConversation: string | null = null;
+let providerSessionsEpoch = 0;
+const providerCursors = new Set<string>();
+let providerSessionsQuery = "";
+let providerSessionAction: string | null = null;
+let providerSessionDelete: { conversationId: string; sessionId: string } | null = null;
+interface PendingElicitation { conversationId: string; requestId: number | string; request: any; schema: ElicitationSchema; schemaError: string | null; values: ElicitationValues; errors: Record<string, string>; uiKey: string; submitting?: boolean }
+const elicitationKey = (conversationId: string, requestId: number | string) => `${conversationId}\u0000${String(requestId)}`;
+const pendingElicitations = new Map<string, PendingElicitation>();
+const pendingByUiKey = (uiKey: string) => [...pendingElicitations.values()].find(item => item.uiKey === uiKey);
+let activeElicitation: string | null = null;
+const terminalMethod = (method: any) => method?.type === "terminal" || !!method?._meta?.["terminal-auth"];
+const authOutputText = (text: string) => text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "").slice(-32000);
+
+async function loadProviderSessions(ctx: ModuleContext, conversationId: string, append = false) {
+  if (!conversationId || providerSessionsLoading) return;
+  const epoch = ++providerSessionsEpoch;
+  providerSessionsConversation = conversationId;
+  providerSessionsLoading = true; providerSessionAction = "list"; ctx.ui.invalidate();
+  try {
+    const page = await ctx.modules.call("ai-sessions", "providerSessions", { conversationId, ...(append && providerSessionsCursor ? { cursor: providerSessionsCursor } : {}) }, { timeoutMs: 90000 });
+    if (epoch !== providerSessionsEpoch || !providerSessionsOpen || providerSessionsConversation !== conversationId) return;
+    const normalized = sessionPage(page);
+    const incoming = normalized.sessions;
+    const seen = new Set(providerSessions.map((s: any) => s.sessionId));
+    providerSessions = append ? [...providerSessions, ...incoming.filter((s: any) => !seen.has(s.sessionId))] : incoming;
+    const cursor = normalized.nextCursor;
+    if (!append) providerCursors.clear();
+    const progress = incoming.some((s: any) => !seen.has(s.sessionId));
+    providerSessionsCursor = cursor && !providerCursors.has(cursor) && (!append || progress) && providerSessions.length < 10000 ? cursor : null;
+    if(cursor) providerCursors.add(cursor);
+  } finally { if (epoch === providerSessionsEpoch) { providerSessionsLoading = false; providerSessionAction = null; ctx.ui.invalidate(); } }
+}
+
+function invalidateProviderSessions() {
+  providerSessionsEpoch++; providerSessionsLoading = false; providerSessionAction = null; providerSessionsConversation = null;
+}
+
+async function answerElicitation(ctx: ModuleContext, pending: PendingElicitation, response: any) {
+  pending.submitting = true; ctx.ui.invalidate();
+  try {
+    await ctx.modules.call("ai-sessions", "respondElicitation", { conversationId: pending.conversationId, requestId: pending.requestId, response });
+    const key = elicitationKey(pending.conversationId, pending.requestId);
+    pendingElicitations.delete(key);
+    if (activeElicitation === key) {
+      const next = [...pendingElicitations.values()].reverse().find(item => item.conversationId === pending.conversationId);
+      activeElicitation = next ? elicitationKey(next.conversationId, next.requestId) : null;
+    }
+  } finally { pending.submitting = false; ctx.ui.invalidate(); }
+}
 
 async function loadAdapters(ctx: ModuleContext) {
   if (!ws || adaptersBusy) return;
@@ -162,13 +246,17 @@ async function adapterAction(ctx: ModuleContext, key: string) {
 }
 
 async function load(ctx: ModuleContext, poll = false) {
+  const generation = ++loadGeneration; pendingLoads++;
+  try { await loadCurrent(ctx,poll,generation); } finally { pendingLoads--; }
+}
+async function loadCurrent(ctx: ModuleContext, poll: boolean, generation: number) {
   if (!ws) { view = null; ctx.ui.invalidate(); return; }
   if(background) {
     const selection=background;
     try {
       const page:AgentView=await persistent(ctx,"view",{limit:Math.min(historyLimit,200),before:Number(historyBefore[historyBefore.length-1])||undefined});
       const auth=await ctx.modules.call("acp","authSettings",{});
-      if(background!==selection||ws?.id!==selection.workspaceId)return;
+      if(generation!==loadGeneration||background!==selection||ws?.id!==selection.workspaceId)return;
       const catalogNow=backgroundCatalog?.workspaceId===ws.id?backgroundCatalog:null;
       const signature=JSON.stringify([page,auth,backgroundSessions.map(s=>[s.id,s.name,s.status,s.profile?.id]),catalogNow?[catalogNow.profiles,catalogNow.mcps]:null,historyBefore.length]);
       if(poll&&signature===backgroundSignature&&view&&!error)return;
@@ -183,17 +271,17 @@ async function load(ctx: ModuleContext, poll = false) {
         live:{...session,profileId:session.profile.id},messages:page.messages,windowed:true,hasOlder:page.before!==null,hasLoadedOlder:false,hasNewer:historyBefore.length>0,
         busy:["busy","waiting"].includes(session.status),steering:page.queued.length,
       }};
-      error=null;
-    }catch(e){if(background===selection)error=errMsg(e);}
+      error=null; syncOrigin();
+    }catch(e){if(generation===loadGeneration&&background===selection)error=errMsg(e);}
     ctx.ui.invalidate();return;
   }
   try {
     const workspaceId = ws.id;
     const next = await ctx.modules.call("ai-sessions", "view", { workspaceId, messageLimit: historyLimit,
       windowConversationId: historyConversationId, beforeMessageId: historyBefore[historyBefore.length - 1] });
-    if (ws?.id !== workspaceId || background) return;
+    if (generation !== loadGeneration || ws?.id !== workspaceId || background) return;
     if (historyConversationId !== next.active?.conversation?.id) { historyBefore = []; historyLimit = CHAT_MESSAGE_LIMIT; preserveHistoryScroll = false; historyConversationId = next.active?.conversation?.id || null; }
-    view = next; error = null;
+    view = next; error = null; syncOrigin();
     const active = view.active;
     if (active && !connectionAttempts.has(active.conversation.id)) {
       const id = active.conversation.id;
@@ -203,12 +291,12 @@ async function load(ctx: ModuleContext, poll = false) {
         await ctx.modules.call("ai-sessions", "connect", { conversationId: id }, { timeoutMs: 600000 });
         if(ws?.id===workspaceId&&!background) {
           const resumed=await ctx.modules.call("ai-sessions","view",{workspaceId,messageLimit:historyLimit,windowConversationId:historyConversationId,beforeMessageId:historyBefore[historyBefore.length-1]});
-          if(ws?.id===workspaceId&&!background)view=resumed;
+          if(generation===loadGeneration&&ws?.id===workspaceId&&!background){view=resumed;syncOrigin();}
         }
       }
     }
   }
-  catch (e) { error = errMsg(e); }
+  catch (e) { if(generation===loadGeneration)error = errMsg(e); }
   publishRail(ctx);
   ctx.ui.invalidate();
 }
@@ -419,6 +507,36 @@ async function loadTools(ctx: ModuleContext, id: string) {
   ctx.ui.invalidate();
 }
 
+function elicitationFields(pending: PendingElicitation): UiNode[] {
+  const required = new Set(pending.schema.required || []);
+  return Object.entries(pending.schema.properties || {}).slice(0, 64).flatMap(([key, property], index): UiNode[] => {
+    const token = "f" + index, controlKey = `${pending.uiKey}-${token}`, action = `elicitationField:${pending.uiKey}:${token}`;
+    if (!property || typeof property !== "object" || Array.isArray(property) || ["__proto__", "prototype", "constructor"].includes(key)) return [{ type: "status", key: controlKey, text: `Field '${key}' has an invalid schema.`, level: "error" }];
+    const label = property.title || key, value = pending.values[key], choices = enumChoices(property);
+    let control: UiNode;
+    if (property.type === "string" && (Array.isArray(property.enum) || Array.isArray(property.oneOf))) control = { type: "select", key: controlKey, value: typeof value === "string" ? value : null,
+      options: choices, action, placeholder: required.has(key) ? "Choose…" : "Optional", buttonStyle: chatStyle.fieldControl };
+    else if (property.type === "string") control = { type: "textInput", key: controlKey, value: typeof value === "string" ? value : "", placeholder: property.description || label,
+      changeAction: action, style: chatStyle.fieldControl };
+    else if (property.type === "boolean") control = { type: "toggle", key: controlKey, label: "", checked: value === true, action };
+    else if (property.type === "number" || property.type === "integer") control = { type: "textInput", key: controlKey, value: typeof value === "number" ? String(value) : typeof value === "string" ? value : "",
+      placeholder: property.type === "integer" ? "Whole number" : "Number", changeAction: action, style: chatStyle.fieldControl };
+    else if (property.type === "array") {
+      const options = enumChoices(property.items || {});
+      control = options.length ? { type: "column", key: controlKey, gap: 4, children: options.map((choice, choiceIndex): UiNode => ({ type: "switch", key: "o" + choiceIndex, label: choice.label,
+        checked: Array.isArray(value) && value.includes(choice.value), action: `elicitationArray:${pending.uiKey}:${token}:o${choiceIndex}` })) } : { type: "status", key: controlKey, text: "This multi-select field does not declare supported choices.", level: "error" };
+    } else control = { type: "status", key: controlKey, text: `Unsupported schema type '${String(property.type || "unknown")}'.`, level: "error" };
+    return [
+      { type: "column", key: "field-" + token, gap: 5, children: [
+        { type: "label", key: "label", text: label + (required.has(key) ? " *" : ""), size: "sm", weight: "medium" },
+        control,
+        ...(property.description && property.type !== "string" ? [{ type: "label", key: "description", text: property.description, size: "xs", color: "muted", wrap: true } as UiNode] : []),
+        ...(pending.errors[key] ? [{ type: "label", key: "error", text: pending.errors[key], size: "xs", color: "danger", wrap: true } as UiNode] : []),
+      ] },
+    ];
+  });
+}
+
 const mod: AppModule = {
   methods: {
     newChat: async (ctx) => { await mod.onEvent!(ctx, { action: "newChat" } as any); return true; },
@@ -438,6 +556,14 @@ const mod: AppModule = {
     if (prev?.composerFractions) for (const [id, value] of prev.composerFractions) composerFractions.set(id, clampComposerFraction(value));
     if (prev?.attachments) attachments = imageAttachments(prev.attachments);
     if (prev && typeof prev.draft === "string") draft = prev.draft;
+    authPickerOpen = !!prev?.authPickerOpen;
+    providerSessionsOpen = !!prev?.providerSessionsOpen;
+    if (Array.isArray(prev?.elicitations)) for (const item of prev.elicitations) {
+      if (typeof item?.conversationId === "string" && item.requestId !== undefined && item.schema) pendingElicitations.set(elicitationKey(item.conversationId, item.requestId), { ...item, schemaError: item.schemaError || null,
+        uiKey: typeof item.uiKey === "string" ? item.uiKey : "form-" + crypto.randomUUID(), submitting: false });
+    }
+    activeElicitation = typeof prev?.activeElicitation === "string" ? prev.activeElicitation : null;
+    authConsole = prev?.authConsole && typeof prev.authConsole.conversationId === "string" ? { ...prev.authConsole, output: "", uiKey: prev.authConsole.uiKey || "auth-" + crypto.randomUUID(), inputKey: prev.authConsole.inputKey || "auth-input-" + crypto.randomUUID() } : null;
     refresh = debounce(() => load(ctx), 40);
     ws = ctx.state.get("workspace.selected") || null;
     void restoreComposer(ctx);
@@ -465,6 +591,34 @@ const mod: AppModule = {
     // Read versions when Settings opens and this machine has not been checked yet (npm queries are slow).
     ctx.events.on("settings.open", () => { if (ws && adapters?.machineId !== ws.machineId) void loadAdapters(ctx).catch(e => publishSettings(errMsg(e))); });
     ctx.events.on("acp.authChanged", () => refresh());
+    refreshAuth = debounce(() => ctx.ui.invalidate(), 50);
+    ctx.events.on("acp.authOutput", (p: any) => {
+      if (!authConsole || p.conversationId !== authConsole.conversationId || p.methodId !== authConsole.methodId || p.attemptId !== authConsole.attemptId) return;
+      authConsole.output = authOutputText(authConsole.output + String(p.data || ""));
+      refreshAuth();
+    });
+    ctx.events.on("acp.authCompleted", (p: any) => {
+      if (!authConsole || p.conversationId !== authConsole.conversationId || p.methodId !== authConsole.methodId || p.attemptId !== authConsole.attemptId) return;
+      authConsole.cancelled = !!p.cancelled;
+      authConsole.completed = { code: p.code ?? null, signal: p.signal ?? null };
+      if (!p.cancelled && p.code === 0 && p.signal == null) { authConsole = null; authPickerOpen = false; error = null; }
+      refresh(); refreshAuth();
+    });
+    ctx.events.on("acp.elicitation", (p: any) => {
+      if (p?.request?.mode !== "form" || typeof p.conversationId !== "string" || !p.request.requestedSchema) return;
+      const key = elicitationKey(p.conversationId, p.requestId);
+      if (pendingElicitations.has(key)) return;
+      const normalized = normalizeElicitationSchema(p.request.requestedSchema);
+      pendingElicitations.set(key, { conversationId: p.conversationId, requestId: p.requestId, request: p.request, schema: normalized.schema, schemaError: normalized.error,
+        values: initialElicitationValues(normalized.schema), errors: normalized.error ? { _schema: normalized.error } : {}, uiKey: "form-" + crypto.randomUUID() });
+      activeElicitation = key;
+      refresh();
+    });
+    ctx.events.on("acp.elicitationComplete", (p: any) => {
+      if (p?.requestId !== undefined) pendingElicitations.delete(elicitationKey(String(p.conversationId || ""), p.requestId));
+      if (activeElicitation && !pendingElicitations.has(activeElicitation)) activeElicitation = null;
+      refresh();
+    });
     if(prev?.background&&prev.background.workspaceId===ws?.id) {
       normalDraft=prev.normalDraft;normalAttachments=prev.normalAttachments||[];
       // Activation must not wait on agents, daemons or SSH; the panel shows its loading state
@@ -476,12 +630,23 @@ const mod: AppModule = {
     }else if(ws?.view?.ui?.aiBackgroundSession) void openBackground(ctx,{workspaceId:ws.id,id:ws.view.ui.aiBackgroundSession}).catch((e)=>{error=errMsg(e);ctx.ui.invalidate();});
     else void load(ctx);
   },
-  deactivate(){if(backgroundTimer)clearInterval(backgroundTimer);backgroundTimer=null;for(const p of requests.values()){clearTimeout(p.timer);p.reject(new Error("Chat module reloaded"));}requests.clear();},
-  snapshot: () => background ? ({ draft, attachments, background, normalDraft, normalAttachments, composerFractions: [...composerFractions] }) : ({draft,attachments,composerFractions: [...composerFractions]}),
+  canSwap(){return {ok:pendingEvents===0&&pendingLoads===0&&!busy&&!providerSessionsLoading&&!requests.size&&![...pendingElicitations.values()].some(p=>p.submitting),reason:"Chat operations are in progress"};},
+  deactivate(){loadGeneration++;origin=crypto.randomUUID();if(backgroundTimer)clearInterval(backgroundTimer);backgroundTimer=null;for(const p of requests.values()){clearTimeout(p.timer);p.reject(new Error("Chat module reloaded"));}requests.clear();},
+  snapshot: () => background ? ({ draft, attachments, background, normalDraft, normalAttachments, composerFractions: [...composerFractions], authPickerOpen, providerSessionsOpen,
+    elicitations: [...pendingElicitations.values()], activeElicitation, authConsole: authConsole ? { ...authConsole, output: "" } : null }) : ({draft,attachments,composerFractions: [...composerFractions],authPickerOpen,providerSessionsOpen,
+    elicitations: [...pendingElicitations.values()], activeElicitation, authConsole: authConsole ? { ...authConsole, output: "" } : null }),
   render(): UiNode {
+    syncOrigin();
     const active = view?.active;
     const conv = active?.conversation;
     const live = active?.live;
+    const shownAuth: AuthConsole | null = authConsole && authConsole.conversationId === conv?.id ? authConsole : live?.authProcess ? {
+      conversationId: conv.id, methodId: live.authProcess.methodId, label: live.authProcess.label,
+      display: [live.authProcess.command, ...live.authProcess.args.map((arg: string) => JSON.stringify(arg))].join(" "),
+      attemptId: live.authProcess.attemptId, pty: live.authProcess.handle, envKeys: live.authProcess.envKeys || [], output: "", uiKey: `auth-${conv.id}-${live.authProcess.methodId}-${live.authProcess.startedAt || 0}`, inputKey: `auth-${conv.id}-${live.authProcess.methodId}-${live.authProcess.startedAt || 0}-0`,
+    } : null;
+    const pendingForm = activeElicitation && pendingElicitations.get(activeElicitation)?.conversationId === conv?.id ? pendingElicitations.get(activeElicitation)
+      : conv ? [...pendingElicitations.values()].reverse().find(item => item.conversationId === conv.id) : undefined;
     const context = contextUsage(live?.usage);
     const connected = !!live && ["ready", "busy", ...(background?["waiting"]:[])].includes(live.status);
     const profile = view?.profiles.find((p: any) => p.id === conv?.acpProfileId);
@@ -489,6 +654,7 @@ const mod: AppModule = {
     const skillState = workspaceSkillState?.workspaceId === ws?.id ? workspaceSkillState : null;
     const skills: { name: string; description: string; path: string }[] = skillState?.skills || [];
     const config = selectors(live, connected);
+    const slashCommands = slashDismissed ? [] : matchingCommands(live?.commands, draft || "");
     const model = config.find((n) => n.key === "cfg-model") as Extract<UiNode, { type: "select" }>;
     const modelName = model.options.find((o) => o.value === model.value)?.label || (connected ? "Choose model" : "Connect to choose");
     const modelOption = (live?.configOptions || []).find((o: any) => o.category === "model");
@@ -517,7 +683,10 @@ const mod: AppModule = {
       { type: "button", key: "update-runtime", text: confirmRuntimeUpdate ? "Confirm: restart agents and update" : "Update runtime", action: confirmRuntimeUpdate ? "updateRuntime" : "askUpdateRuntime", small: true, variant: confirmRuntimeUpdate ? "danger" : "primary", disabled: busy === "updateRuntime" },
       ...(confirmRuntimeUpdate ? [{ type: "button", key: "cancel-update", text: "Cancel", action: "cancelUpdateRuntime", small: true, variant: "ghost" } as UiNode] : []),
     ] });
-    if (live?.error && !connected) kids.push({ type: "status", key: "liveerr", text: live.error, level: "error" });
+    if (live?.error && !connected) kids.push({ type: "column", key: "liveerr", gap: 6, children: [
+      { type: "status", key: "liveerr-text", text: live.error, level: "error" },
+      ...(live.authMethods?.length ? [{ type: "button", key: "authenticate", text: "Authenticate…", action: "openAuth", small: true, disabled: !!active?.busy || !!live.authProcess } as UiNode] : []),
+    ] });
     if (historyOpen && view) {
       const sessions = view.conversations.filter((c: any) => `${c.title} ${view.profiles.find((p: any) => p.id === c.acpProfileId)?.name || ""}`.toLowerCase().includes(historyQuery.toLowerCase()));
       kids.push({ type: "modal", key: "history", title: "Sessions", closeAction: "toggleHistory", children: [
@@ -594,6 +763,19 @@ const mod: AppModule = {
           { type: "divider", key: "d-permissions" },
           section("permissions", "Permissions", permissions),
         ];
+        const authMethods: any[] = live?.authMethods || [];
+        if (authMethods.length || live?.authProcess) {
+          const auth = live?.authProcess;
+          fields.push({ type: "divider", key: "d-auth" }, section("authentication", "Authentication", [
+            { type: "label", key: "auth-note", text: auth ? `Authentication running: ${auth.label}` : "Sign in to the agent on this workspace machine. Hato reconnects after a successful login.", size: "xs", color: "muted", wrap: true },
+            ...(auth ? [{ type: "button", key: "show-auth", text: "Show authentication", action: "openAuth", style: chatStyle.control } as UiNode] : []),
+            ...authMethods.map((method: any): UiNode => ({ type: "column", key: "auth-method-" + method.id, gap: 4, children: [
+              { type: "button", key: "start", text: method.name || method.id, action: "authenticate:" + method.id, style: chatStyle.control, disabled: !!active?.busy || !!auth || !!busy,
+                tooltip: terminalMethod(method) ? "Run the configured agent in an authentication console" : "Ask the agent to authenticate this session" },
+              ...(method.description ? [{ type: "label", key: "description", text: method.description, size: "xs", color: "muted", wrap: true } as UiNode] : []),
+            ] })),
+          ]));
+        }
         if (background && backgroundPage) {
           const session = backgroundPage.session, files = backgroundCatalog?.agentFiles || [];
           const idle = !["busy", "waiting", "starting"].includes(session.status);
@@ -617,6 +799,9 @@ const mod: AppModule = {
               { type: "button", key: "stop", text: "Stop agent", action: "stopBackground", style: chatStyle.control, variant: "danger", disabled: !live || live.status === "stopped" } as UiNode,
             ] : [{ type: "button", key: "connect", text: connected ? "Disconnect" : "Connect", action: connected ? "disconnect" : "connect", style: chatStyle.control } as UiNode]),
             { type: "button", key: "adapters", text: "Manage agents…", action: "openAdapters", style: chatStyle.control, tooltip: "Install or update ACP adapters in Settings" },
+            { type: "button", key: "provider-sessions", text: "Provider sessions…", action: "openProviderSessions", style: chatStyle.control,
+              disabled: !live?.agentCapabilities?.sessionCapabilities?.list || !!active?.busy || !!live?.authProcess,
+              tooltip: live?.agentCapabilities?.sessionCapabilities?.list ? "List, resume, load, fork, close or delete sessions stored by this agent" : "This agent does not advertise session/list" },
           ] },
           ...(background ? [{ type: "row", key: "runtime", gap: 8, align: "center", wrap: true, children: [
             { type: "button", key: "update-runtime", text: confirmRuntimeUpdate ? "Confirm update" : "Update runtime", action: confirmRuntimeUpdate ? "updateRuntime" : "askUpdateRuntime",
@@ -648,7 +833,9 @@ const mod: AppModule = {
           { type: "image", key: "preview", image, width: 80, height: 64 },
           { type: "button", key: "remove", text: "× " + image.name, action: "removeImage", value: index, small: true, tooltip: "Remove picture" },
         ] })) });
-        composer.push({ type: "textInput", key: "prompt", style: { ...chatStyle.textarea, minHeight: 56 }, changeAction:"draftChanged", pasteImageAction: "attachImages", maxFiles: 4, maxBytes: 5 * 1024 * 1024, placeholder: active.busy ? "Steer " + providerName + "…" : "Ask " + providerName + "…", multiline: true, fillHeight: true, grow: true, rows: 2, submitAction: "send", value: draft });
+        if (slashCommands.length) composer.push({ type: "column", key: "slash-commands", gap: 2, maxHeight: 220, scroll: true, style: { ...chatStyle.picker, background: "background", padding: 4 }, children: slashCommands.map((command): UiNode => ({ type: "choice", key: command.name, text: `/${command.name}`,
+          description: [command.description, command.input?.hint].filter(Boolean).join(" · "), action: "chooseCommand", value: command.name })) });
+        composer.push({ type: "textInput", key: "prompt", style: { ...chatStyle.textarea, minHeight: 56 }, changeAction:"draftChanged", cancelAction: "dismissCommands", pasteImageAction: "attachImages", maxFiles: 4, maxBytes: 5 * 1024 * 1024, placeholder: active.busy ? "Steer " + providerName + "…" : "Ask " + providerName + "…", multiline: true, fillHeight: true, grow: true, rows: 2, submitAction: "send", value: draft });
         // Two fixed rows that fit any panel width: what the chat uses (attachments, tools, model),
         // then how it runs (Auto, settings, context, send). The composer's minimum height fits both.
         const chipStatus = active.steering ? "Steering · " : active.busy ? "Working · " : connected ? "" : `${live?.status || conv.status || "Offline"} · `;
@@ -707,14 +894,116 @@ const mod: AppModule = {
           { type: "label", key: "model-count", text: `${filtered.length} model${filtered.length === 1 ? "" : "s"} available`, size: "xs", color: "muted", padding: 10 },
         ] });
       }
+      if (pendingForm) {
+        kids.push({ type: "modal", key: "elicitation", title: pendingForm.schema.title || "Agent requests input", closeAction: "cancelElicitation:" + pendingForm.uiKey, width: 620, children: [
+          { type: "label", key: "elicitation-message", text: String(pendingForm.request.message || "Please provide the requested information."), wrap: true },
+          ...(pendingForm.schema.description ? [{ type: "label", key: "elicitation-description", text: pendingForm.schema.description, color: "muted", wrap: true } as UiNode] : []),
+          ...(pendingForm.errors._schema ? [{ type: "status", key: "elicitation-schema-error", text: pendingForm.errors._schema, level: "error" } as UiNode] : []),
+          { type: "column", key: "elicitation-fields", gap: 12, scroll: true, maxHeight: 420, children: elicitationFields(pendingForm) },
+          { type: "row", key: "elicitation-actions", gap: 8, wrap: true, children: [
+            { type: "button", key: "decline", text: "Decline", action: "declineElicitation:" + pendingForm.uiKey, variant: "ghost", disabled: !!pendingForm.submitting },
+            { type: "button", key: "cancel", text: "Cancel", action: "cancelElicitation:" + pendingForm.uiKey, variant: "ghost", disabled: !!pendingForm.submitting },
+            { type: "spacer", key: "gap" },
+            { type: "button", key: "accept", text: pendingForm.submitting ? "Submitting…" : "Accept", action: "acceptElicitation:" + pendingForm.uiKey, variant: "primary", disabled: !!pendingForm.submitting || !!pendingForm.schemaError },
+          ] },
+        ] });
+      }
+      if (providerSessionsOpen && conv && providerSessionsConversation === conv.id) {
+        const caps = live?.agentCapabilities?.sessionCapabilities || {};
+        const rows = providerSessions.filter((s: any) => `${s.title || ""} ${s.sessionId} ${s.cwd || ""}`.toLowerCase().includes(providerSessionsQuery.toLowerCase()));
+        const locked = !!active?.busy || !!busy || !!providerSessionAction || !!live?.authProcess || live?.authStarting;
+        kids.push({ type: "modal", key: "provider-sessions-modal", title: "Provider sessions", closeAction: "closeProviderSessions", width: 720, children: [
+          { type: "row", key: "provider-sessions-head", gap: 8, align: "center", children: [
+            { type: "column", key: "summary", grow: true, gap: 2, children: [
+              { type: "label", key: "provider", text: providerName, weight: "semibold" },
+              { type: "label", key: "current", text: live?.sessionId ? `Current provider session: ${live.sessionId}` : "No current provider session", size: "xs", color: "muted", wrap: true },
+            ] },
+            { type: "button", key: "new", text: "New session", action: "newProviderSession", value: { conversationId: conv.id }, variant: "primary", disabled: locked },
+            { type: "button", key: "reload", text: "Reload", action: "reloadProviderSessions", disabled: !!providerSessionAction },
+          ] },
+          { type: "textInput", key: "provider-session-search", ...filterInput, value: providerSessionsQuery, placeholder: "Search provider sessions…", changeAction: "searchProviderSessions" },
+          { type: "column", key: "provider-session-list", scroll: true, maxHeight: 430, gap: 6, children: rows.length ? rows.map((s: any): UiNode => {
+            const current = !live?.sessionClosed && s.sessionId === live?.sessionId;
+            return { type: "column", key: s.sessionId, gap: 6, style: { padding: 8, radius: 8, borderWidth: 1, borderColor: current ? "primary" : "border", background: current ? "selection" : "surface" }, children: [
+              { type: "row", key: "heading", gap: 8, align: "center", children: [
+                { type: "column", key: "title", grow: true, minWidth: 0, gap: 2, children: [
+                  { type: "label", key: "name", text: s.title || s.sessionId, weight: "medium", wrap: true },
+                  { type: "label", key: "id", text: s.sessionId, mono: true, size: "xs", color: "muted", selectable: true, wrap: true },
+                  ...(s.cwd ? [{ type: "label", key: "cwd", text: s.cwd, size: "xs", color: "muted", wrap: true } as UiNode] : []),
+                  ...(s.updatedAt ? [{ type: "label", key: "updated", text: `Updated ${s.updatedAt}`, size: "xs", color: "muted" } as UiNode] : []),
+                ] },
+                ...(current ? [chip("current", "current", tone.info[0], tone.info[1])] : []),
+              ] },
+              { type: "row", key: "actions", gap: 6, wrap: true, children: [
+                ...(caps.resume ? [{ type: "button", key: "resume", text: "Resume", action: "resumeProviderSession", value: { conversationId: conv.id, sessionId: s.sessionId }, small: true, disabled: locked } as UiNode] : []),
+                ...(live?.agentCapabilities?.loadSession ? [{ type: "button", key: "load", text: "Load", action: "loadProviderSession", value: { conversationId: conv.id, sessionId: s.sessionId }, small: true, variant: "ghost", disabled: locked } as UiNode] : []),
+                ...(caps.fork ? [{ type: "button", key: "fork", text: "Fork", action: "forkProviderSession", value: { conversationId: conv.id, sessionId: s.sessionId }, small: true, variant: "ghost", disabled: locked } as UiNode] : []),
+                ...(current && caps.close ? [{ type: "button", key: "close", text: "Close", action: "closeProviderSession", value: { conversationId: conv.id, sessionId: s.sessionId }, small: true, variant: "ghost", disabled: locked } as UiNode] : []),
+                ...(caps.delete ? [{ type: "button", key: "delete", text: "Delete", action: "requestDeleteProviderSession", value: { conversationId: conv.id, sessionId: s.sessionId }, small: true, variant: "danger", disabled: locked } as UiNode] : []),
+              ] },
+              ...(providerSessionDelete?.conversationId === conv.id && providerSessionDelete?.sessionId === s.sessionId ? [{ type: "row", key: "confirm-delete", gap: 8, align: "center", children: [
+                { type: "label", key: "warning", text: "Delete this provider session? Hato's local chat history is kept.", size: "xs", color: "warning", grow: true, wrap: true },
+                { type: "button", key: "cancel", text: "Cancel", action: "cancelDeleteProviderSession", small: true, disabled: locked },
+                { type: "button", key: "confirm", text: "Delete", action: "confirmDeleteProviderSession", value: providerSessionDelete, small: true, variant: "danger", disabled: locked },
+              ] } as UiNode] : []),
+            ] };
+          }) : [{ type: "label", key: "provider-sessions-none", text: providerSessionsLoading ? "Loading provider sessions…" : providerSessionsQuery ? "No matching provider sessions." : "This agent has no saved provider sessions.", color: "muted", padding: 20, wrap: true }] },
+          ...(providerSessionsCursor ? [{ type: "button", key: "more", text: providerSessionsLoading ? "Loading…" : "Load more", action: "moreProviderSessions", disabled: !!providerSessionAction } as UiNode] : []),
+        ] });
+      }
+      if (authPickerOpen || shownAuth) {
+        const methods = live?.authMethods || [];
+        const success = shownAuth?.completed && !shownAuth.cancelled && shownAuth.completed.code === 0 && shownAuth.completed.signal == null;
+        const authChildren: UiNode[] = [
+          { type: "label", key: "auth-provider", text: `${providerName} · ${live?.machineId || view.workspace.machineId}`, size: "xs", color: "muted", wrap: true },
+          ...(shownAuth ? ([
+            { type: "label", key: "auth-label", text: shownAuth.label, weight: "semibold", wrap: true } as UiNode,
+            { type: "label", key: "auth-command", text: shownAuth.display, mono: true, size: "xs", selectable: true, wrap: true, style: { background: "surface", radius: 6, padding: 8 } },
+            { type: "label", key: "auth-cwd", text: `Working directory: ${live?.authProcess?.cwd || view.workspace.root}`, size: "xs", color: "muted", wrap: true },
+            ...(shownAuth.envKeys.length ? [{ type: "label", key: "auth-env", text: `Environment overrides: ${shownAuth.envKeys.join(", ")} (values hidden)`, size: "xs", color: "muted", wrap: true }] : []),
+            ...(shownAuth.pty ? [{ type: "column", key: "auth-terminal", height: 320, children: [{ type: "terminal", key: "terminal", pty: shownAuth.pty }] } as UiNode] : []),
+            ...(!shownAuth.pty && !shownAuth.confirmToken ? [{ type: "column", key: "auth-output", scroll: true, maxHeight: 260, style: { background: "surface", radius: 6, padding: 8 }, children: [
+              { type: "label", key: "auth-output-text", text: shownAuth.output || "Waiting for authentication output…", mono: true, size: "xs", selectable: true, wrap: true },
+            ] } as UiNode] : []),
+            ...(shownAuth.cancelled ? [{ type: "status", key: "auth-cancelled", text: "Authentication cancelled.", level: "warn" } as UiNode] : []),
+            ...(shownAuth.completed && !shownAuth.cancelled && !success ? [{ type: "status", key: "auth-failed", text: `Authentication ended with code ${shownAuth.completed.code ?? "unknown"}${shownAuth.completed.signal ? ` (signal ${shownAuth.completed.signal})` : ""}.`, level: "error" } as UiNode] : []),
+            ...(shownAuth.confirmToken ? [{ type: "button", key: "launch-auth", text: "Launch authentication", action: "launchAuth", variant: "primary" } as UiNode] : []),
+            ...(!shownAuth.completed && !shownAuth.cancelled && !shownAuth.confirmToken ? [
+              { type: "textInput", key: shownAuth.inputKey, placeholder: "Type a response and press Enter", submitAction: "authInput", cancelAction: "closeAuth", autoFocus: true, value: "", secret: true, disabled: !!shownAuth.inputPending },
+              { type: "row", key: "auth-actions", gap: 8, children: [
+                { type: "button", key: "cancel-auth", text: "Cancel authentication", action: "cancelAuth", variant: "danger", disabled: busy === "cancelAuth" },
+                { type: "label", key: "auth-input-hint", text: "Input is sent to the agent process on the workspace machine.", size: "xs", color: "muted", grow: true, wrap: true },
+              ] },
+            ] : [
+              { type: "row", key: "auth-done", gap: 8, children: [
+                { type: "button", key: "retry-auth", text: "Choose another method", action: "authBack", variant: "ghost" },
+                { type: "button", key: "close-auth", text: "Close", action: "closeAuth" },
+              ] },
+            ]),
+          ] as UiNode[]) : ([
+            { type: "label", key: "auth-intro", text: "Choose how to sign in. Terminal methods run the configured agent invocation; other methods are handled by the agent.", color: "muted", wrap: true },
+            { type: "column", key: "auth-methods", gap: 8, children: methods.length ? methods.map((method: any): UiNode => ({ type: "column", key: method.id, gap: 3, children: [
+              { type: "button", key: "choose", text: method.name || method.id, action: "authenticate:" + method.id, disabled: !!active?.busy || !!busy, style: chatStyle.control },
+              ...(method.description ? [{ type: "label", key: "description", text: method.description, size: "xs", color: "muted", wrap: true } as UiNode] : []),
+              { type: "label", key: "kind", text: terminalMethod(method) ? "Terminal login" : "Agent-driven login", size: "xs", color: "muted" },
+            ] })) : [{ type: "label", key: "auth-none", text: "This agent has not advertised any authentication methods.", color: "muted" }] },
+          ] as UiNode[])),
+        ];
+        kids.push({ type: "modal", key: "authentication-modal", title: shownAuth ? "Agent authentication" : "Authenticate agent", closeAction: "closeAuth", width: 620, children: authChildren });
+      }
     } else if (ws && view) kids.push({ type: "column", key: "empty", padding: 24, gap: 12, grow: true, children: [
       { type: "label", key: "title", text: view.profiles.length ? "Start a conversation" : "Choose your AI provider", size: "lg", weight: "bold" },
       { type: "label", key: "hint", text: view.profiles.length ? "Ask your agent to build, explore or fix something in this workspace." : "Install Claude, Codex or another provider from Marketplace to start chatting.", wrap: true, color: "muted" },
       { type: "button", key: "start", text: view.profiles.length ? "New chat" : "Browse providers", iconSvg: uiIcons.plus, action: "newChat", style: chatStyle.primary, variant: "primary" },
     ] });
-    return { type: "column", key: "ai-root", style: chatStyle.root, gap: 0, grow: true, children: kids };
+    return scopeTree({ type: "column", key: "ai-root", style: chatStyle.root, gap: 0, grow: true, children: kids });
   },
   async onEvent(ctx, ev) {
+    const eventOrigin = origin, owner = crypto.randomUUID();
+    const ownBusy = (value: string | null) => {
+      if(value===null){if(busyOwner===owner){busy=null;busyOwner=null;}}
+      else{busy=value;busyOwner=owner;}
+    };
     if (ev.action === "requestDeleteChat") {
       const chat = view?.conversations.find((c: any) => c.id === ev.value);
       if (!ws || !chat || busy || chatWorking(chat.status)) return;
@@ -725,7 +1014,7 @@ const mod: AppModule = {
     if (ev.action === "confirmDeleteChat") {
       const target = deleteChat;
       if (!target || target.workspaceId !== ws?.id || target.background !== !!background || busy) return;
-      busy = "deleteChat"; ctx.ui.invalidate();
+      ownBusy("deleteChat"); ctx.ui.invalidate();
       try {
         if (target.background) {
           const page = await persistent(ctx, "view", { id: target.id, limit: 1 });
@@ -747,7 +1036,7 @@ const mod: AppModule = {
           historyOpen = true;
         }
       } catch (e) { if (ws?.id === target.workspaceId) error = errMsg(e); }
-      finally { if (busy === "deleteChat") busy = null; ctx.ui.invalidate(); }
+      finally { if (busy === "deleteChat") ownBusy(null); ctx.ui.invalidate(); }
       return;
     }
     if (ev.action === "openHistory") {
@@ -769,21 +1058,22 @@ const mod: AppModule = {
       if (id) {
         composerFractions.set(id, composerFraction);
         try { await ctx.modules.call("workspace", "view.patch", { workspaceId: id, patch: { ui: { aiComposerFraction: composerFraction } } }); }
-        catch (e) { error = "Could not save input height: " + errMsg(e); }
+        catch (e) { if(eventOrigin===origin)error = "Could not save input height: " + errMsg(e); }
       }
       ctx.ui.invalidate(); return;
     }
-    if(ev.action==="draftChanged"){draft=String(ev.value||"");ctx.ui.invalidate();return;}
+    if(ev.action==="draftChanged"){draft=String(ev.value||"");slashDismissed=false;ctx.ui.invalidate();return;}
+    if(ev.action==="dismissCommands"){slashDismissed=true;ctx.ui.invalidate();return;}
     if(ev.action==="askUpdateRuntime"){confirmRuntimeUpdate=true;ctx.ui.invalidate();return;}
     if(ev.action==="cancelUpdateRuntime"){confirmRuntimeUpdate=false;ctx.ui.invalidate();return;}
     if(ev.action==="updateRuntime"&&ws) {
       if(busy)return;
-      confirmRuntimeUpdate=false;busy="updateRuntime";error=null;ctx.ui.invalidate();
+      confirmRuntimeUpdate=false;ownBusy("updateRuntime");error=null;ctx.ui.invalidate();
       try {
         const r=await persistent(ctx,"updateRuntime",{workspaceId:ws.id});
         if(r?.failed?.length)error="Runtime updated, but these agents did not reconnect: "+r.failed.map((f:any)=>`${f.name} (${f.error})`).join(", ");
       }catch(e){error=errMsg(e);}
-      finally{busy=null;await loadCatalog(ctx);await load(ctx);ctx.ui.invalidate();}
+      finally{ownBusy(null);await loadCatalog(ctx);await load(ctx);ctx.ui.invalidate();}
       return;
     }
     if(ev.action==="backToChats"){
@@ -793,7 +1083,7 @@ const mod: AppModule = {
     if(ev.action==="newChat"&&ws) {
       if(busy)return;
       const workspaceId=ws.id, current=view?.active?.conversation;
-      busy="newChat";ctx.ui.invalidate();
+      ownBusy("newChat");ctx.ui.invalidate();
       try {
         const available=await ctx.host.plugins.list();
         if(!available.plugins.some(p=>p.id==="persistent-agents"&&p.active))throw new Error("Enable Background Agents in Marketplace to start a chat that runs while Hato is closed.");
@@ -830,7 +1120,7 @@ const mod: AppModule = {
         const name=(modelLabel?`${providerName}/${modelLabel}`:providerName).slice(0,120);
         const session=await persistent(ctx,"create",{profileId,name,autoName:true,...config});
         if(ws?.id===workspaceId)await openBackground(ctx,{workspaceId,id:session.id});
-      }catch(e){error=errMsg(e);}finally{busy=null;ctx.ui.invalidate();}
+      }catch(e){if(eventOrigin===origin)error=errMsg(e);}finally{ownBusy(null);ctx.ui.invalidate();}
       return;
     }
     if(background&&ev.action==="toggleHistory") {
@@ -852,7 +1142,8 @@ const mod: AppModule = {
       try {
         if(ev.action==="send") {
           const text=(ev.inputs.prompt||draft||"").trim();if((!text&&!attachments.length)||busy==="send")return;
-          busy="send";ctx.ui.invalidate();await persistent(ctx,"send",{text,steer:!!view?.active?.busy,...(attachments.length?{images:attachments}:{})});
+          ownBusy("send");ctx.ui.invalidate();await persistent(ctx,"send",{text,steer:!!view?.active?.busy,...(attachments.length?{images:attachments}:{})});
+          if(eventOrigin!==origin)return;
           if(background===selection){draft="";attachments=[];historyBefore=[];historyLimit=CHAT_MESSAGE_LIMIT;}
         }else if(ev.action==="chooseModel") {await persistent(ctx,"setModel",{model:ev.value});modelsOpen=false;}
         else if(ev.action.startsWith("setConfig:"))await persistent(ctx,"setConfig",{configId:ev.action.slice(10),value:ev.value});
@@ -867,7 +1158,7 @@ const mod: AppModule = {
         else if(ev.action.startsWith("toggleSkill:")) {
           const path=ev.action.slice("toggleSkill:".length),current=new Set(backgroundPage?.session.skills||[]);
           if(ev.value)current.add(path);else current.delete(path);
-          busy="skills";ctx.ui.invalidate();
+          ownBusy("skills");ctx.ui.invalidate();
           await updateBackground(ctx,{skills:[...current]});
         }
         else if(ev.action.startsWith("toggleMcp:")) {
@@ -888,12 +1179,162 @@ const mod: AppModule = {
         else if(["latestMessages","collapseHistory"].includes(ev.action)){historyBefore=[];historyLimit=CHAT_MESSAGE_LIMIT;preserveHistoryScroll=false;historyScrollReset++;}
         error=null;
       }catch(e){actionError=errMsg(e);}
-      finally{busy=null;if(background===selection){await load(ctx);if(actionError)error=actionError;}ctx.ui.invalidate();}
+      finally{ownBusy(null);if(background===selection){await load(ctx);if(actionError)error=actionError;}ctx.ui.invalidate();}
       return;
     }
     const conv = view && view.active ? view.active.conversation : null;
     const call = (m: string, args: any, timeoutMs = 120000) => ctx.modules.call("ai-sessions", m, args, { timeoutMs });
+    const eventLive = view?.active?.live;
+    const shownAuth: AuthConsole | null = authConsole && authConsole.conversationId === conv?.id ? authConsole : eventLive?.authProcess ? {
+      conversationId: conv.id, methodId: eventLive.authProcess.methodId, label: eventLive.authProcess.label,
+      display: [eventLive.authProcess.command, ...eventLive.authProcess.args.map((arg: string) => JSON.stringify(arg))].join(" "),
+      attemptId: eventLive.authProcess.attemptId, pty: eventLive.authProcess.handle, envKeys: eventLive.authProcess.envKeys || [], output: "", uiKey: `auth-${conv.id}-${eventLive.authProcess.methodId}-${eventLive.authProcess.startedAt || 0}`, inputKey: `auth-${conv.id}-${eventLive.authProcess.methodId}-${eventLive.authProcess.startedAt || 0}-0`,
+    } : null;
     try {
+      if (ev.action.startsWith("elicitationField:")) {
+        const [, uiKey, token] = ev.action.split(":"), pending = pendingByUiKey(uiKey);
+        const index = /^f(\d+)$/.test(token) ? Number(token.slice(1)) : -1, entry = Object.entries(pending?.schema.properties || {})[index];
+        if (!pending || !entry || pending.submitting) return;
+        const [key, property] = entry;
+        pending.values[key] = property.type === "boolean" ? !!ev.value : String(ev.value ?? "");
+        delete pending.errors[key]; delete pending.errors._schema;
+        ctx.ui.invalidate(); return;
+      }
+      if (ev.action.startsWith("elicitationArray:")) {
+        const [, uiKey, token, optionToken] = ev.action.split(":"), pending = pendingByUiKey(uiKey);
+        const index = /^f(\d+)$/.test(token) ? Number(token.slice(1)) : -1, entry = Object.entries(pending?.schema.properties || {})[index];
+        const optionIndex = /^o(\d+)$/.test(optionToken || "") ? Number(optionToken.slice(1)) : -1;
+        const option = entry ? enumChoices(entry[1].items || {})[optionIndex] : undefined;
+        if (!pending || !entry || !option || pending.submitting) return;
+        const [key] = entry, current = Array.isArray(pending.values[key]) ? [...pending.values[key] as string[]] : [];
+        pending.values[key] = ev.value ? [...new Set([...current, option.value])] : current.filter(value => value !== option.value);
+        delete pending.errors[key]; delete pending.errors._schema;
+        ctx.ui.invalidate(); return;
+      }
+      for (const [verb, responseAction] of [["acceptElicitation", "accept"], ["declineElicitation", "decline"], ["cancelElicitation", "cancel"]] as const) {
+        if (!ev.action.startsWith(verb + ":")) continue;
+        const pending = pendingByUiKey(ev.action.slice(verb.length + 1));
+        if (!pending || pending.submitting || pending.schemaError) return;
+        if (responseAction === "accept") {
+          const values = { ...pending.values };
+          for (const [index, [key, property]] of Object.entries(pending.schema.properties || {}).entries()) {
+            if ((property.type === "string" && !Array.isArray(property.enum) && !Array.isArray(property.oneOf)) || property.type === "number" || property.type === "integer") {
+              const inputKey = `${pending.uiKey}-f${index}`;
+              values[key] = String(ev.inputs[inputKey] ?? values[key] ?? "");
+            }
+          }
+          const validated = validateElicitation(pending.schema, values);
+          pending.values = values; pending.errors = validated.errors;
+          if (Object.keys(validated.errors).length) { ctx.ui.invalidate(); return; }
+          await answerElicitation(ctx, pending, { action: "accept", content: validated.content });
+        } else await answerElicitation(ctx, pending, { action: responseAction });
+        return;
+      }
+      if (ev.action === "openProviderSessions") {
+        if (!conv || !eventLive?.agentCapabilities?.sessionCapabilities?.list) return;
+        invalidateProviderSessions(); authPickerOpen = false; providerSessionsOpen = true; providerSessions = []; providerSessionsCursor = null; providerSessionsQuery = ""; providerSessionDelete = null;
+        ctx.ui.invalidate();
+        try { await loadProviderSessions(ctx, conv.id); } catch (e) { if (providerSessionsOpen && providerSessionsConversation === conv.id) error = errMsg(e); }
+        return;
+      }
+      if (ev.action === "closeProviderSessions") { providerSessionsOpen = false; providerSessionDelete = null; invalidateProviderSessions(); ctx.ui.invalidate(); return; }
+      if (ev.action === "searchProviderSessions") { providerSessionsQuery = String(ev.value || ""); ctx.ui.invalidate(); return; }
+      if (ev.action === "reloadProviderSessions" && conv) {
+        if (busy || providerSessionsConversation !== conv.id) return;
+        providerSessionsCursor = null;
+        try { await loadProviderSessions(ctx, conv.id); } catch (e) { if (providerSessionsOpen && providerSessionsConversation === conv.id) error = errMsg(e); }
+        return;
+      }
+      if (ev.action === "moreProviderSessions" && conv) {
+        if (busy || providerSessionsConversation !== conv.id) return;
+        try { await loadProviderSessions(ctx, conv.id, true); } catch (e) { if (providerSessionsOpen && providerSessionsConversation === conv.id) error = errMsg(e); }
+        return;
+      }
+      if (ev.action === "requestDeleteProviderSession") {
+        const target = typeof ev.value === "object" && ev.value ? ev.value as any : null;
+        if (target?.conversationId !== conv?.id || typeof target.sessionId !== "string") return;
+        providerSessionDelete = { conversationId: target.conversationId, sessionId: target.sessionId }; ctx.ui.invalidate(); return;
+      }
+      if (ev.action === "cancelDeleteProviderSession") { providerSessionDelete = null; ctx.ui.invalidate(); return; }
+      if (["newProviderSession", "resumeProviderSession", "loadProviderSession", "forkProviderSession", "closeProviderSession", "confirmDeleteProviderSession"].includes(ev.action) && conv) {
+        if (busy || providerSessionAction || view?.active?.busy || eventLive?.authProcess || eventLive?.authStarting) return;
+        const target = typeof ev.value === "object" && ev.value ? ev.value as any : null;
+        if (target && target.conversationId !== conv.id) return;
+        const sessionId = ev.action === "confirmDeleteProviderSession" ? providerSessionDelete?.sessionId : target?.sessionId;
+        if (ev.action === "confirmDeleteProviderSession" && (target?.sessionId !== providerSessionDelete?.sessionId || !providerSessionDelete || providerSessionDelete.conversationId !== conv.id || !sessionId)) return;
+        if (["resumeProviderSession", "loadProviderSession", "forkProviderSession", "closeProviderSession"].includes(ev.action) && typeof sessionId !== "string") return;
+        const method = ev.action === "confirmDeleteProviderSession" ? "deleteProviderSession" : ev.action;
+        const operation = crypto.randomUUID();
+        ownBusy(operation); providerSessionAction = ev.action; ctx.ui.invalidate();
+        try {
+          await call(method, { conversationId: conv.id, ...(sessionId ? { sessionId } : {}) }, 150000);
+          if (view?.active?.conversation?.id !== conv.id) return;
+          providerSessionDelete = null;
+          await load(ctx);
+          if (providerSessionsOpen && providerSessionsConversation === conv.id) { providerSessionsCursor = null; await loadProviderSessions(ctx, conv.id); }
+        } finally { if (busy === operation) ownBusy(null); if (providerSessionAction === ev.action) providerSessionAction = null; ctx.ui.invalidate(); }
+        return;
+      }
+      if (ev.action === "openAuth") {
+        if (!conv || !view?.active?.live?.authMethods?.length) return;
+        providerSessionsOpen = false; invalidateProviderSessions(); authPickerOpen = true; authConsole = null; ctx.ui.invalidate(); return;
+      }
+      if (ev.action === "authBack") { authConsole = null; authPickerOpen = true; ctx.ui.invalidate(); return; }
+      if (ev.action === "closeAuth") {
+        const closing = shownAuth;
+        authConsole = null; authPickerOpen = false;
+        if (closing && closing.conversationId === conv?.id && view?.active?.live?.authProcess && !closing.completed && !closing.cancelled) {
+          const operation = crypto.randomUUID(); ownBusy(operation);
+          try { await call("cancelAuth", { conversationId: closing.conversationId, attemptId: closing.attemptId }); }
+          finally { if (busy === operation) ownBusy(null); }
+        }
+        ctx.ui.invalidate(); return;
+      }
+      if ((ev.action.startsWith("authenticate:") || ev.action === "launchAuth") && conv) {
+        if (busy || providerSessionAction || view?.active?.busy || view?.active?.live?.authProcess || view?.active?.live?.authStarting) return;
+        const methodId = ev.action === "launchAuth" ? shownAuth?.methodId : ev.action.slice("authenticate:".length), method = (view.active.live.authMethods || []).find((entry: any) => entry?.id === methodId);
+        if (!method || !methodId) return;
+        const confirmToken = ev.action === "launchAuth" ? shownAuth?.confirmToken : undefined;
+        if(ev.action === "launchAuth" && !confirmToken)return;
+        const uiKey = "auth-" + crypto.randomUUID(), operation = crypto.randomUUID();
+        authConsole = { conversationId: conv.id, methodId, label: method.name || methodId, display: "Preparing authentication…", envKeys: [], output: "", uiKey, inputKey: uiKey + "-input-0" };
+        authPickerOpen = false; ownBusy(operation); ctx.ui.invalidate();
+        try {
+          const result = await call("authenticate", { conversationId: conv.id, methodId, confirmToken }, 150000);
+          const currentAuth = authConsole;
+          if (currentAuth?.uiKey !== uiKey) return;
+          if (result?.outcome === "terminal" || result?.outcome === "prepared") {
+            currentAuth.confirmToken=result.confirmToken;currentAuth.attemptId=result.attemptId;currentAuth.pty=result.handle;
+            currentAuth.label = result.label || method.name || methodId;
+            currentAuth.display = result.display || [result.command, ...(result.args || []).map((arg: string) => JSON.stringify(arg))].join(" ");
+            currentAuth.envKeys = result.envKeys || [];
+          } else { authConsole = null; authPickerOpen = false; }
+        } catch(e) {
+          if(authConsole?.uiKey===uiKey){authConsole.completed={code:null,signal:null};authConsole.output=errMsg(e);error=errMsg(e);}
+        } finally { if (busy === operation) ownBusy(null); ctx.ui.invalidate(); }
+        return;
+      }
+      if (ev.action === "authInput" && conv && shownAuth) {
+        const currentAuth = authConsole;
+        if (!currentAuth || currentAuth.conversationId !== conv.id || currentAuth.inputPending || currentAuth.completed || currentAuth.cancelled) return;
+        const data = String(ev.inputs[shownAuth.inputKey] || "");
+        if (!data) return;
+        const operation = crypto.randomUUID(); currentAuth.inputPending = true; ownBusy(operation); ctx.ui.invalidate();
+        try {
+          await call("authInput", { conversationId: conv.id, data: data + "\n", attemptId: shownAuth.attemptId });
+          currentAuth.output = authOutputText(currentAuth.output + `\n> ${data.replace(/./g, "•")}\n`);
+          currentAuth.inputKey = `${currentAuth.uiKey}-input-${Date.now()}`;
+        } finally { currentAuth.inputPending = false; if (busy === operation) ownBusy(null); ctx.ui.invalidate(); }
+        return;
+      }
+      if (ev.action === "cancelAuth" && conv && shownAuth) {
+        const currentAuth = authConsole, operation = crypto.randomUUID();
+        if (!currentAuth || currentAuth.conversationId !== conv.id) return;
+        ownBusy(operation); ctx.ui.invalidate();
+        try { await call("cancelAuth", { conversationId: conv.id, attemptId: shownAuth.attemptId }); }
+        finally { currentAuth.cancelled = true; currentAuth.completed = { code: null, signal: null }; if (busy === operation) ownBusy(null); ctx.ui.invalidate(); }
+        return;
+      }
       if (ev.action === "openLink") {
         const path = ws && resolveWorkspaceLink(String(ev.value || ""), ws.rootAbsolutePath);
         if (!path) throw new Error(`Cannot open link outside the workspace: ${ev.value}`);
@@ -952,6 +1393,10 @@ const mod: AppModule = {
       }
       if (ev.action === "newChat" && ws) { await call("create", { workspaceId: ws.id, profileId: conv?.acpProfileId }); historyOpen = false; settingsOpen = false; modelsOpen = false; }
       else if (ev.action === "selectConv" && ws) { await call("select", { workspaceId: ws.id, conversationId: ev.value }); historyOpen = false; settingsOpen = false; modelsOpen = false; }
+      else if (ev.action === "chooseCommand" && conv) {
+        const command = (view?.active?.live?.commands || []).find((entry: any) => entry.name === ev.value);
+        if (command) { draft = applySlashCommand(ev.inputs.prompt || draft || "", command); slashDismissed = true; ctx.ui.invalidate(); }
+      }
       else if (!conv) return;
       else if (ev.action === "olderMessages" || ev.action === "loadOlder" || ev.action === "revealOlder") {
         if (pagingHistory) return;
@@ -972,7 +1417,7 @@ const mod: AppModule = {
       else if (ev.action === "latestMessages" || ev.action === "collapseHistory") {
         historyBefore = []; historyLimit = CHAT_MESSAGE_LIMIT; preserveHistoryScroll = false; historyScrollReset++;
       }
-      else if (ev.action === "connect") { busy = "connect"; ctx.ui.invalidate(); await call("connect", { conversationId: conv.id }, 600000); }
+      else if (ev.action === "connect") { ownBusy("connect"); ctx.ui.invalidate(); await call("connect", { conversationId: conv.id }, 600000); }
       else if (ev.action === "reconnect") { await call("disconnect", { conversationId: conv.id }); await call("connect", { conversationId: conv.id }, 600000); }
       else if (ev.action === "disconnect") await call("disconnect", { conversationId: conv.id });
       else if (ev.action === "setProfile") { await call("setProfile", { conversationId: conv.id, profileId: ev.value }); connectionAttempts.delete(conv.id); }
@@ -986,15 +1431,32 @@ const mod: AppModule = {
         const text = (ev.inputs.prompt || "").trim();
         if (!text && !attachments.length) return;
         if (busy === "send") return;
-        busy = "send"; ctx.ui.invalidate();
+        ownBusy("send"); ctx.ui.invalidate();
         await call("send", { conversationId: conv.id, text, images: attachments }, 600000);
+        if(eventOrigin!==origin)return;
         attachments = [];
         draft = draft === "" ? " " : ""; // Clear only after the service accepts the message.
         ctx.ui.invalidate();
       }
-      error = null;
-    } catch (e) { error = errMsg(e); }
-    finally { if (!["loadOlder", "olderMessages", "newerMessages", "latestMessages", "revealOlder", "revealNewer", "collapseHistory"].includes(ev.action)) busy = null; await load(ctx); }
+      if(eventOrigin===origin)error = null;
+    } catch (e) { if(eventOrigin===origin)error = errMsg(e); }
+    finally { if (!["loadOlder", "olderMessages", "newerMessages", "latestMessages", "revealOlder", "revealNewer", "collapseHistory"].includes(ev.action)) ownBusy(null); if(eventOrigin===origin)await load(ctx); }
   },
+};
+const handleEvent = mod.onEvent!;
+mod.onEvent = (ctx, event) => {
+  syncOrigin();
+  const native = event.action.startsWith("origin:");
+  if(native) {
+    const [,token,...action] = event.action.split(":");
+    if(token!==origin)return;
+    event={...event,action:action.join(":")};
+  } else if(event.key) return; // Native events must carry the render's origin token.
+  const eventOrigin=origin;
+  if(["selectConv","backToChats","newChat"].includes(event.action)){loadGeneration++;origin=crypto.randomUUID();}
+  pendingEvents++;
+  const task=Promise.resolve(handleEvent(ctx,event)).finally(()=>{pendingEvents--;});
+  if(native){void task.catch(e=>{if(eventOrigin===origin){error=errMsg(e);ctx.ui.invalidate();}});return;}
+  return task;
 };
 export default mod;

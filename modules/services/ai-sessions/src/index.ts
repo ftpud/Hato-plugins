@@ -21,8 +21,12 @@ interface Conv {
   oldestSequence: number | null;
   historyLoading: boolean;
   historyError: string | null;
-  current: { assistant: string | null; thought: string | null };
+  current: { assistant: string | null; thought: string | null; assistantMessageId: string | null; thoughtMessageId: string | null; assistantSessionId: string | null; thoughtSessionId: string | null };
   tools: Map<string, string>;
+  providerMessages: Map<string, string>;
+  closedMessages: Set<string>;
+  replay: any[];
+  replayKeys: Map<string, number>;
   dirty: Set<string>;
   live: any;
   busy: boolean;
@@ -30,9 +34,20 @@ interface Conv {
   submitting: boolean;
 }
 
+const projections = new Map<string, Promise<void>>();
+function projectInOrder(id: string, task: () => Promise<void>) {
+  const next = (projections.get(id) || Promise.resolve()).catch(() => {}).then(task);
+  projections.set(id, next);
+  void next.finally(() => { if (projections.get(id) === next) projections.delete(id); }).catch(() => {});
+  return next;
+}
+
 const convs = new Map<string, Conv>();
 const loading = new Map<string, Promise<Conv>>();
 const deleting = new Set<string>();
+const historyLoads = new Map<string, Promise<any>>();
+const connections = new Map<string, Promise<any>>();
+const providerOperations = new Set<string>();
 const HISTORY_PAGE = 80;
 const WORKING_LIMIT = 50;
 const LOW_RISK_KINDS = new Set(["read", "search", "think", "fetch"]);
@@ -83,8 +98,16 @@ async function loadConversation(ctx: ModuleContext, id: string): Promise<Conv> {
   if (!row) throw new Error(`unknown conversation ${id}`);
   const msgs = await ctx.modules.call("persistence", "messages.list", { conversationId: id, limit: HISTORY_PAGE + 1 });
   const page = msgs.slice(-HISTORY_PAGE);
-  c = { row, messages: page.map((m: any) => ({ id: m.id, sequence: m.sequence, kind: m.kind, payload: m.payload })), loaded: true, hasOlder: msgs.length > HISTORY_PAGE, oldestSequence: page[0]?.sequence ?? null, historyLoading: false, historyError: null, current: { assistant: null, thought: null }, tools: new Map(), dirty: new Set(), live: null, busy: false, steering: [], submitting: false };
-  for (const m of c.messages) if (m.kind === "tool" && m.payload.toolCallId) c.tools.set(m.payload.toolCallId, m.id);
+  c = { row, messages: page.map((m: any) => ({ id: m.id, sequence: m.sequence, kind: m.kind, payload: m.payload })), loaded: true, hasOlder: msgs.length > HISTORY_PAGE, oldestSequence: page[0]?.sequence ?? null, historyLoading: false, historyError: null,
+    current: { assistant: null, thought: null, assistantMessageId: null, thoughtMessageId: null, assistantSessionId: null, thoughtSessionId: null }, tools: new Map(), providerMessages: new Map(), closedMessages: new Set(), replay: [], replayKeys: new Map(), dirty: new Set(), live: null, busy: false, steering: [], submitting: false };
+  for (const m of c.messages) {
+    if (m.kind === "tool" && m.payload.toolCallId) c.tools.set(providerMessageKey(m.payload.toolCallId, m.payload.providerSessionId), m.id);
+    if (typeof m.payload.providerMessageId === "string" && m.payload.providerMessageId) {
+      const key = providerMessageKey(m.payload.providerMessageId, m.payload.providerSessionId, m.kind);
+      c.providerMessages.set(key, m.id);
+      c.closedMessages.add(key);
+    }
+  }
   try { c.live = await ctx.modules.call("acp", "state", { conversationId: id }); } catch { c.live = null; }
   if (c.live) c.busy = c.live.status === "busy";
   convs.set(id, c);
@@ -109,10 +132,10 @@ async function flushMessages(ctx: ModuleContext) {
   for (const c of convs.values()) {
     if (!c.dirty.size) continue;
     const ids = Array.from(c.dirty);
-    c.dirty.clear();
     for (const id of ids) {
+      c.dirty.delete(id);
       const m = byId(c, id);
-      if (m) await ctx.modules.call("persistence", "messages.upsert", { id: m.id, conversationId: c.row.id, kind: m.kind, payload: m.payload }).catch((e) => ctx.log.warn("persist message", errMsg(e)));
+      if (m) await ctx.modules.call("persistence", "messages.upsert", { id: m.id, conversationId: c.row.id, kind: m.kind, payload: m.payload }).catch((e) => { c.dirty.add(id); ctx.log.warn("persist message", errMsg(e)); throw e; });
     }
   }
 }
@@ -134,49 +157,151 @@ const progress = new Map<string, AgentProgress>();
 const markerPrompted = new Set<string>();
 let progressChanged: () => void = () => {};
 
+const messageIdOf = (u: any): string | null => typeof u?.messageId === "string" && u.messageId ? u.messageId : null;
+const providerMessageKey = (messageId: string, sessionId: unknown, kind = "") => `${typeof sessionId === "string" ? sessionId : ""}\u0000${kind}\u0000${messageId}`;
+const sameImages = (a: ImageAttachment[] = [], b: ImageAttachment[] = []) => a.length === b.length && a.every((image, i) => image.data === b[i]?.data && image.mimeType === b[i]?.mimeType);
+
+function closeCurrent(c: Conv, retire = true) {
+  if(retire)for(const key of c.providerMessages.keys())c.closedMessages.add(key);
+  if (retire && c.current.assistantMessageId) c.closedMessages.add(providerMessageKey(c.current.assistantMessageId, c.current.assistantSessionId, "assistant"));
+  if (retire && c.current.thoughtMessageId) c.closedMessages.add(providerMessageKey(c.current.thoughtMessageId, c.current.thoughtSessionId, "thought"));
+  c.current = { assistant: null, thought: null, assistantMessageId: null, thoughtMessageId: null, assistantSessionId: null, thoughtSessionId: null };
+}
+
+function tagProviderMessage(c: Conv, m: Msg, u: any) {
+  const messageId = messageIdOf(u);
+  if (messageId) {
+    m.payload.providerMessageId = messageId;
+    c.providerMessages.set(providerMessageKey(messageId, u.providerSessionId, m.kind), m.id);
+  }
+  if (typeof u?.providerSessionId === "string" && u.providerSessionId) m.payload.providerSessionId = u.providerSessionId;
+  c.dirty.add(m.id);
+}
+
+function replayImages(content: any): ImageAttachment[] {
+  const blocks = Array.isArray(content) ? content : [content];
+  const images: ImageAttachment[] = [];
+  for (const block of blocks) if (block?.type === "image") {
+    try { images.push(...imageAttachments([{ name: "Picture", mimeType: block.mimeType, data: block.data }])); }
+    catch { /* Unsupported image blocks must never become display text. */ }
+  }
+  return images;
+}
+
+function stageReplay(c: Conv, u: any, providerSessionId: string) {
+  const scoped = { ...u, providerSessionId };
+  if (["agent_message_chunk", "agent_thought_chunk", "user_message_chunk"].includes(u.sessionUpdate)) {
+    const kind = u.sessionUpdate === "agent_message_chunk" ? "assistant" : u.sessionUpdate === "agent_thought_chunk" ? "thought" : "user";
+    const messageId = messageIdOf(u);
+    const lastIndex = c.replay.length - 1, last = c.replay[lastIndex];
+    let index = messageId ? c.replayKeys.get(`${providerSessionId}:${kind}:${messageId}`) : last?.kind === kind && !messageIdOf(last.update) ? lastIndex : undefined;
+    if (index === undefined) {
+      index = c.replay.length;
+      const key = messageId ? `${providerSessionId}:${kind}:${messageId}` : `anonymous:${index}`;
+      c.replayKeys.set(key, index);
+      c.replay.push({ kind, update: scoped, text: "", images: [] });
+    }
+    const entry = c.replay[index];
+    entry.text += textOf(u.content);
+    if (kind === "user") entry.images.push(...replayImages(u.content));
+    return;
+  }
+  if (u.sessionUpdate === "tool_call" || u.sessionUpdate === "tool_call_update") {
+    const key = `${providerSessionId}:tool:${u.toolCallId || c.replay.length}`;
+    const index = c.replayKeys.get(key);
+    if (index === undefined) {
+      c.replayKeys.set(key, c.replay.length);
+      c.replay.push({ kind: "tool", update: { ...scoped, sessionUpdate: "tool_call" } });
+    } else Object.assign(c.replay[index].update, scoped, { sessionUpdate: "tool_call" });
+    return;
+  }
+  if (u.sessionUpdate === "plan") {
+    c.replay.push({ kind: "plan", update: { ...scoped, replayed: true } });
+  }
+}
+
+async function commitReplay(ctx: ModuleContext, c: Conv) {
+  if (!c.replay.length) return;
+  const replay = c.replay; c.replay = []; c.replayKeys = new Map();
+  try {
+  await historyLoads.get(c.row.id)?.catch(() => {});
+  await flush(ctx);
+  const temp: Conv = { ...c, messages: [], dirty: new Set(), tools: new Map(), providerMessages: new Map(), closedMessages: new Set(), current: { assistant: null, thought: null, assistantMessageId: null, thoughtMessageId: null, assistantSessionId: null, thoughtSessionId: null } };
+  for (const entry of replay) {
+    closeCurrent(temp, false);
+    const update = ["user", "assistant", "thought"].includes(entry.kind) ? { ...entry.update, content: [...(entry.text ? [{ type: "text", text: entry.text }] : []), ...entry.images] } : entry.update;
+    project(temp, { ...update, replayed: true });
+  }
+  const result = await ctx.modules.call("persistence", "messages.reconcileReplay", { conversationId: c.row.id, messages: temp.messages, limit: Math.max(HISTORY_PAGE, c.messages.length) });
+  c.messages = result.messages; c.hasOlder = result.hasOlder; c.oldestSequence = c.messages[0]?.sequence ?? null;
+  c.tools.clear(); c.providerMessages.clear();
+  for (const m of c.messages) {
+    if (m.kind === "tool" && m.payload.toolCallId) c.tools.set(providerMessageKey(m.payload.toolCallId, m.payload.providerSessionId), m.id);
+    if (m.payload.providerMessageId) { const key = providerMessageKey(m.payload.providerMessageId, m.payload.providerSessionId, m.kind); c.providerMessages.set(key, m.id); c.closedMessages.add(key); }
+  }
+  closeCurrent(c);
+  } catch(error) { c.replay=[...replay,...c.replay]; throw error; }
+}
+
 function project(c: Conv, u: any) {
   switch (u.sessionUpdate) {
     case "agent_message_chunk": {
-      let m = byId(c, c.current.assistant);
+      const messageId = messageIdOf(u), providerKey = messageId ? providerMessageKey(messageId, u.providerSessionId, "assistant") : null;
+      if (providerKey && c.closedMessages.has(providerKey)) break;
+      if (messageId && c.current.assistantMessageId && providerMessageKey(c.current.assistantMessageId, c.current.assistantSessionId, "assistant") !== providerKey) {
+        c.closedMessages.add(providerMessageKey(c.current.assistantMessageId, c.current.assistantSessionId, "assistant")); c.current.assistant = null;
+      }
+      let m = providerKey ? byId(c, c.providerMessages.get(providerKey) || null) : byId(c, c.current.assistant);
       if (!m) { m = add(c, "assistant", { text: "" }); c.current.assistant = m.id; }
+      c.current.assistantMessageId = messageId; c.current.assistantSessionId = typeof u.providerSessionId === "string" ? u.providerSessionId : null;
+      tagProviderMessage(c, m, u);
       m.payload.text += textOf(u.content);
       // Chats without Hato's tools report progress as a reply marker (sidebar only; transcripts strip it).
       const reported = lastProgressMarker(m.payload.text.slice(-4000));
       const known = progress.get(c.row.id);
-      if (reported && (known?.percent !== reported.percent || known?.note !== reported.note)) { progress.set(c.row.id, reported); progressChanged(); }
+      if (!u.replayed && reported && (known?.percent !== reported.percent || known?.note !== reported.note)) { progress.set(c.row.id, reported); progressChanged(); }
       c.dirty.add(m.id);
-      c.current.thought = null;
+      c.current.thought = null; c.current.thoughtMessageId = null; c.current.thoughtSessionId = null;
       break;
     }
     case "agent_thought_chunk": {
-      let m = byId(c, c.current.thought);
+      const messageId = messageIdOf(u), providerKey = messageId ? providerMessageKey(messageId, u.providerSessionId, "thought") : null;
+      if (providerKey && c.closedMessages.has(providerKey)) break;
+      if (messageId && c.current.thoughtMessageId && providerMessageKey(c.current.thoughtMessageId, c.current.thoughtSessionId, "thought") !== providerKey) {
+        c.closedMessages.add(providerMessageKey(c.current.thoughtMessageId, c.current.thoughtSessionId, "thought")); c.current.thought = null;
+      }
+      let m = providerKey ? byId(c, c.providerMessages.get(providerKey) || null) : byId(c, c.current.thought);
       if (!m) { m = add(c, "thought", { text: "" }); c.current.thought = m.id; }
+      c.current.thoughtMessageId = messageId; c.current.thoughtSessionId = typeof u.providerSessionId === "string" ? u.providerSessionId : null;
+      tagProviderMessage(c, m, u);
       m.payload.text += textOf(u.content);
       c.dirty.add(m.id);
       break;
     }
     case "user_message_chunk": {
-      const blocks = Array.isArray(u.content) ? u.content : [u.content];
-      const images: ImageAttachment[] = [];
-      for (const block of blocks) {
-        if (block?.type === "image") {
-          try { images.push(...imageAttachments([{ name: "Picture", mimeType: block.mimeType, data: block.data }])); }
-          catch { /* Unsupported image blocks must never become display text. */ }
-        }
-      }
-      add(c, "user", { text: textOf(u.content), images, replayed: true });
+      const text = textOf(u.content), images = replayImages(u.content), messageId = messageIdOf(u);
+      const key = messageId ? providerMessageKey(messageId, u.providerSessionId, "user") : null;
+      if (key && c.closedMessages.has(key)) break;
+      const known = key ? byId(c, c.providerMessages.get(key) || null) : undefined;
+      if (known) { known.payload.text += text; known.payload.images = [...(known.payload.images || []), ...images]; c.dirty.add(known.id); break; }
+      const last = c.messages[c.messages.length - 1];
+      if (last?.kind === "user" && (last.payload.text === text || last.payload.outgoingText === text) && sameImages(last.payload.images || [], images)) { tagProviderMessage(c, last, u); if (key) c.closedMessages.add(key); break; }
+      closeCurrent(c);
+      tagProviderMessage(c, add(c, "user", { text, images, replayed: true }), u);
       break;
     }
     case "tool_call": {
-      if (u.toolCallId && c.tools.has(u.toolCallId)) { project(c, { ...u, sessionUpdate: "tool_call_update" }); break; }
+      if (u.toolCallId && c.tools.has(providerMessageKey(u.toolCallId, u.providerSessionId))) { project(c, { ...u, sessionUpdate: "tool_call_update" }); break; }
+      closeCurrent(c, false);
       const m = add(c, "tool", { toolCallId: u.toolCallId, title: u.title || u.kind || "tool", kind: u.kind, status: u.status || "pending", text: textOf(u.content) });
-      c.tools.set(u.toolCallId, m.id);
-      c.current.assistant = null; c.current.thought = null;
+      tagProviderMessage(c, m, u);
+      if (u.toolCallId) c.tools.set(providerMessageKey(u.toolCallId, u.providerSessionId), m.id);
       break;
     }
     case "tool_call_update": {
-      const m = byId(c, c.tools.get(u.toolCallId) || null);
+      const m = byId(c, c.tools.get(providerMessageKey(u.toolCallId, u.providerSessionId)) || null);
       if (!m) { project(c, { ...u, sessionUpdate: "tool_call" }); break; }
+      tagProviderMessage(c, m, u);
       if (u.status) m.payload.status = u.status;
       if (u.title) m.payload.title = u.title;
       const t = textOf(u.content);
@@ -185,9 +310,10 @@ function project(c: Conv, u: any) {
       break;
     }
     case "plan": {
+      closeCurrent(c, false);
       const text = (u.entries || []).map((e: any) => `${e.status === "completed" ? "✓" : e.status === "in_progress" ? "→" : "·"} ${e.content}`).join("\n");
       const last = c.messages[c.messages.length - 1];
-      if (last && last.kind === "plan") { last.payload.text = text; c.dirty.add(last.id); } else add(c, "plan", { text });
+      if (last && last.kind === "plan" && !u.replayed) { last.payload.text = text; c.dirty.add(last.id); } else tagProviderMessage(c, add(c, "plan", { text }), u);
       break;
     }
     case "_hato_notice": add(c, "system", { text: u.text }); break;
@@ -220,6 +346,12 @@ async function configuredMcps(ctx: ModuleContext): Promise<AgentMcp[]> {
 }
 
 async function connect(ctx: ModuleContext, id: string) {
+  if(connections.has(id))return connections.get(id);
+  if(providerOperations.has(id))throw new Error("A provider operation is running");
+  const task=connectConversation(ctx,id);connections.set(id,task);
+  try{return await task;}finally{connections.delete(id);}
+}
+async function connectConversation(ctx: ModuleContext, id: string) {
   markerPrompted.delete(id); // a new provider connection hasn't seen the marker instruction
   const c = await load(ctx, id);
   await update(ctx, id, { status: "connecting" });
@@ -239,6 +371,7 @@ async function connect(ctx: ModuleContext, id: string) {
     const st = await ctx.modules.call("acp", "start", {
       conversationId: id, workspaceId: c.row.workspaceId, profileId: c.row.acpProfileId,
       mcp: selected.has("internal"), mcpServers, mcpSelection: [...selected].filter(id => id === "internal" || servers.some(m => m.id === id)), resumeSessionId: c.row.providerSessionId,
+      systemPrompt: selected.has("internal") ? "" : PROGRESS_MARKER_INSTRUCTION,
     }, { timeoutMs: 600000 });
     c.live = st;
     const lostSession = c.row.providerSessionId && st.sessionId !== c.row.providerSessionId;
@@ -258,6 +391,58 @@ async function connect(ctx: ModuleContext, id: string) {
     flushSoon();
     throw e;
   } finally { notify(); }
+}
+
+async function reconnectAfterAuth(ctx: ModuleContext, id: string) {
+  const c = convs.get(id);
+  if (!c || c.busy || c.submitting || c.steering.length || c.row.status === "connecting") throw new Error("Finish the active turn before reconnecting after authentication");
+  await ctx.modules.call("acp", "stop", { conversationId: id });
+  c.live = null; c.busy = false;
+  return connect(ctx, id);
+}
+
+async function providerSessionMutation(ctx: ModuleContext, a: any, method: string) {
+  const id=a.conversationId;
+  if(providerOperations.has(id)||connections.has(id))throw new Error("A provider operation is running");
+  providerOperations.add(id);
+  try{return await mutateProviderSession(ctx,a,method);}finally{providerOperations.delete(id);}
+}
+async function mutateProviderSession(ctx: ModuleContext, a: any, method: string) {
+  const c = await load(ctx, a.conversationId);
+  if (c.busy || c.submitting || c.steering.length || c.row.status === "connecting" || c.live?.status === "starting" || c.live?.authProcess) {
+    throw new Error("Finish the active turn, session load, or authentication before changing provider sessions");
+  }
+  closeCurrent(c); c.replay = []; c.replayKeys = new Map();
+  const result = await ctx.modules.call("acp", method, { ...a, conversationId: c.row.id }, { timeoutMs: 150000 });
+  c.live = result || await ctx.modules.call("acp", "state", { conversationId: c.row.id });
+  const sessionId = c.live?.sessionClosed ? null : c.live?.sessionId || null;
+  await update(ctx, c.row.id, { providerSessionId: sessionId, status: c.live?.sessionClosed ? "offline" : "online", ...(c.live?.sessionClosed || method === "newSession" ? { config: { ...c.row.config, __hatoHandoff: true } } : {}) });
+  notify();
+  return c.live;
+}
+
+async function loadOlderPage(ctx: ModuleContext, c: Conv) {
+      if (c.historyLoading || !c.hasOlder || !c.oldestSequence) return { loaded: 0, hasOlder: c.hasOlder };
+      c.historyLoading = true; c.historyError = null; notify();
+      try {
+        const rows = await ctx.modules.call("persistence", "messages.list", { conversationId: c.row.id, beforeSequence: c.oldestSequence, limit: HISTORY_PAGE + 1 });
+        const page = rows.slice(-HISTORY_PAGE);
+        const known = new Set(c.messages.map((m) => m.id));
+        const older: Msg[] = page.filter((m: any) => !known.has(m.id)).map((m: any) => ({ id: m.id, sequence: m.sequence, kind: m.kind, payload: m.payload }));
+        c.messages = [...older, ...c.messages];
+        c.oldestSequence = page[0]?.sequence ?? c.oldestSequence;
+        c.hasOlder = rows.length > HISTORY_PAGE;
+        for (const m of older) {
+          if (m.kind === "tool" && m.payload.toolCallId && !c.tools.has(providerMessageKey(m.payload.toolCallId,m.payload.providerSessionId))) c.tools.set(providerMessageKey(m.payload.toolCallId, m.payload.providerSessionId), m.id);
+          if (typeof m.payload.providerMessageId === "string" && m.payload.providerMessageId) {
+            const key = providerMessageKey(m.payload.providerMessageId, m.payload.providerSessionId, m.kind);
+            c.providerMessages.set(key, m.id);
+            c.closedMessages.add(key);
+          }
+        }
+        return { loaded: older.length, hasOlder: c.hasOlder };
+      } catch (e) { c.historyError = errMsg(e); throw e; }
+      finally { c.historyLoading = false; notify(); }
 }
 
 const mod: AppModule = {
@@ -288,20 +473,31 @@ const mod: AppModule = {
     notify = debounce(() => { publishActivity(ctx); ctx.events.emit("ai-sessions.changed", {}); }, 60);
     ctx.events.on("persistent-agents.mcpsChanged", () => notify());
     publishActivity(ctx);
-    flushSoon = debounce(() => { flush(ctx); }, 1200);
-    ctx.events.on("acp.update", (p: any) => {
+    flushSoon = debounce(() => { void flush(ctx).catch(e => ctx.log.warn("persist messages",errMsg(e))); }, 1200);
+    ctx.events.on("acp.update", (p: any) => projectInOrder(p.conversationId, async () => {
       const c = convs.get(p.conversationId);
       if (!c) return;
-      project(c, p.update);
+      const update = { ...p.update, providerSessionId: p.sessionId || c.row.providerSessionId || "" };
+      if (p.replayed) stageReplay(c, update, update.providerSessionId);
+      else { await commitReplay(ctx, c); project(c, update); }
       flushSoon();
       notify();
-    });
+    }));
+    ctx.events.on("acp.replayEnded", (p: any) => projectInOrder(p.conversationId, async () => {
+      const c = convs.get(p.conversationId);
+      if (!c) return;
+      if (p.success === false) { c.replay = []; c.replayKeys = new Map(); }
+      else await commitReplay(ctx, c);
+      flushSoon();
+      notify();
+    }));
     ctx.events.on("acp.turnEnded", async (p: any) => {
       const c = convs.get(p.conversationId);
       if (!c) return;
+      await projections.get(p.conversationId);
       c.busy = c.steering.length > 0;
       c.submitting = c.busy;
-      c.current = { assistant: null, thought: null };
+      closeCurrent(c);
       if (p.error) add(c, "error", { text: `Turn failed: ${p.error}` });
       else if (p.stopReason && p.stopReason !== "end_turn") add(c, "system", { text: `Turn ended: ${p.stopReason}` });
       await flush(ctx);
@@ -321,13 +517,23 @@ const mod: AppModule = {
       const c = convs.get(s.conversationId);
       if (!c) return;
       c.live = s;
+      if (s.sessionId && s.sessionId !== c.row.providerSessionId) update(ctx, s.conversationId, { providerSessionId: s.sessionId }).catch(() => {});
       c.busy = s.status === "busy" || c.steering.length > 0 || c.submitting;
       if (s.status === "exited" || s.status === "error") update(ctx, s.conversationId, { status: s.status === "exited" ? "offline" : "error" }).catch(() => {});
       notify();
     });
+    ctx.events.on("acp.authCompleted", async (p: any) => {
+      if (p.cancelled || p.code !== 0 || p.signal != null) return;
+      const c = convs.get(p.conversationId);
+      if (!c || c.busy || c.submitting || c.steering.length || c.row.status === "connecting") return;
+      add(c, "system", { text: "Authentication completed; reconnecting the agent…" });
+      flushSoon(); notify();
+      try { await reconnectAfterAuth(ctx, c.row.id); }
+      catch (e) { await update(ctx, c.row.id, { status: "error" }); add(c, "error", { text: `Authentication succeeded but reconnect failed: ${errMsg(e)}` }); flushSoon(); notify(); }
+    });
   },
   canSwap() {
-    return (historyMcp?.pending() || Array.from(convs.values()).some((c) => c.busy || c.submitting || c.steering.length || c.historyLoading))
+    return (connections.size || providerOperations.size || projections.size || historyMcp?.pending() || Array.from(convs.values()).some((c) => c.busy || c.submitting || c.steering.length || c.historyLoading || c.replay.length))
       ? { ok: false, reason: "Wait for active chat turns and steering to finish" } : { ok: true };
   },
   async deactivate(ctx) { await flush(ctx); },
@@ -397,6 +603,7 @@ const mod: AppModule = {
     },
     /** Everything the AI panel needs for the given workspace, in one call. */
     async view(ctx, a) {
+      await Promise.all([...projections.values()]);
       const desc = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
       const list = await ctx.modules.call("persistence", "conversations.list", { workspaceId: desc.id });
       const v = await ctx.modules.call("workspace", "view.get", { workspaceId: desc.id });
@@ -417,20 +624,10 @@ const mod: AppModule = {
 
     async loadOlder(ctx, a) {
       const c = await load(ctx, a.conversationId);
-      if (c.historyLoading || !c.hasOlder || !c.oldestSequence) return { loaded: 0, hasOlder: c.hasOlder };
-      c.historyLoading = true; c.historyError = null; notify();
-      try {
-        const rows = await ctx.modules.call("persistence", "messages.list", { conversationId: c.row.id, beforeSequence: c.oldestSequence, limit: HISTORY_PAGE + 1 });
-        const page = rows.slice(-HISTORY_PAGE);
-        const known = new Set(c.messages.map((m) => m.id));
-        const older: Msg[] = page.filter((m: any) => !known.has(m.id)).map((m: any) => ({ id: m.id, sequence: m.sequence, kind: m.kind, payload: m.payload }));
-        c.messages = [...older, ...c.messages];
-        c.oldestSequence = page[0]?.sequence ?? c.oldestSequence;
-        c.hasOlder = rows.length > HISTORY_PAGE;
-        for (const m of older) if (m.kind === "tool" && m.payload.toolCallId && !c.tools.has(m.payload.toolCallId)) c.tools.set(m.payload.toolCallId, m.id);
-        return { loaded: older.length, hasOlder: c.hasOlder };
-      } catch (e) { c.historyError = errMsg(e); throw e; }
-      finally { c.historyLoading = false; notify(); }
+      await projections.get(c.row.id);
+      if(c.historyLoading)return {loaded:0,hasOlder:c.hasOlder};
+      const task=loadOlderPage(ctx,c);historyLoads.set(c.row.id,task);
+      try{return await task;}finally{if(historyLoads.get(c.row.id)===task)historyLoads.delete(c.row.id);}
     },
 
     connect: (ctx, a) => connect(ctx, a.conversationId),
@@ -445,6 +642,8 @@ const mod: AppModule = {
     },
 
     async send(ctx, a) {
+      if(providerOperations.has(a.conversationId))throw new Error("A provider operation is running");
+      await projections.get(a.conversationId);
       const text = String(a.text || "").trim();
       const images = imageAttachments(a.images);
       if (!text && !images.length) throw new Error("empty prompt");
@@ -483,26 +682,28 @@ const mod: AppModule = {
       c.submitting = true;
       try {
         if (images.length) {
-          if (!c.live || !["ready", "busy"].includes(c.live.status)) await connect(ctx, c.row.id);
+          if (!c.live || (!["ready", "busy"].includes(c.live.status) || c.live.sessionClosed || !c.live.sessionId)) await connect(ctx, c.row.id);
           if (!c.live?.agentCapabilities?.promptCapabilities?.image) throw new Error("This agent does not support image prompts.");
         }
         const previousMessages = c.messages.slice();
-        add(c, "user", { text, images });
-        c.current = { assistant: null, thought: null };
+        const userRow = add(c, "user", { text, images });
+        closeCurrent(c);
         if (c.row.title.startsWith("Chat ") && c.messages.filter((m) => m.kind === "user").length === 1) await update(ctx, c.row.id, { title: text.slice(0, 60) || images[0]?.name || "Picture" });
         await flush(ctx);
         notify();
-        if (!c.live || !["ready", "busy"].includes(c.live.status)) await connect(ctx, c.row.id);
+        if (!c.live || (!["ready", "busy"].includes(c.live.status) || c.live.sessionClosed || !c.live.sessionId)) await connect(ctx, c.row.id);
         c.busy = true;
         notify();
         try {
           const transfer = c.row.config?.__hatoHandoff ? chatHandoff(previousMessages.map(m => ({ role: m.kind, text: String(m.payload?.text || "") }))) : "";
           // Without Hato's tools (no report_progress), ask once per provider connection for reply markers.
-          const marker = !(c.row.mcpSelection || []).includes("internal") && !markerPrompted.has(c.row.id) ? PROGRESS_MARKER_INSTRUCTION : "";
+          const marker = !(c.row.mcpSelection || []).includes("internal") && !c.live?.agentCapabilities?.sessionCapabilities?.systemPrompt && !markerPrompted.has(c.row.id) ? PROGRESS_MARKER_INSTRUCTION : "";
           if (marker) markerPrompted.add(c.row.id);
           if (progress.delete(c.row.id)) progressChanged();
           const body = transfer ? `${transfer}\n\nCurrent user request:\n${text}` : text;
-          await ctx.modules.call("acp", "prompt", { conversationId: c.row.id, text: marker ? `${marker}\n\n${body}` : body, images });
+          const outgoingText = marker ? `${marker}\n\n${body}` : body;
+          userRow.payload.outgoingText = outgoingText; c.dirty.add(userRow.id); await flush(ctx);
+          await ctx.modules.call("acp", "prompt", { conversationId: c.row.id, text: outgoingText, images });
           if (c.row.config?.__hatoHandoff) {
             const config = { ...c.row.config }; delete config.__hatoHandoff;
             await update(ctx, c.row.id, { config });
@@ -564,6 +765,39 @@ const mod: AppModule = {
       await update(ctx, a.conversationId, { acpProfileId: a.profileId, providerSessionId: null, status: "offline", config: { __hatoHandoff: true } });
       notify();
       return null;
+    },
+
+    providerSessions: (ctx, a) => ctx.modules.call("acp", "listSessions", { conversationId: a.conversationId, cursor: a.cursor }, { timeoutMs: 90000 }),
+    newProviderSession: (ctx, a) => providerSessionMutation(ctx, a, "newSession"),
+    resumeProviderSession: (ctx, a) => providerSessionMutation(ctx, a, "resumeSession"),
+    loadProviderSession: (ctx, a) => providerSessionMutation(ctx, a, "loadSession"),
+    forkProviderSession: (ctx, a) => providerSessionMutation(ctx, a, "forkSession"),
+    closeProviderSession: (ctx, a) => providerSessionMutation(ctx, a, "closeSession"),
+    deleteProviderSession: (ctx, a) => providerSessionMutation(ctx, a, "deleteSession"),
+
+    async authenticate(ctx, a) {
+      const c = await load(ctx, a.conversationId);
+      const result = await ctx.modules.call("acp", "authenticate", { conversationId: c.row.id, methodId: a.methodId, confirmToken: a.confirmToken }, { timeoutMs: 150000 });
+      c.live = await ctx.modules.call("acp", "state", { conversationId: c.row.id });
+      notify();
+      if (result?.outcome === "authenticated") await reconnectAfterAuth(ctx, c.row.id);
+      return result;
+    },
+    async authInput(ctx, a) {
+      await load(ctx, a.conversationId);
+      return ctx.modules.call("acp", "authInput", { conversationId: a.conversationId, data: String(a.data || ""), attemptId: a.attemptId });
+    },
+    async cancelAuth(ctx, a) {
+      await load(ctx, a.conversationId);
+      const result = await ctx.modules.call("acp", "cancelAuth", { conversationId: a.conversationId, attemptId: a.attemptId });
+      const c = convs.get(a.conversationId);
+      if (c) c.live = await ctx.modules.call("acp", "state", { conversationId: a.conversationId });
+      notify();
+      return result;
+    },
+    async respondElicitation(ctx, a) {
+      const c = await load(ctx, a.conversationId);
+      return ctx.modules.call("acp", "respondElicitation", { conversationId: c.row.id, requestId: a.requestId, response: a.response });
     },
 
     adapters: (ctx, a) => ctx.modules.call("acp", "adapters", { workspaceId: a.workspaceId }, { timeoutMs: 300000 }),

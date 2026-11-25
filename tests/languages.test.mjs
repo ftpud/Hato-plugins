@@ -1,10 +1,11 @@
+import { fileURLToPath } from "node:url";
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { build } from 'esbuild';
 const root = new URL('../', import.meta.url);
 const load = async relative => {
-  const code = (await build({entryPoints: [new URL(relative, root).pathname], bundle:true, format:'esm', platform:'node', write:false})).outputFiles[0].text;
+  const code = (await build({entryPoints: [fileURLToPath(new URL(relative, root))], bundle:true, format:'esm', platform:'node', write:false})).outputFiles[0].text;
   return import('data:text/javascript;base64,' + Buffer.from(code).toString('base64') + '#' + Math.random());
 };
 const registry = await load('../sdk/languages.ts');

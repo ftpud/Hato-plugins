@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
@@ -5,9 +6,9 @@ import { mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-const sdk = new URL('../../sdk', import.meta.url).pathname;
+const sdk = fileURLToPath(new URL('../../sdk', import.meta.url));
 // `fresh` busts the import cache, giving a module instance with empty caches (as after a reload).
-const load = async (path, fresh = '') => import('data:text/javascript;base64,' + Buffer.from((await build({ entryPoints: [new URL(path, import.meta.url).pathname], bundle: true, format: 'esm', write: false, alias: { '@hato/sdk': sdk } })).outputFiles[0].text + fresh).toString('base64'));
+const load = async (path, fresh = '') => import('data:text/javascript;base64,' + Buffer.from((await build({ entryPoints: [fileURLToPath(new URL(path, import.meta.url))], bundle: true, format: 'esm', write: false, alias: { '@hato/sdk': sdk } })).outputFiles[0].text + fresh).toString('base64'));
 const { fileHistory } = await load('../modules/services/git/src/file-history.ts');
 const { mapToCommitted } = await load('../modules/ui/viewer/src/history.ts');
 

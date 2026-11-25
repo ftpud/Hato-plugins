@@ -1,8 +1,9 @@
+import { fileURLToPath } from "node:url";
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
 async function load() {
- const result=await build({entryPoints:[new URL('../modules/services/files/src/search.ts',import.meta.url).pathname],bundle:true,format:'esm',write:false,alias:{'@hato/sdk':new URL('../../sdk',import.meta.url).pathname}});
+ const result=await build({entryPoints:[fileURLToPath(new URL('../modules/services/files/src/search.ts',import.meta.url))],bundle:true,format:'esm',write:false,alias:{'@hato/sdk':fileURLToPath(new URL('../../sdk',import.meta.url))}});
  return import('data:text/javascript;base64,'+Buffer.from(result.outputFiles[0].text).toString('base64'));
 }
 const desc={id:'large',machineId:'local',rootAbsolutePath:'/workspace',location:'local'};

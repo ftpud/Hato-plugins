@@ -1,7 +1,8 @@
+import { fileURLToPath } from "node:url";
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
-const result=await build({entryPoints:[new URL('../../sdk/library.ts',import.meta.url).pathname],bundle:true,format:'esm',write:false});
+const result=await build({entryPoints:[fileURLToPath(new URL('../../sdk/library.ts',import.meta.url))],bundle:true,format:'esm',write:false});
 const lib=await import('data:text/javascript;base64,'+Buffer.from(result.outputFiles[0].text).toString('base64'));
 const item=(id,extra={})=>({id,kind:'skill',name:id,description:'',projectId:null,machines:[],text:`# ${id}`,paths:['SKILL.md'],revision:1,...extra});
 const catalog={items:[

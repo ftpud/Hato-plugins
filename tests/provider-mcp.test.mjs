@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
@@ -7,7 +8,7 @@ import {join} from 'node:path';
 import {execFile,spawn} from 'node:child_process';
 import {promisify} from 'node:util';
 const exec=promisify(execFile);
-const result=await build({entryPoints:[new URL('../../sdk/provider-mcp.ts',import.meta.url).pathname],bundle:true,format:'esm',write:false});
+const result=await build({entryPoints:[fileURLToPath(new URL('../../sdk/provider-mcp.ts',import.meta.url))],bundle:true,format:'esm',write:false});
 const {providerMcpLaunch}=await import('data:text/javascript;base64,'+Buffer.from(result.outputFiles[0].text).toString('base64'));
 const option={flag:'--additional-mcp-config',stdioType:'local',tools:['*']};
 const servers=[{name:'hato-internal',command:'node',args:['/remote path/proxy.mjs'],env:[{name:'HATO_MCP_TOKEN',value:'test-scoped-token'}]}];
@@ -55,7 +56,7 @@ test('terminating the wrapper forwards the signal and removes its temporary conf
 test('SSH Copilot receives internal MCP at remote process launch rather than session/new',async()=>{
  const fs=await import('node:fs/promises');
  const manifest=JSON.parse(await fs.readFile(new URL('../modules/services/copilot-provider/manifest.json',import.meta.url),'utf8'));
- const built=await build({entryPoints:[new URL('../modules/services/acp/src/index.ts',import.meta.url).pathname],bundle:true,format:'esm',write:false});
+ const built=await build({entryPoints:[fileURLToPath(new URL('../modules/services/acp/src/index.ts',import.meta.url))],bundle:true,format:'esm',write:false});
  const {default:acp}=await import('data:text/javascript;base64,'+Buffer.from(built.outputFiles[0].text).toString('base64'));
  const workspace={id:'ssh-test',location:'ssh',machineId:'ssh:test',rootAbsolutePath:'/remote/project',ssh:{profileId:'test',host:'example.invalid',port:22,user:'test'}};
  let stdout,spawned;const order=[],requests=[];
@@ -66,7 +67,7 @@ test('SSH Copilot receives internal MCP at remote process launch rather than ses
   if(id==='internal-mcp'&&method==='endpoint'){order.push('endpoint');return{transport:'SSH reverse forward',server:servers[0]};}
   if(id==='internal-mcp'&&method==='revoke')return;
   throw Error(id+'.'+method);
- }},host:{plugins:{list:async()=>({plugins:[{id:'copilot-provider',enabled:true,active:'active',contributes:manifest.contributes}]})},
+ }},host:{env:{info:()=>({platform:"linux"})},plugins:{list:async()=>({plugins:[{id:'copilot-provider',enabled:true,active:'active',contributes:manifest.contributes}]})},
   ssh:{connect:async()=>({connection:'ssh',machineId:'ssh:test'})},capabilities:{request:async()=>({grant:'scoped'})},
   streams:{listen:async(_handle,opts,fn)=>{if(opts.channel==='stdout')stdout=fn;return{close(){}};}},
   process:{run:async(_grant,spec)=>({code:0,stdout:'\n__HATO_EXEC__=/remote/bin/'+spec.args.at(-1)+'\n',stderr:''}),spawn:async(_grant,spec)=>{order.push('spawn');spawned=spec;return{handle:'process',pid:123};},write:async(_handle,line)=>{

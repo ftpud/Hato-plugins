@@ -1,7 +1,8 @@
+import { fileURLToPath } from "node:url";
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { build } from 'esbuild';
-const sdk = new URL('../../sdk', import.meta.url).pathname;
+const sdk = fileURLToPath(new URL('../../sdk', import.meta.url));
 const load = async path => import('data:text/javascript;base64,' + Buffer.from((await build({
   entryPoints: [path], bundle: true, platform: 'node', format: 'esm', write: false, alias: { '@hato/sdk': sdk },
 })).outputFiles[0].text).toString('base64'));

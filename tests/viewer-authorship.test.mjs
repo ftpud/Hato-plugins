@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
@@ -5,8 +6,8 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-const sdk = new URL('../../sdk', import.meta.url).pathname;
-const load = async path => import('data:text/javascript;base64,' + Buffer.from((await build({ entryPoints: [new URL(path, import.meta.url).pathname], bundle: true, format: 'esm', write: false, alias: { '@hato/sdk': sdk } })).outputFiles[0].text).toString('base64'));
+const sdk = fileURLToPath(new URL('../../sdk', import.meta.url));
+const load = async path => import('data:text/javascript;base64,' + Buffer.from((await build({ entryPoints: [fileURLToPath(new URL(path, import.meta.url))], bundle: true, format: 'esm', write: false, alias: { '@hato/sdk': sdk } })).outputFiles[0].text).toString('base64'));
 const { javaDeclarations, declarationsFor } = await load('../modules/ui/viewer/src/declarations.ts');
 const { parseBlame, blame } = await load('../modules/services/git/src/blame.ts');
 const authorship = await load('../modules/ui/viewer/src/authorship.ts');

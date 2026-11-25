@@ -1,3 +1,4 @@
+import { reconcileReplay } from "@hato/sdk/chat-replay";
 import { defaultSettings } from "./default-settings";
 // persistence: owns the app database (namespace "persistence"), its migrations and typed CRUD.
 // Other services never send SQL; they call these methods. The kernel only provides the generic
@@ -280,8 +281,23 @@ const mod: AppModule = {
       const rows = await q(ctx, `SELECT * FROM (SELECT * FROM ai_messages WHERE conversation_id = ?${filter} ORDER BY sequence DESC LIMIT ?) ORDER BY sequence ASC`, params);
       return rows.map((r: any) => ({ id: r.id, sequence: r.sequence, kind: r.kind, payload: parse(r.payload_json, {}), createdAt: r.created_at }));
     },
+    "messages.reconcileReplay": (ctx, a) => serializeSetting(async () => {
+      const cid = str(a.conversationId, "conversationId");
+      if (!Array.isArray(a.messages) || a.messages.length > 100000) throw new Error("Invalid replay messages");
+      const stored = await q(ctx, "SELECT * FROM ai_messages WHERE conversation_id = ? ORDER BY sequence", [cid]);
+      const existing = stored.map((r: any) => ({ id: r.id, kind: r.kind, payload: parse(r.payload_json, {}), sequence: r.sequence }));
+      const incoming = a.messages.map((m: any) => ({ id: crypto.randomUUID(), kind: str(m.kind, "kind", 40), payload: m.payload || {} }));
+      const merged = reconcileReplay(existing, incoming);
+      // Negative temporary positions avoid UNIQUE collisions while inserting between anchors.
+      await ctx.host.db.transaction(db!, [
+        { sql: "UPDATE ai_messages SET sequence = -sequence WHERE conversation_id = ?", params: [cid] },
+        ...merged.map(m => ({ sql: "INSERT INTO ai_messages(id, conversation_id, sequence, kind, payload_json, created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sequence=excluded.sequence,payload_json=excluded.payload_json", params: [m.id, cid, m.sequence!, m.kind, JSON.stringify(m.payload), now()] })),
+      ]);
+      const limit = Math.max(80, Math.min(Number(a.limit) || 80, 100000));
+      return { messages: merged.slice(-limit), hasOlder: merged.length > limit };
+    }),
     /** Insert or update a message by id; sequence is assigned on first insert. */
-    "messages.upsert": async (ctx, a) => {
+    "messages.upsert": (ctx, a) => serializeSetting(async () => {
       const id = str(a.id, "id");
       const cid = str(a.conversationId, "conversationId");
       const payload = JSON.stringify(a.payload ?? {});
@@ -297,7 +313,7 @@ const mod: AppModule = {
         { sql: "UPDATE ai_conversations SET updated_at = ? WHERE id = ?", params: [now(), cid] },
       ]);
       return null;
-    },
+    }),
   },
 };
 export default mod;

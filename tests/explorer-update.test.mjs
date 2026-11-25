@@ -1,10 +1,11 @@
+import { fileURLToPath } from "node:url";
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
 const walk=node=>[node,...(node.children||[]).flatMap(walk)];
 const entries=paths=>paths.map(relativePath=>({relativePath,name:relativePath.split('/').at(-1),kind:relativePath.endsWith('.ts')?'file':'dir'}));
 test('filtered rows and collapse choices stay stable as index results grow',async()=>{
- const result=await build({entryPoints:[new URL('../modules/ui/explorer/src/index.ts',import.meta.url).pathname],bundle:true,format:'esm',write:false,alias:{'@hato/sdk':new URL('../../sdk',import.meta.url).pathname}});
+ const result=await build({entryPoints:[fileURLToPath(new URL('../modules/ui/explorer/src/index.ts',import.meta.url))],bundle:true,format:'esm',write:false,alias:{'@hato/sdk':fileURLToPath(new URL('../../sdk',import.meta.url))}});
  const mod=(await import('data:text/javascript;base64,'+Buffer.from(result.outputFiles[0].text).toString('base64'))).default;
  const selected={id:'ws',view:{}},events=new Map();let paths=['src','src/deep','src/deep/needle.ts'],searches=0,listings=0;
  const ctx={events:{on:(key,fn)=>events.set(key,fn)},state:{get:()=>selected,watch(){}},ui:{invalidate(){}},log:{warn(){}},modules:{async call(id,method){
