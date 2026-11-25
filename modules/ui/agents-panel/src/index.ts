@@ -20,14 +20,10 @@ const DEFAULT_EDITOR={x:180,y:90,width:440,height:560};
 let editor={...DEFAULT_EDITOR};
 let skills=new Set<string>(),mcps=new Set<string>(["internal-remote-mcp"]);
 let timer:ReturnType<typeof setInterval>|null=null,epoch=0,refreshing:null|number=null;
-let animation:ReturnType<typeof setInterval>|null=null,frame=0;
+// Working rows use the native row spinner (`iconBusy`), which animates in the renderer on a shared
+// capped clock. This panel used to republish its whole tree every 80 ms to rotate an SVG.
+let lastSignature="";
 const working=(s:AgentSession)=>s.status==="starting"||s.status==="busy";
-function spinnerSvg(){return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8" opacity="0.2"/><path d="M12 4a8 8 0 0 1 8 8" stroke-linecap="round" transform="rotate(${frame*30} 12 12)"/></svg>`;}
-function animate(ctx:ModuleContext){
-  if(visible&&rows.some(working)) {
-    if(!animation)animation=setInterval(()=>{frame=(frame+1)%12;ctx.ui.invalidate();},80);
-  }else if(animation){clearInterval(animation);animation=null;}
-}
 const call=(ctx:ModuleContext,method:string,args:any={})=>ctx.modules.call("persistent-agents",method,{workspaceId:ws?.id,...args},{timeoutMs:240000});
 const button=(key:string,text:string,action:string,value?:string):UiNode=>({type:"button",key,text,action,value,small:true});
 async function refresh(ctx:ModuleContext,force=false) {
@@ -36,20 +32,25 @@ async function refresh(ctx:ModuleContext,force=false) {
   try {
     const next:AgentSession[]=await call(ctx,"list");
     if(mine!==epoch||id!==ws?.id)return;
-    rows=next;for(const id of picked)if(!next.some(s=>s.id===id))picked.delete(id);animate(ctx);
+    // Background polling skips the redraw when nothing visible changed.
+    const signature=JSON.stringify(next);
+    const changed=force||error!==null||signature!==lastSignature;
+    lastSignature=signature;
+    rows=next;for(const id of picked)if(!next.some(s=>s.id===id))picked.delete(id);
     error=null;
-  }catch(e){if(mine===epoch)error=errMsg(e);}
-  finally{if(refreshing===mine)refreshing=null;ctx.ui.invalidate();}
+    if(changed)ctx.ui.invalidate();
+  }catch(e){if(mine===epoch){error=errMsg(e);ctx.ui.invalidate();}}
+  finally{if(refreshing===mine)refreshing=null;}
 }
 async function setup(ctx:ModuleContext) {
   const mine=++epoch;
-  busy=false;error=null;rows=[];selecting=false;picked.clear();confirming=null;animate(ctx);selected=null;catalog=null;creating=false;
+  busy=false;error=null;rows=[];selecting=false;picked.clear();confirming=null;lastSignature="";selected=null;catalog=null;creating=false;
   if(!ws){ctx.ui.invalidate();return;}
   try{const c=await call(ctx,"catalog");if(mine!==epoch)return;catalog=c;profile=c.profiles[0]?.id||"";}
   catch(e){if(mine===epoch)error=errMsg(e);}
   if(visible)await refresh(ctx,true);
 }
-function schedule(ctx:ModuleContext){animate(ctx);if(timer)clearInterval(timer);timer=visible?setInterval(()=>{void refresh(ctx);},1500):null;}
+function schedule(ctx:ModuleContext){if(timer)clearInterval(timer);timer=visible?setInterval(()=>{void refresh(ctx);},1500):null;}
 function checks(items:any[],set:Set<string>,action:string):UiNode[]{return items.map(item=>({type:"toggle",key:`${action}:${item.path||item.id}`,label:(item.source==="library-global"?"Library · ":item.source==="library-project"?"Project library · ":"")+(item.name||item.id),...(item.description?{tooltip:item.description}:{}),checked:set.has(item.path||item.id),action,value:item.path||item.id} as UiNode));}
 const label=(key:string,text:string):UiNode=>({type:"label",key,text,wrap:true,color:"muted",size:"sm"});
 function editorWindow():UiNode {
@@ -97,7 +98,7 @@ const mod:AppModule={id:"agents-panel",moduleApiVersion:1,
   ctx.state.watch("ai.session",(session:any)=>{selected=session?.kind==="background"&&session.workspaceId===ws?.id?session.id:null;ctx.ui.invalidate();});
   schedule(ctx);
  },
- deactivate(){epoch++;if(timer)clearInterval(timer);timer=null;if(animation)clearInterval(animation);animation=null;},
+ deactivate(){epoch++;if(timer)clearInterval(timer);timer=null;},
  snapshot:()=>({workspaceId:ws?.id,selected,filter,editor,showWorkflow}),
  render():UiNode {
   const children:UiNode[]=[{type:"row",key:"header",gap:3,children:[
@@ -124,7 +125,8 @@ const mod:AppModule={id:"agents-panel",moduleApiVersion:1,
       key:s.id,label:s.name,detail:s.activity||`${s.profile.name} · ${s.machineId}`,badge:s.status,
       tooltip:`${s.profile.name} · ${s.machineId}${s.activity?"\n"+s.activity:""}`,
       selected:selecting?picked.has(s.id):s.id===selected,depth:0,expandable:false,expanded:false,
-      iconSvg:selecting&&picked.has(s.id)?uiIcons.check:working(s)?spinnerSvg():s.status==="waiting"?uiIcons.warning:uiIcons["message-square"],iconColor:selecting&&picked.has(s.id)?"primary":working(s)?"primary":s.status==="error"?"danger":s.status==="waiting"?"warning":"muted",
+      iconBusy:!(selecting&&picked.has(s.id))&&working(s),
+      iconSvg:selecting&&picked.has(s.id)?uiIcons.check:s.status==="waiting"?uiIcons.warning:uiIcons["message-square"],iconColor:selecting&&picked.has(s.id)?"primary":working(s)?"primary":s.status==="error"?"danger":s.status==="waiting"?"warning":"muted",
     }))});
     if(!agents.length)children.push(label("empty",query?"No matching agents.":!showWorkflow&&workflowCount()?"Only workflow agents here — use the workflow button to show them.":"No background agents in this workspace. Create one to begin."));
     const current=selecting?undefined:rows.find(s=>s.id===selected);

@@ -161,7 +161,10 @@ async function adapterAction(ctx: ModuleContext, key: string) {
   await loadAdapters(ctx);
 }
 
-async function load(ctx: ModuleContext, poll = false) {
+/** What the last event-driven chat load rendered. Session events fire for every streamed chunk and
+ *  status blip; an identical view skips the redraw (each one rebuilds the whole transcript). */
+let chatSignature = "";
+async function load(ctx: ModuleContext, poll = false, fromEvent = false) {
   if (!ws) { view = null; ctx.ui.invalidate(); return; }
   if(background) {
     const selection=background;
@@ -209,6 +212,9 @@ async function load(ctx: ModuleContext, poll = false) {
     }
   }
   catch (e) { error = errMsg(e); }
+  const signature = JSON.stringify([view, error]);
+  if (fromEvent && signature === chatSignature) return;
+  chatSignature = signature;
   publishRail(ctx);
   ctx.ui.invalidate();
 }
@@ -438,7 +444,9 @@ const mod: AppModule = {
     if (prev?.composerFractions) for (const [id, value] of prev.composerFractions) composerFractions.set(id, clampComposerFraction(value));
     if (prev?.attachments) attachments = imageAttachments(prev.attachments);
     if (prev && typeof prev.draft === "string") draft = prev.draft;
-    refresh = debounce(() => load(ctx), 40);
+    // Coalesce session events to ~10 redraws/s: streamed text still reads as live, and a long
+    // transcript is rebuilt a third as often as at the previous 40 ms window.
+    refresh = debounce(() => load(ctx, false, true), 100);
     ws = ctx.state.get("workspace.selected") || null;
     void restoreComposer(ctx);
     workspaceSkillState = ctx.state.get("files.skills") || null;

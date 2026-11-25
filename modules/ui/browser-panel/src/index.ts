@@ -197,7 +197,7 @@ function networkPane(s: BrowserSessionView): UiNode {
     badge: [e.durationMs !== undefined ? `${e.durationMs} ms` : "", size(e.encodedBytes)].filter(Boolean).join(" · "),
   }));
   const list: UiNode = rows.length
-    ? { type: "tree", key: "requests", rows, selectAction: "request", expandAction: "noop", grow: true }
+    ? { type: "tree", key: "requests", rows, rowHeight: 28, selectAction: "request", expandAction: "noop", grow: true }
     : { type: "label", key: "empty", text: netLoading ? "Loading…" : "No requests yet.", size: "sm", color: muted, style: { padding: 12 } };
   const children: UiNode[] = [
     { type: "row", key: "netbar", gap: 6, align: "center", style: { paddingX: 8, paddingY: 4 }, children: [

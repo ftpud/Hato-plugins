@@ -14,7 +14,7 @@ import { animePalette, animeTerminal } from "./anime";
 import { animeWallpaper } from "./anime-wallpaper";
 import { emberAmbient, emberAmbientStill, emberPalette, emberTerminal } from "./ember";
 import { haloSlotWidth, haloTrafficLights } from "@hato/sdk/halo-rail";
-import { glassCard } from "@hato/sdk/halo-glass";
+import { dockedCard, surfaceEffectsOf, type SurfaceEffects } from "@hato/sdk/halo-glass";
 import { applicationIcon } from "./application-icon";
 import { moduleVersions } from "./module-versions";
 import { bundledSchemes, parseScheme, type SyntaxScheme } from "@hato/sdk/syntax-schemes";
@@ -42,6 +42,15 @@ let appearanceTheme = "ember";
 let animations: UiMotionMode = "system";
 /** Ember's drifting dust. Off keeps the glow and stops all idle redraws. */
 let ambientMotion = true;
+/** Large panel gradient/shadow quality (Appearance → Effects). Shared with the rails. */
+let effects: SurfaceEffects = "reduced";
+/** Window-wide cap for activity animation (spinners, busy rows, dust, canvas sparks). */
+// The renderer redraws only changed regions, so a spinner frame costs its own pixels, not the
+// window's. 30 FPS is the default; 60 is smooth on fast displays at some extra CPU per frame.
+let activityFps = 30;
+const activityOptions = [{ value: "60", label: "Fluid (60 FPS)" }, { value: "30", label: "Smooth (30 FPS)" }, { value: "15", label: "Balanced (15 FPS)" }, { value: "8", label: "Low (8 FPS)" }];
+const activityFpsOf = (v: unknown): number => { const n = Number(v); return n === 60 || n === 15 || n === 8 ? n : 30; };
+const effectsOptions = [{ value: "full", label: "Full" }, { value: "reduced", label: "Reduced" }, { value: "flat", label: "Flat" }];
 const animationOptions = [{ value: "system", label: "Follow system" }, { value: "on", label: "On" }, { value: "off", label: "Off" }];
 const animationsOf = (v: unknown): UiMotionMode => v === "on" || v === "off" ? v : "system";
 // Syntax color scheme: bundled ones plus user JSON files in <sharedDir>/syntax-schemes.
@@ -116,7 +125,7 @@ const sidebarWidths: Record<string, number> = {};
 const sidebarMotion = { durationMs: 320, easing: [0.22, 1, 0.36, 1] as [number, number, number, number] };
 /** Theme and resolved color mode, for modules that adapt their composition to the theme. */
 function publishAppearance(ctx: ModuleContext) {
-  ctx.state.set("workspace-layout.appearance", { theme: appearanceTheme, mode });
+  ctx.state.set("workspace-layout.appearance", { theme: appearanceTheme, mode, effects });
 }
 
 function applyContributions(c: Contributions) {
@@ -246,7 +255,7 @@ function panelHeader(id: string, mode: "dock" | "float" | "window"): UiNode {
 
 function panelBody(id: string, mode: "dock" | "float" | "window"): UiNode {
   const collapsed = mode === "dock" && !!layout.collapsed[id] && !panelMotion();
-  return { type: "column", key: "panel-" + id, grow: true, bg: "panel", ...(appearanceTheme === "anime" ? { style: { radius: 16, borderWidth: 1, borderColor: "border", shadow: "lg" as const, padding: 6 } } : { style: { radius: 14, borderWidth: 1, borderColor: "glassEdge", background: "panel", padding: 4, ...glassCard } }), children: [
+  return { type: "column", key: "panel-" + id, grow: true, bg: "panel", ...(appearanceTheme === "anime" ? { style: { radius: 16, borderWidth: 1, borderColor: "border", shadow: "lg" as const, padding: 6 } } : { style: { radius: 14, borderWidth: 1, borderColor: "glassEdge", background: "panel", padding: 4, ...dockedCard(mode === "float" ? "full" : effects) } }), children: [
     ...((mode === "dock" && (layout.showPanelTitles || collapsed)) || (mode !== "dock" && layout.showPanelControls) ? [panelHeader(id, mode)] : []),
     ...(collapsed ? [] : [{ type: "slot", key: "slot", module: PANELS[id].slot, grow: true } as UiNode]),
   ] };
@@ -518,14 +527,14 @@ async function resetCustomization(ctx: ModuleContext) {
   const nextTables = normalizeTableStyle(defaultSettings["ui-tables.v1"]);
   const values: Record<string, any> = {
     "layout.v1": nextLayout, "activity-sidebar.v1": defaultSidebarButtons(), "sidebar-order.v1": defaultSidebarOrder(), "panel-sharing.v1": defaultPanelSharing(),
-    "ui-tables.v1": nextTables, ...Object.fromEntries(Object.entries(defaultSettings).filter(([key]) => key.startsWith("appearance."))), "appearance.ambientMotion": true,
+    "ui-tables.v1": nextTables, ...Object.fromEntries(Object.entries(defaultSettings).filter(([key]) => key.startsWith("appearance."))), "appearance.ambientMotion": true, "appearance.effects": "reduced", "appearance.activityFps": "30",
   };
   for (const [key, value] of Object.entries(values)) await ctx.modules.call("persistence", "settings.set", { key, value });
   sidebarButtons = defaultSidebarButtons(); sidebarOrder = defaultSidebarOrder(); panelSharing = defaultPanelSharing(); tableStyle = nextTables;
   groupBySpace = true; await ctx.modules.call("persistence", "settings.set", { key: "sidebar-grouping.v1", value: true });
   publishSharing(ctx);
   fontFamily = values["appearance.fontFamily"]; fontSize = values["appearance.fontSize"]; fontWeight = values["appearance.fontWeight"];
-  mode = values["appearance.mode"]; animations = animationsOf(values["appearance.animations"]); ambientMotion = values["appearance.ambientMotion"] !== false; appearanceTheme = themeOf(values["appearance.theme"]); publishAppearance(ctx); panelOpacity = values["appearance.panelOpacity"];
+  mode = values["appearance.mode"]; animations = animationsOf(values["appearance.animations"]); ambientMotion = values["appearance.ambientMotion"] !== false; effects = surfaceEffectsOf(values["appearance.effects"]); activityFps = activityFpsOf(values["appearance.activityFps"]); appearanceTheme = themeOf(values["appearance.theme"]); publishAppearance(ctx); panelOpacity = values["appearance.panelOpacity"];
   projectsBackground = values["appearance.projectsBackground"]; syntaxScheme = values["appearance.syntaxScheme"];
   ctx.state.set("workspace-layout.projectsBackgroundOpacity", projectsBackgroundOpacity());
   ctx.state.set("workspace-layout.sidebarButtons", sidebarButtons);
@@ -573,6 +582,8 @@ const mod: AppModule = {
     mode = savedMode === "light" || savedMode === "dark" ? savedMode : "system";
     animations = animationsOf(await ctx.modules.call("persistence", "settings.get", { key: "appearance.animations" }));
     ambientMotion = (await ctx.modules.call("persistence", "settings.get", { key: "appearance.ambientMotion" })) !== false;
+    effects = surfaceEffectsOf(await ctx.modules.call("persistence", "settings.get", { key: "appearance.effects" }));
+    activityFps = activityFpsOf(await ctx.modules.call("persistence", "settings.get", { key: "appearance.activityFps" }));
     const savedTheme = await ctx.modules.call("persistence", "settings.get", { key: "appearance.theme" });
     appearanceTheme = themeOf(savedTheme);
     publishAppearance(ctx);
@@ -598,8 +609,12 @@ const mod: AppModule = {
         description: "Ember follows this color mode. Sakura Twilight uses its own twilight palette." },
       { key: "animations", label: "Animations", type: "select", value: animations, options: animationOptions,
         description: "Menus, popovers, tooltips, notifications and buttons. Follow system uses fades only when Reduce Motion is on." },
+      { key: "activityFps", label: "Activity animation", type: "select", value: String(activityFps), options: activityOptions,
+        description: "Frame rate for spinners, busy rows, background dust and workflow sparks. Only the animated area is redrawn; higher rates cost some CPU per frame while agents work." },
       ...(appearanceTheme === "ember" ? [{ key: "ambientMotion", label: "Background motion", type: "toggle" as const, value: ambientMotion,
-        description: "Ember's slowly drifting dust. Off keeps the glow and lets the window stay still while idle, which saves GPU and battery." }] : []),
+        description: "Ember's slowly drifting dust. Off keeps the glow and lets the window stay still while idle, which saves GPU and battery." },
+      { key: "effects", label: "Panel effects", type: "select" as const, value: effects, options: effectsOptions,
+        description: "Sheen and shadow on docked panels and rails. Every animation frame redraws them, so Reduced drops the large shadow and Flat also drops the sheen. Floating panels and menus keep the full look." }] : []),
     ] }, { key: "syntax", title: "Syntax colors", group: "Appearance", layout: "table", fields: [
       { key: "scheme", label: "Color scheme", type: "select", value: allSchemes().some(s => s.id === syntaxScheme) ? syntaxScheme : "default",
         options: allSchemes().map(s => ({ value: s.id, label: s.id.startsWith("custom:") ? `${s.name} (custom)` : s.name })),
@@ -667,6 +682,21 @@ const mod: AppModule = {
           if (!themeOptions.some(option => option.value === value)) throw new Error("Invalid appearance preference");
           await ctx.modules.call("persistence", "settings.set", { key: "appearance.theme", value });
           appearanceTheme = String(value);
+          publishAppearance(ctx);
+          ctx.ui.invalidate();
+          return;
+        }
+        if (key === "activityFps") {
+          if (!activityOptions.some(option => option.value === value)) throw new Error("Invalid activity animation preference");
+          await ctx.modules.call("persistence", "settings.set", { key: "appearance.activityFps", value });
+          activityFps = activityFpsOf(value);
+          ctx.ui.invalidate();
+          return;
+        }
+        if (key === "effects") {
+          if (!effectsOptions.some(option => option.value === value)) throw new Error("Invalid panel effects preference");
+          await ctx.modules.call("persistence", "settings.set", { key: "appearance.effects", value });
+          effects = surfaceEffectsOf(value);
           publishAppearance(ctx);
           ctx.ui.invalidate();
           return;
@@ -760,7 +790,7 @@ const mod: AppModule = {
   render(): UiNode {
     const palette = appearanceTheme === "anime" ? animePalette(panelOpacity) : emberPalette;
     const kids: UiNode[] = [{ type: "theme", key: "color-scheme", applicationIcon,
-      motion: { mode: animations, experimentalDockReveal: panelMotion(), menu: anchoredMotion, tooltip: tooltipMotion, interaction: interactionMotion },
+      motion: { mode: animations, activityFps, experimentalDockReveal: panelMotion(), menu: anchoredMotion, tooltip: tooltipMotion, interaction: interactionMotion },
       chrome: { toasts: { transition: toastMotion }, window: { titlebar: "hidden", trafficLights: haloTrafficLights } }, controls: { listRowHeight: listRowHeight(tableStyle), stripedRows: tableStyle.stripes, rowDividers: tableStyle.dividers }, palette, terminal: appearanceTheme === "anime" ? { light: animeTerminal, dark: animeTerminal } : emberTerminal, typography: typography(fontFamily, fontSize, fontWeight), ...(mode === "system" ? {} : { mode }),
       syntax: editorTheme(allSchemes().find(s => s.id === syntaxScheme), palette) }];
     // One shell: no top or bottom bars. Their contents live in the Halo rails (sdk/halo-rail.ts),
