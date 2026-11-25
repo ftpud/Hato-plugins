@@ -18,6 +18,9 @@ import { anchoredAboveMotion, anchoredMotion } from "@hato/sdk/motion";
 let background:{workspaceId:string;id:string}|null=null;
 let backgroundPage:AgentView|null=null;
 let backgroundTimer:ReturnType<typeof setInterval>|null=null;
+/** What the last background poll rendered; an identical poll skips the re-render (the panel
+ *  polls every 1.5 s, and each render repaints the whole window). */
+let backgroundSignature="";
 let backgroundSessions:any[]=[];
 let confirmRuntimeUpdate=false;
 /** Workspace catalog for background chats: providers, MCP servers, instruction files and skills. */
@@ -58,10 +61,10 @@ async function openBackground(ctx:ModuleContext,selection:any) {
   if(!ws||selection?.workspaceId!==ws.id||typeof selection.id!=="string")return;
   if(background)backgroundDrafts.set(background.id,draft||"");
   else {normalDraft=draft;normalAttachments=attachments;}
-  background={workspaceId:selection.workspaceId,id:selection.id};backgroundPage=null;view=null;
+  background={workspaceId:selection.workspaceId,id:selection.id};backgroundPage=null;view=null;backgroundSignature="";
   draft=backgroundDrafts.get(selection.id)||"";attachments=[];resetChatWindows();publishSession(ctx);
   if(backgroundTimer)clearInterval(backgroundTimer);
-  backgroundTimer=setInterval(()=>{void load(ctx);},1500);
+  backgroundTimer=setInterval(()=>{void load(ctx,true);},1500);
   ctx.events.emit("ai.chatOpened",{});
   if(backgroundCatalog?.workspaceId!==selection.workspaceId)void loadCatalog(ctx);
   await ctx.modules.call("workspace", "view.patch", { workspaceId: selection.workspaceId, patch: { ui: { aiBackgroundSession: selection.id } } });
@@ -158,7 +161,7 @@ async function adapterAction(ctx: ModuleContext, key: string) {
   await loadAdapters(ctx);
 }
 
-async function load(ctx: ModuleContext) {
+async function load(ctx: ModuleContext, poll = false) {
   if (!ws) { view = null; ctx.ui.invalidate(); return; }
   if(background) {
     const selection=background;
@@ -166,6 +169,10 @@ async function load(ctx: ModuleContext) {
       const page:AgentView=await persistent(ctx,"view",{limit:Math.min(historyLimit,200),before:Number(historyBefore[historyBefore.length-1])||undefined});
       const auth=await ctx.modules.call("acp","authSettings",{});
       if(background!==selection||ws?.id!==selection.workspaceId)return;
+      const catalogNow=backgroundCatalog?.workspaceId===ws.id?backgroundCatalog:null;
+      const signature=JSON.stringify([page,auth,backgroundSessions.map(s=>[s.id,s.name,s.status,s.profile?.id]),catalogNow?[catalogNow.profiles,catalogNow.mcps]:null,historyBefore.length]);
+      if(poll&&signature===backgroundSignature&&view&&!error)return;
+      backgroundSignature=signature;
       backgroundPage=page;
       const session=page.session;
       const catalog=backgroundCatalog?.workspaceId===ws.id?backgroundCatalog:null;

@@ -67,16 +67,11 @@ let agentBusy: Record<string, number> = {};
 let aiBusy: Record<string, number> = {};
 let windows = false;
 const busyText = (n: number) => `AI working${n > 1 ? ` (${n})` : ""}`;
-// Busy rows swap their icon for a rotating spinner; frames only tick while something is working.
-let frame = 0;
-let animation: ReturnType<typeof setInterval> | null = null;
-const spinnerSvg = () => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8" opacity="0.2"/><path d="M12 4a8 8 0 0 1 8 8" stroke-linecap="round" transform="rotate(${frame * 30} 12 12)"/></svg>`;
+// Busy rows swap their icon for the native row spinner (`iconBusy`). It animates in the renderer;
+// this panel re-rendered its whole tree 12.5 times a second to rotate an SVG before.
 function updateBusy(ctx: ModuleContext) {
   aiBusy = { ...chatBusy };
   for (const [k, n] of Object.entries(agentBusy)) aiBusy[k] = (aiBusy[k] || 0) + n;
-  const working = Object.values(aiBusy).some((n) => n > 0);
-  if (working && !animation) animation = setInterval(() => { frame = (frame + 1) % 12; ctx.ui.invalidate(); }, 80);
-  else if (!working && animation) { clearInterval(animation); animation = null; }
   publishRail(ctx);
   ctx.ui.invalidate();
 }
@@ -183,14 +178,14 @@ function rows(projects: any[]): TreeRow[] {
       detail: p.needsPassword ? `Password needed · ${location}` : offline ? `Offline · ${offline}` : busyCount ? `${busyText(busyCount)} · ${location}` : location,
       badges: statBadges(key), contextMenu: projectMenu(p),
       icon: p.offline ? "warning" : p.kind !== "local" ? "remote" : "folder",
-      iconSvg: busyCount ? spinnerSvg() : p.offline ? uiIcons.warning : p.kind === "cloud" ? uiIcons.cloud : p.kind === "ssh" ? uiIcons.terminal : uiIcons.folder, iconColor: busyCount ? "primary" : "muted", weight: "semibold",
+      iconBusy: busyCount > 0, iconSvg: p.offline ? uiIcons.warning : p.kind === "cloud" ? uiIcons.cloud : p.kind === "ssh" ? uiIcons.terminal : uiIcons.folder, iconColor: busyCount ? "primary" : "muted", weight: "semibold",
     });
     if (query || p.expanded) for (const [index, t] of tasks.entries()) {
       const tk = `task:${t.id}`;
       const taskBusy = aiBusy[tk] || 0;
       out.push({ key: tk, label: t.name, connector: index === tasks.length - 1 ? "last" : "branch", depth: 1, expandable: false, expanded: false, selected: selected === tk,
         badge: t.status !== "ready" ? t.status : undefined, badges: statBadges(tk), contextMenu: taskMenu(t), detail: taskBusy ? `${busyText(taskBusy)} · ${t.branch}` : t.branch, icon: t.status === "ready" ? "task" : "warning",
-        iconSvg: taskBusy ? spinnerSvg() : t.status === "ready" ? uiIcons["git-branch"] : uiIcons.warning, iconColor: taskBusy ? "primary" : "muted" });
+        iconBusy: taskBusy > 0, iconSvg: t.status === "ready" ? uiIcons["git-branch"] : uiIcons.warning, iconColor: taskBusy ? "primary" : "muted" });
     }
   }
   return out;
@@ -349,7 +344,7 @@ const mod: AppModule = {
     /** Open the add-project form (the rail also reveals this panel). */
     showAdd: async (ctx) => { await mod.onEvent!(ctx, { action: "showAdd" } as any); return true; },
   },
-  deactivate() { if (railTimer) clearTimeout(railTimer); railTimer = null; taskRequest++; treeRequest++; if (animation) clearInterval(animation); animation = null; if (statsTimer) clearTimeout(statsTimer); statsTimer = null; },
+  deactivate() { if (railTimer) clearTimeout(railTimer); railTimer = null; taskRequest++; treeRequest++; if (statsTimer) clearTimeout(statsTimer); statsTimer = null; },
   snapshot: () => ({ taskFormFor, taskQuery, taskBranch, taskBranches, addForm, addSource, sshAuth, addValues, filter, diffStats }),
   render(): UiNode {
     const proj = selectedProject();

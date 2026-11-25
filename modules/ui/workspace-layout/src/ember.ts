@@ -43,4 +43,9 @@ export const emberAmbient = {
   // A spotlight above the Workspace rail (as in the concept) and a softer one mid-window.
   glow: [{ color: "ambientGlow", x: 0.07, y: 0, radius: 170 }, { color: "ambientGlow", x: 0.55, y: 0, radius: 120 }],
   particles: { count: 22, color: "ambientDust", minSize: 1, maxSize: 2, speed: 4, seed: 7 },
+  // Dust drifting 4 px/s moves 0.2 px per frame at 20 fps: smooth, at a sixth of the redraws of a
+  // 120 Hz display (every redraw repaints the whole window).
+  fps: 20,
 };
+/** Ember without the drifting dust: static glow only, so the window is not redrawn while idle. */
+export const emberAmbientStill = { glow: emberAmbient.glow };

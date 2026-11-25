@@ -12,7 +12,7 @@ import { exportSettings } from "@hato/sdk/settings";
 import { fontOptions, typography } from "@hato/sdk/typography";
 import { animePalette, animeTerminal } from "./anime";
 import { animeWallpaper } from "./anime-wallpaper";
-import { emberAmbient, emberPalette, emberTerminal } from "./ember";
+import { emberAmbient, emberAmbientStill, emberPalette, emberTerminal } from "./ember";
 import { haloSlotWidth, haloTrafficLights } from "@hato/sdk/halo-rail";
 import { glassCard } from "@hato/sdk/halo-glass";
 import { applicationIcon } from "./application-icon";
@@ -40,6 +40,8 @@ const weightOptions = [{ value: "400", label: "Regular" }, { value: "500", label
 let appearanceTheme = "ember";
 /** Interface motion; "system" follows the OS Reduce Motion preference (opacity-only when reduced). */
 let animations: UiMotionMode = "system";
+/** Ember's drifting dust. Off keeps the glow and stops all idle redraws. */
+let ambientMotion = true;
 const animationOptions = [{ value: "system", label: "Follow system" }, { value: "on", label: "On" }, { value: "off", label: "Off" }];
 const animationsOf = (v: unknown): UiMotionMode => v === "on" || v === "off" ? v : "system";
 // Syntax color scheme: bundled ones plus user JSON files in <sharedDir>/syntax-schemes.
@@ -516,14 +518,14 @@ async function resetCustomization(ctx: ModuleContext) {
   const nextTables = normalizeTableStyle(defaultSettings["ui-tables.v1"]);
   const values: Record<string, any> = {
     "layout.v1": nextLayout, "activity-sidebar.v1": defaultSidebarButtons(), "sidebar-order.v1": defaultSidebarOrder(), "panel-sharing.v1": defaultPanelSharing(),
-    "ui-tables.v1": nextTables, ...Object.fromEntries(Object.entries(defaultSettings).filter(([key]) => key.startsWith("appearance."))),
+    "ui-tables.v1": nextTables, ...Object.fromEntries(Object.entries(defaultSettings).filter(([key]) => key.startsWith("appearance."))), "appearance.ambientMotion": true,
   };
   for (const [key, value] of Object.entries(values)) await ctx.modules.call("persistence", "settings.set", { key, value });
   sidebarButtons = defaultSidebarButtons(); sidebarOrder = defaultSidebarOrder(); panelSharing = defaultPanelSharing(); tableStyle = nextTables;
   groupBySpace = true; await ctx.modules.call("persistence", "settings.set", { key: "sidebar-grouping.v1", value: true });
   publishSharing(ctx);
   fontFamily = values["appearance.fontFamily"]; fontSize = values["appearance.fontSize"]; fontWeight = values["appearance.fontWeight"];
-  mode = values["appearance.mode"]; animations = animationsOf(values["appearance.animations"]); appearanceTheme = themeOf(values["appearance.theme"]); publishAppearance(ctx); panelOpacity = values["appearance.panelOpacity"];
+  mode = values["appearance.mode"]; animations = animationsOf(values["appearance.animations"]); ambientMotion = values["appearance.ambientMotion"] !== false; appearanceTheme = themeOf(values["appearance.theme"]); publishAppearance(ctx); panelOpacity = values["appearance.panelOpacity"];
   projectsBackground = values["appearance.projectsBackground"]; syntaxScheme = values["appearance.syntaxScheme"];
   ctx.state.set("workspace-layout.projectsBackgroundOpacity", projectsBackgroundOpacity());
   ctx.state.set("workspace-layout.sidebarButtons", sidebarButtons);
@@ -570,6 +572,7 @@ const mod: AppModule = {
     const savedMode = await ctx.modules.call("persistence", "settings.get", { key: "appearance.mode" });
     mode = savedMode === "light" || savedMode === "dark" ? savedMode : "system";
     animations = animationsOf(await ctx.modules.call("persistence", "settings.get", { key: "appearance.animations" }));
+    ambientMotion = (await ctx.modules.call("persistence", "settings.get", { key: "appearance.ambientMotion" })) !== false;
     const savedTheme = await ctx.modules.call("persistence", "settings.get", { key: "appearance.theme" });
     appearanceTheme = themeOf(savedTheme);
     publishAppearance(ctx);
@@ -595,6 +598,8 @@ const mod: AppModule = {
         description: "Ember follows this color mode. Sakura Twilight uses its own twilight palette." },
       { key: "animations", label: "Animations", type: "select", value: animations, options: animationOptions,
         description: "Menus, popovers, tooltips, notifications and buttons. Follow system uses fades only when Reduce Motion is on." },
+      ...(appearanceTheme === "ember" ? [{ key: "ambientMotion", label: "Background motion", type: "toggle" as const, value: ambientMotion,
+        description: "Ember's slowly drifting dust. Off keeps the glow and lets the window stay still while idle, which saves GPU and battery." }] : []),
     ] }, { key: "syntax", title: "Syntax colors", group: "Appearance", layout: "table", fields: [
       { key: "scheme", label: "Color scheme", type: "select", value: allSchemes().some(s => s.id === syntaxScheme) ? syntaxScheme : "default",
         options: allSchemes().map(s => ({ value: s.id, label: s.id.startsWith("custom:") ? `${s.name} (custom)` : s.name })),
@@ -663,6 +668,14 @@ const mod: AppModule = {
           await ctx.modules.call("persistence", "settings.set", { key: "appearance.theme", value });
           appearanceTheme = String(value);
           publishAppearance(ctx);
+          ctx.ui.invalidate();
+          return;
+        }
+        if (key === "ambientMotion") {
+          if (typeof value !== "boolean") throw new Error("Invalid background motion preference");
+          await ctx.modules.call("persistence", "settings.set", { key: "appearance.ambientMotion", value });
+          ambientMotion = value;
+          publishSettings();
           ctx.ui.invalidate();
           return;
         }
@@ -773,7 +786,7 @@ const mod: AppModule = {
     }
     if (showLayout) kids.push(layoutMenu());
     if (showModules) kids.push(modulesModal());
-    return { type: "column", key: "layout-root", grow: true, ...(appearanceTheme === "anime" ? { backgroundImage: animeWallpaper, style: { background: "#11152b" } } : { ambient: emberAmbient, style: { background: "background" } }), children: kids };
+    return { type: "column", key: "layout-root", grow: true, ...(appearanceTheme === "anime" ? { backgroundImage: animeWallpaper, style: { background: "#11152b" } } : { ambient: ambientMotion ? emberAmbient : emberAmbientStill, style: { background: "background" } }), children: kids };
   },
   async onEvent(ctx, ev) {
     const v: any = ev.value;
