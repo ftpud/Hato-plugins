@@ -1,0 +1,3501 @@
+// ../sdk/file-presentation.ts
+var FilePresentationClient = class {
+  constructor(ctx) {
+    this.ctx = ctx;
+    this.cache = /* @__PURE__ */ new Map();
+    /** Values from before the last invalidation, served until fresh ones arrive. */
+    this.stale = /* @__PURE__ */ new Map();
+    this.queued = /* @__PURE__ */ new Map();
+    this.workspace = null;
+    this.revision = 0;
+    this.busy = false;
+    this.stopped = false;
+    this.stops = [
+      ctx.state.watch("files.presentationRuleCount", () => this.clear()),
+      ctx.events.on("files.presentationChanged", () => this.clear()),
+      ctx.events.on("files.changed", (event) => {
+        if (event.workspaceId === this.workspace) this.clear();
+      })
+    ];
+  }
+  get(workspaceId2, path, kind = "file") {
+    if (this.ctx.state.get("files.presentationRuleCount") === 0) return {};
+    if (this.workspace !== workspaceId2) {
+      this.clear();
+      this.stale.clear();
+      this.workspace = workspaceId2;
+    }
+    const key2 = `${kind}:${path}`;
+    const cached = this.cache.get(key2);
+    if (cached) return cached;
+    this.queued.set(key2, { path, kind });
+    if (!this.timer && !this.busy && !this.stopped) this.timer = setTimeout(() => {
+      this.timer = void 0;
+      void this.flush();
+    }, 30);
+    return this.stale.get(key2) || {};
+  }
+  clear() {
+    this.revision++;
+    for (const [key2, value] of this.cache) this.stale.set(key2, value);
+    this.cache.clear();
+    this.queued.clear();
+    this.ctx.ui.invalidate();
+  }
+  dispose() {
+    this.stopped = true;
+    this.revision++;
+    if (this.timer) clearTimeout(this.timer);
+    for (const stop of this.stops) if (typeof stop === "function") stop();
+  }
+  async flush() {
+    if (this.stopped || this.busy || !this.workspace) return;
+    this.busy = true;
+    const revision = this.revision, workspaceId2 = this.workspace;
+    const batch = [...this.queued.entries()].slice(0, 64);
+    for (const [key2] of batch) {
+      this.queued.delete(key2);
+      this.cache.set(key2, this.stale.get(key2) || {});
+    }
+    try {
+      const result = await this.ctx.modules.call("files", "presentations", { workspaceId: workspaceId2, entries: batch.map(([, entry]) => entry) }, { timeoutMs: 45e3 });
+      if (revision === this.revision && !this.stopped) for (const [key2, entry] of batch) {
+        this.cache.set(key2, result?.[entry.path] || {});
+        this.stale.delete(key2);
+      }
+    } catch {
+    } finally {
+      this.busy = false;
+      if (revision === this.revision && !this.stopped) this.ctx.ui.invalidate();
+      if (this.queued.size && !this.stopped) this.timer = setTimeout(() => {
+        this.timer = void 0;
+        void this.flush();
+      }, 30);
+    }
+  }
+};
+
+// ../sdk/file-icons.ts
+var fileIcons = {
+  "folder": '<svg\n  xmlns="http://www.w3.org/2000/svg"\n  width="24"\n  height="24"\n  viewBox="0 0 24 24"\n  fill="none"\n  stroke="currentColor"\n  stroke-width="1.7"\n  stroke-linecap="round"\n  stroke-linejoin="round"\n>\n  <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />\n</svg>',
+  "folderOpen": '<svg\n  xmlns="http://www.w3.org/2000/svg"\n  width="24"\n  height="24"\n  viewBox="0 0 24 24"\n  fill="none"\n  stroke="currentColor"\n  stroke-width="1.7"\n  stroke-linecap="round"\n  stroke-linejoin="round"\n>\n  <path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" />\n</svg>',
+  "file": '<svg\n  xmlns="http://www.w3.org/2000/svg"\n  width="24"\n  height="24"\n  viewBox="0 0 24 24"\n  fill="none"\n  stroke="currentColor"\n  stroke-width="1.7"\n  stroke-linecap="round"\n  stroke-linejoin="round"\n>\n  <path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" />\n  <path d="M14 2v5a1 1 0 0 0 1 1h5" />\n</svg>',
+  "text": '<svg\n  xmlns="http://www.w3.org/2000/svg"\n  width="24"\n  height="24"\n  viewBox="0 0 24 24"\n  fill="none"\n  stroke="currentColor"\n  stroke-width="1.7"\n  stroke-linecap="round"\n  stroke-linejoin="round"\n>\n  <path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" />\n  <path d="M14 2v5a1 1 0 0 0 1 1h5" />\n  <path d="M10 9H8" />\n  <path d="M16 13H8" />\n  <path d="M16 17H8" />\n</svg>',
+  "code": '<svg\n  xmlns="http://www.w3.org/2000/svg"\n  width="24"\n  height="24"\n  viewBox="0 0 24 24"\n  fill="none"\n  stroke="currentColor"\n  stroke-width="1.7"\n  stroke-linecap="round"\n  stroke-linejoin="round"\n>\n  <path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" />\n  <path d="M14 2v5a1 1 0 0 0 1 1h5" />\n  <path d="M10 12.5 8 15l2 2.5" />\n  <path d="m14 12.5 2 2.5-2 2.5" />\n</svg>',
+  "config": '<svg\n  xmlns="http://www.w3.org/2000/svg"\n  width="24"\n  height="24"\n  viewBox="0 0 24 24"\n  fill="none"\n  stroke="currentColor"\n  stroke-width="1.7"\n  stroke-linecap="round"\n  stroke-linejoin="round"\n>\n  <path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" />\n  <path d="M14 2v5a1 1 0 0 0 1 1h5" />\n  <path d="M10 12a1 1 0 0 0-1 1v1a1 1 0 0 1-1 1 1 1 0 0 1 1 1v1a1 1 0 0 0 1 1" />\n  <path d="M14 18a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1 1 1 0 0 1-1-1v-1a1 1 0 0 0-1-1" />\n</svg>',
+  "image": '<svg\n  xmlns="http://www.w3.org/2000/svg"\n  width="24"\n  height="24"\n  viewBox="0 0 24 24"\n  fill="none"\n  stroke="currentColor"\n  stroke-width="1.7"\n  stroke-linecap="round"\n  stroke-linejoin="round"\n>\n  <path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" />\n  <path d="M14 2v5a1 1 0 0 0 1 1h5" />\n  <circle cx="10" cy="12" r="2" />\n  <path d="m20 17-1.296-1.296a2.41 2.41 0 0 0-3.408 0L9 22" />\n</svg>',
+  "archive": '<svg\n  xmlns="http://www.w3.org/2000/svg"\n  width="24"\n  height="24"\n  viewBox="0 0 24 24"\n  fill="none"\n  stroke="currentColor"\n  stroke-width="1.7"\n  stroke-linecap="round"\n  stroke-linejoin="round"\n>\n  <path d="M13.659 22H18a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v11.5" />\n  <path d="M14 2v5a1 1 0 0 0 1 1h5" />\n  <path d="M8 12v-1" />\n  <path d="M8 18v-2" />\n  <path d="M8 7V6" />\n  <circle cx="8" cy="20" r="2" />\n</svg>',
+  "link": '<svg\n  xmlns="http://www.w3.org/2000/svg"\n  width="24"\n  height="24"\n  viewBox="0 0 24 24"\n  fill="none"\n  stroke="currentColor"\n  stroke-width="1.7"\n  stroke-linecap="round"\n  stroke-linejoin="round"\n>\n  <path d="M4 11V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.706.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h7" />\n  <path d="M14 2v5a1 1 0 0 0 1 1h5" />\n  <path d="m10 18 3-3-3-3" />\n</svg>'
+};
+
+// ../sdk/tab-style.ts
+function fileTabStyle(active) {
+  return {
+    background: active ? "field" : "surface",
+    color: active ? "text" : "muted",
+    borderBottom: 2,
+    borderColor: active ? "primary" : "surface",
+    radius: 5
+  };
+}
+function terminalTabStyle(active) {
+  return { background: active ? "selection" : "surface", color: active ? "primary" : "muted", radius: 6 };
+}
+function tabButtonStyle(active, terminal = false) {
+  const { background, color } = terminal ? terminalTabStyle(active) : fileTabStyle(active);
+  return { background, color, fontWeight: 400, radius: 4, paddingX: 9, paddingY: 5, minHeight: 30 };
+}
+
+// ../sdk/settings-order.ts
+var SPACER_PREFIX = "@spacer:";
+function parseOrder(value, allowed, allowSpacers = false) {
+  if (typeof value !== "string") throw new Error("Invalid item order");
+  const items = JSON.parse(value);
+  if (!Array.isArray(items) || items.length > allowed.length + 24) throw new Error("Invalid item order");
+  const seen = /* @__PURE__ */ new Set();
+  let gaps = 0;
+  for (const item of items) {
+    if (typeof item !== "string" || seen.has(item)) throw new Error("Duplicate or invalid item");
+    seen.add(item);
+    if (!allowed.includes(item) && !(allowSpacers && item.startsWith(SPACER_PREFIX) && /^@spacer:[a-zA-Z0-9_-]{1,80}$/.test(item) && ++gaps <= 24)) throw new Error("Unknown item");
+  }
+  if (!allowed.every((id) => seen.has(id))) throw new Error("Order must retain all current items");
+  return items;
+}
+
+// ../sdk/ui-controls.ts
+var HEX = /^#[0-9a-fA-F]{6}$/;
+function validControlValue(field, value) {
+  if (typeof value !== "string") return false;
+  if (value === "") return !!field.allowDefault;
+  if (field.type === "color") return HEX.test(value);
+  const n = Number(value);
+  return Number.isFinite(n) && n >= field.min && n <= field.max;
+}
+
+// ../sdk/settings.ts
+function exportSettings(ctx, getSections, onChange, options = {}) {
+  const publish = (error2 = null) => {
+    const value = { sections: getSections(), error: error2, ...options.reset ? { resetLabel: options.reset.label } : {} };
+    ctx.state.set(`${ctx.moduleId}.settings`, value);
+  };
+  let queue = Promise.resolve();
+  ctx.events.on("settings.change", (edit) => {
+    if (edit?.module !== ctx.moduleId) return;
+    queue = queue.then(async () => {
+      try {
+        const section = getSections().find((s) => s.key === edit.section);
+        const field = section?.fields.find((f) => f.key === edit.key);
+        if (!field || field.type === "action") throw new Error("Setting is no longer available");
+        if (field.type === "order") parseOrder(edit.value, field.items.map((i) => i.id), field.allowSpacers);
+        else if (field.type === "color" || field.type === "range") {
+          if (!validControlValue(field, edit.value)) throw new Error(field.type === "color" ? "Enter a color as #RRGGBB" : `Choose a value from ${field.min} to ${field.max}`);
+        } else if (field.type === "toggle" ? typeof edit.value !== "boolean" : typeof edit.value !== "string" || field.type === "select" && !field.options.some((o) => o.value === edit.value)) {
+          throw new Error("Invalid setting value");
+        }
+        await onChange(section.key, field.key, edit.value);
+        publish();
+      } catch (e) {
+        publish(e instanceof Error ? e.message : String(e));
+      }
+      if (options.invalidate !== false) ctx.ui.invalidate();
+    });
+  });
+  if (options.action) ctx.events.on("settings.action", (event) => {
+    if (event?.module !== ctx.moduleId) return;
+    const run = async () => {
+      try {
+        const section = getSections().find((s) => s.key === event.section);
+        const field = section?.fields.find((f) => f.key === event.key);
+        if (!field || field.type !== "action" || field.disabled) throw new Error("Action is not available");
+        await options.action(section.key, field.key);
+        publish();
+      } catch (error2) {
+        publish(error2 instanceof Error ? error2.message : String(error2));
+      }
+      if (options.invalidate !== false) ctx.ui.invalidate();
+    };
+    void run();
+  });
+  if (options.reset) ctx.events.on("settings.reset", (event) => {
+    if (event?.module !== ctx.moduleId || !options.reset) return;
+    queue = queue.then(async () => {
+      try {
+        await options.reset.run();
+        publish();
+      } catch (e) {
+        publish(e instanceof Error ? e.message : String(e));
+      }
+      if (options.invalidate !== false) ctx.ui.invalidate();
+    });
+  });
+  publish();
+  return publish;
+}
+
+// ../sdk/typography.ts
+var fontOptions = [
+  { value: "JetBrains Mono", label: "JetBrains Mono" },
+  { value: "system", label: "System font" },
+  { value: "Menlo", label: "Menlo" },
+  { value: "Monaco", label: "Monaco" }
+];
+
+// ../sdk/sha256.ts
+var K = new Uint32Array([
+  1116352408,
+  1899447441,
+  3049323471,
+  3921009573,
+  961987163,
+  1508970993,
+  2453635748,
+  2870763221,
+  3624381080,
+  310598401,
+  607225278,
+  1426881987,
+  1925078388,
+  2162078206,
+  2614888103,
+  3248222580,
+  3835390401,
+  4022224774,
+  264347078,
+  604807628,
+  770255983,
+  1249150122,
+  1555081692,
+  1996064986,
+  2554220882,
+  2821834349,
+  2952996808,
+  3210313671,
+  3336571891,
+  3584528711,
+  113926993,
+  338241895,
+  666307205,
+  773529912,
+  1294757372,
+  1396182291,
+  1695183700,
+  1986661051,
+  2177026350,
+  2456956037,
+  2730485921,
+  2820302411,
+  3259730800,
+  3345764771,
+  3516065817,
+  3600352804,
+  4094571909,
+  275423344,
+  430227734,
+  506948616,
+  659060556,
+  883997877,
+  958139571,
+  1322822218,
+  1537002063,
+  1747873779,
+  1955562222,
+  2024104815,
+  2227730452,
+  2361852424,
+  2428436474,
+  2756734187,
+  3204031479,
+  3329325298
+]);
+
+// ../sdk/runtime.ts
+function errMsg(e) {
+  return e && (e.message || String(e)) || "unknown error";
+}
+
+// ../sdk/links.ts
+function resolveWorkspaceLink(href, rootAbsolutePath, baseDir = "") {
+  let raw = String(href || "").trim().replace(/^<|>$/g, "");
+  if (!raw || raw.startsWith("#")) return null;
+  if (!rootAbsolutePath || !rootAbsolutePath.startsWith("/")) return null;
+  let absolute = false;
+  if (/^file:/i.test(raw)) {
+    const authority = /^file:\/\/([^/]*)/i.exec(raw)?.[1];
+    if (authority && authority.toLowerCase() !== "localhost") return null;
+    raw = raw.replace(/^file:(\/\/[^/]*)?/i, "");
+    absolute = true;
+  } else if (/^[a-z][a-z0-9+.-]*:/i.test(raw.replace(/:\d+(?::\d+)?(?:[?#].*)?$/, ""))) return null;
+  raw = raw.replace(/[?#].*$/, "");
+  try {
+    raw = decodeURIComponent(raw);
+  } catch {
+  }
+  raw = raw.replace(/:\d+(?::\d+)?$/, "");
+  if (!raw) return null;
+  const root = normalize(rootAbsolutePath || "");
+  let full;
+  if (absolute || raw.startsWith("/")) full = normalize(raw);
+  else if (raw.startsWith("~")) return null;
+  else full = normalize(`${root}/${baseDir}/${raw}`);
+  if (!root || full === root) return null;
+  const prefix = root === "/" ? "/" : root + "/";
+  if (!full.startsWith(prefix)) return null;
+  return full.slice(prefix.length);
+}
+function normalize(path) {
+  const out = [];
+  for (const part of path.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") out.pop();
+    else out.push(part);
+  }
+  return "/" + out.join("/");
+}
+
+// ../sdk/git.ts
+var DIFF_TAB_PREFIX = "git-diff:";
+var TASK_DIFF_TAB_PREFIX = "git-task-diff:";
+var isTaskDiffTab = (tab) => tab.startsWith(TASK_DIFF_TAB_PREFIX);
+var diffTabPath = (tab) => {
+  if (tab?.startsWith(DIFF_TAB_PREFIX)) return tab.slice(DIFF_TAB_PREFIX.length);
+  if (tab?.startsWith(TASK_DIFF_TAB_PREFIX)) return tab.slice(TASK_DIFF_TAB_PREFIX.length);
+  return null;
+};
+
+// ../sdk/ui-icons.ts
+var outline = (paths, width = 1.8) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${width}" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+var uiIcons = {
+  send: outline("<path d='m22 2-7 20-4-9-9-4Z'/><path d='M22 2 11 13'/>"),
+  paperclip: outline("<path d='m21 11-9 9a6 6 0 0 1-8.5-8.5l9-9a4 4 0 0 1 5.7 5.7l-9 9a2 2 0 0 1-2.8-2.8l8.5-8.5'/>"),
+  "sliders-horizontal": outline("<path d='M3 6h3m4 0h11M3 18h11m4 0h3'/><circle cx='8' cy='6' r='2'/><circle cx='16' cy='18' r='2'/>"),
+  "message-square": outline("<path d='M21 15a2 2 0 0 1-2 2H7l-5 5V4a2 2 0 0 1 2-2h15a2 2 0 0 1 2 2Z'/>"),
+  "graduation-cap": outline("<path d='m2 8 10-5 10 5-10 5Zm4 2v7q6 5 12 0v-7M22 8v8'/>"),
+  pencil: outline("<path d='M21.2 6.8a2.8 2.8 0 0 0-4-4L3.8 16.2 3 21l4.8-.8Z'/><path d='m15 5 4 4'/>"),
+  eraser: outline("<path d='m7 21-4.3-4.3a1 1 0 0 1 0-1.4l10-10a1 1 0 0 1 1.4 0l5.6 5.6a1 1 0 0 1 0 1.4L11 21'/><path d='M22 21H7'/><path d='m5 11 9 9'/>"),
+  trash: outline("<path d='M3 6h18'/><path d='M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6'/><path d='M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2'/><path d='M10 11v6M14 11v6'/>"),
+  copy: outline("<rect x='8' y='8' width='13' height='13' rx='2'/><path d='M16 5V3H3v13h2'/>"),
+  warning: outline("<path d='m12 3 10 18H2Z'/><path d='M12 9v5m0 3h.01'/>"),
+  terminal: outline("<rect x='3' y='4' width='18' height='16' rx='2'/><path d='m7 9 3 3-3 3m6 0h4'/>"),
+  "git-branch": outline("<circle cx='6' cy='3' r='2'/><circle cx='6' cy='20' r='2'/><circle cx='18' cy='6' r='2'/><path d='M6 5v13M18 8c0 7-12 4-12 10'/>"),
+  files: outline("<path d='M14 2H6v16h14V8Z'/><path d='M14 2v6h6M3 6v16h13'/>"),
+  folder: outline("<path d='M3 5h6l2 2h10v13H3Z'/>"),
+  refresh: outline("<path d='M20 7a8 8 0 1 0 0 10M20 3v5h-5'/>"),
+  collapse: outline("<path d='m8 8 4-4 4 4M8 16l4 4 4-4M4 12h16'/>"),
+  locate: outline("<circle cx='12' cy='12' r='7'/><circle cx='12' cy='12' r='2'/><path d='M12 2v3m0 14v3M2 12h3m14 0h3'/>"),
+  search: outline("<circle cx='10' cy='10' r='7'/><path d='m15 15 6 6'/>"),
+  x: outline("<path d='m6 6 12 12M6 18 18 6'/>"),
+  plus: outline("<path d='M12 4v16M4 12h16'/>"),
+  remote: outline("<rect x='3' y='4' width='18' height='12' rx='2'/><path d='M8 20h8M12 16v4'/>"),
+  cloud: outline("<path d='M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z'/>"),
+  "cloud-off": outline("<path d='m2 2 20 20M5.78 5.78A7 7 0 0 0 9 19h8.5a4.5 4.5 0 0 0 1.31-.2M21.53 16.05A4.5 4.5 0 0 0 17.5 10h-1.79A7 7 0 0 0 10.2 5.1'/>"),
+  "shield-alert": outline("<path d='M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1Z'/><path d='M12 8v4M12 16h.01'/>"),
+  plug: outline("<path d='M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0V7ZM12 17v5'/>"),
+  "text-search": outline("<path d='M4 6h16M4 12h7M4 18h6'/><circle cx='17' cy='15' r='3'/><path d='m19.2 17.2 2.3 2.3'/>"),
+  eye: outline("<path d='M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z'/><circle cx='12' cy='12' r='3'/>"),
+  "eye-off": outline("<path d='M10.6 5.1A10 10 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3 3.8M6.6 6.6A17 17 0 0 0 2 12s3.6 7 10 7a9.7 9.7 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2M3 3l18 18'/>"),
+  globe: outline("<circle cx='12' cy='12' r='9'/><path d='M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18'/>"),
+  "cloud-lock": outline("<path d='M17.5 17H18a4 4 0 0 0 .5-8A6 6 0 0 0 7 7.5 4.5 4.5 0 0 0 6.5 17'/><rect x='9' y='14' width='6' height='6' rx='1'/><path d='M10.5 14v-1.5a1.5 1.5 0 0 1 3 0V14'/>"),
+  lock: outline("<rect x='4' y='11' width='16' height='10' rx='2'/><path d='M8 11V7a4 4 0 0 1 8 0v4'/>"),
+  key: outline("<circle cx='8' cy='15' r='4'/><path d='m10.8 12.2 8.7-8.7M17 6l3 3M14.5 8.5l2 2'/>"),
+  check: outline("<path d='m5 12 5 5 9-11'/>"),
+  "log-out": outline("<path d='M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9'/>"),
+  external: outline("<path d='M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5'/>"),
+  sparkles: outline("<path d='M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8Z'/><path d='M19 16v4M17 18h4'/>"),
+  import: outline("<path d='M12 3v12M7 10l5 5 5-5M5 21h14'/>"),
+  task: outline("<circle cx='6' cy='3' r='2'/><circle cx='6' cy='20' r='2'/><circle cx='18' cy='6' r='2'/><path d='M6 5v13M18 8c0 7-12 4-12 10'/>")
+};
+
+// ../sdk/virtual-documents.ts
+var VIRTUAL_TAB_PREFIX = "virtual:";
+function parseVirtualTab(tab) {
+  if (!tab || !tab.startsWith(VIRTUAL_TAB_PREFIX)) return null;
+  const rest = tab.slice(VIRTUAL_TAB_PREFIX.length), slash = rest.indexOf("/");
+  if (slash <= 0 || slash === rest.length - 1) return null;
+  return { provider: rest.slice(0, slash), key: rest.slice(slash + 1) };
+}
+
+// ../sdk/languages.ts
+function languageDefinitions(plugins) {
+  const result = [];
+  for (const plugin of [...plugins].sort((a, b) => a.id.localeCompare(b.id))) {
+    if (!plugin.enabled || !plugin.active) continue;
+    const contributions = plugin.contributes?.languages;
+    if (!Array.isArray(contributions)) continue;
+    for (const lang of contributions) {
+      if (!lang || typeof lang.id !== "string" || typeof lang.grammar !== "string" || typeof lang.name !== "string") continue;
+      const extensions = Array.isArray(lang.extensions) ? lang.extensions.filter((v) => typeof v === "string" && v.length) : [];
+      const filenames = Array.isArray(lang.filenames) ? lang.filenames.filter((v) => typeof v === "string" && v.length) : [];
+      if (!extensions.length && !filenames.length) continue;
+      const server = lang.server;
+      const validServer = server && typeof server.id === "string" && typeof server.executable === "string" && Array.isArray(server.args) && server.args.every((v) => typeof v === "string") && typeof server.installHint === "string";
+      result.push({ ...lang, extensions, filenames, server: validServer ? server : void 0, pluginId: plugin.id });
+    }
+  }
+  return result;
+}
+function languageForPath(languages2, path) {
+  const name = path.replace(/\\/g, "/").split("/").pop().toLowerCase();
+  return languages2.find((l) => l.filenames?.some((n) => n.toLowerCase() === name)) || languages2.find((l) => l.extensions?.some((ext) => name.endsWith("." + ext.toLowerCase()))) || null;
+}
+function relativeFile(path) {
+  if (!path || /^[\\/]|^[a-z]:/i.test(path) || path.includes("\0")) throw new Error("Expected a workspace-relative file");
+  const parts = [];
+  for (const part of path.replace(/\\/g, "/").split("/")) {
+    if (part === "..") {
+      if (!parts.length) throw new Error("File escapes the workspace");
+      parts.pop();
+    } else if (part && part !== ".") parts.push(part);
+  }
+  if (!parts.length) throw new Error("Expected a file");
+  return parts.join("/");
+}
+function fileUri(path) {
+  const normalized = path.replace(/\\/g, "/");
+  if (!normalized.startsWith("/") && !/^[a-z]:\//i.test(normalized)) throw new Error("Expected an absolute path");
+  const absolute = normalized.startsWith("/") ? normalized : "/" + normalized;
+  return "file://" + absolute.split("/").map((s, i) => i === 1 && /^[a-z]:$/i.test(s) ? s : encodeURIComponent(s)).join("/");
+}
+function workspacePath(root, uri) {
+  const match = /^file:\/\/(?:localhost)?(\/[^?#]*)$/i.exec(uri);
+  if (!match) return null;
+  let path;
+  try {
+    path = decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+  const base = root.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (/^[a-z]:\//i.test(base) && /^\/[a-z]:\//i.test(path)) path = path.slice(1);
+  if (!path.startsWith(base + "/")) return null;
+  try {
+    return relativeFile(path.slice(base.length + 1));
+  } catch {
+    return null;
+  }
+}
+function validPosition(p) {
+  return p && Number.isInteger(p.line) && p.line >= 0 && Number.isInteger(p.character) && p.character >= 0;
+}
+
+// modules/ui/viewer/src/markdown.ts
+function shellBlocks(text) {
+  const blocks = [];
+  let fence = null;
+  let offset = 0;
+  for (const line of text.split(/(?<=\n)/)) {
+    const body = line.replace(/\r?\n$/, "");
+    if (fence) {
+      const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(body);
+      if (close && close[1][0] === fence.mark && close[1].length >= fence.length) {
+        if (["sh", "shell", "bash", "zsh"].includes(fence.language)) blocks.push({
+          start: fence.start,
+          end: offset + line.length,
+          language: fence.language,
+          code: text.slice(fence.body, offset).split("\n").map((line2) => line2.replace(new RegExp(`^ {0,${fence.indent}}`), "")).join("\n")
+        });
+        fence = null;
+      }
+    } else {
+      const open = /^( {0,3})(`{3,}|~{3,})([^\r\n]*)$/.exec(body);
+      if (open && !(open[2][0] === "`" && open[3].includes("`"))) fence = { start: offset, body: offset + line.length, mark: open[2][0], length: open[2].length, language: open[3].trim().split(/\s+/)[0].toLowerCase(), indent: open[1].length };
+    }
+    offset += line.length;
+  }
+  return blocks;
+}
+
+// modules/ui/viewer/src/assist.ts
+var KIND_ICONS = {
+  2: ["m", "#e0675c"],
+  3: ["m", "#e0675c"],
+  4: ["m", "#e0675c"],
+  // method, function, constructor
+  5: ["f", "#e39b38"],
+  10: ["f", "#e39b38"],
+  // field, property
+  6: ["v", "#8a94a6"],
+  7: ["c", "#4a8fe0"],
+  8: ["i", "#3dab6c"],
+  9: ["p", "#8a94a6"],
+  13: ["e", "#a77bd6"],
+  20: ["e", "#a77bd6"],
+  21: ["k", "#a77bd6"],
+  22: ["s", "#4a8fe0"],
+  14: ["k", "#8a94a6"],
+  15: ["t", "#8a94a6"],
+  25: ["T", "#4a8fe0"]
+};
+var utf8 = new TextEncoder();
+var utf8Length = (text) => utf8.encode(text).length;
+var simpleType = (type) => type.replace(/<.*$/s, "").replace(/\[\]/g, "").trim().split(".").pop() || "";
+function declaringType(item) {
+  const m = /^([\w$.]+(?:<[^>]*>)?)\.[\w$]+\s*(?:\(|:|$)/.exec(String(item?.detail ?? ""));
+  return m ? simpleType(m[1]) : null;
+}
+function receiverAt(line, character) {
+  const before = line.slice(0, character);
+  const m = /([\w$]+)\s*(\((?:[^()]|\([^()]*\))*\))?\s*\.\s*[\w$]*$/.exec(before);
+  return m ? { name: m[1], character: m.index } : null;
+}
+function enclosingType(text, offset) {
+  let found = null;
+  for (const m of text.slice(0, offset).matchAll(/\b(?:class|interface|enum|record)\s+([\w$]+)/g)) found = m[1];
+  return found;
+}
+function hoverType(hover2) {
+  const code = hoverParts(hover2).find((p) => p.code !== void 0)?.code?.trim().replace(/\s+-\s+.*$/s, "");
+  if (!code) return null;
+  const paren = code.indexOf("(");
+  const head = paren >= 0 ? code.slice(0, paren) : code;
+  const split = lastTopLevelSpace(head);
+  if (split < 0) return null;
+  const type = head.slice(0, split).replace(/^(?:(?:public|protected|private|static|final|abstract|default|synchronized)\s+)*/, "");
+  return simpleType(type) || null;
+}
+function shapeCompletions(result, owner, originals, keyOf) {
+  const items = Array.isArray(result) ? result : Array.isArray(result?.items) ? result.items : [];
+  originals.clear();
+  const shaped = items.map((original, index) => {
+    const name = String(original.filterText || original.label || "").replace(/\(.*$/s, "").replace(/ [-:] .*$/, "").trim() || String(original.label);
+    const params = original.labelDetails?.detail ?? (/^[^(]*(\(.*?\))/.exec(String(original.label))?.[1] || "");
+    const typed = / : (.+)$/.exec(String(original.label))?.[1] ?? / : (.+)$/.exec(String(original.detail ?? ""))?.[1];
+    const pkg = / - (.+)$/.exec(String(original.label))?.[1];
+    const right = original.labelDetails?.description || typed || pkg || (original.detail && String(original.detail).length <= 48 ? original.detail : "");
+    const declaring = declaringType(original);
+    const own = !!owner && declaring === owner;
+    const icon2 = KIND_ICONS[original.kind];
+    const item = {
+      ...original,
+      label: `${name}${params}`,
+      detail: right || void 0,
+      filterText: original.filterText || name,
+      labelDetails: right ? { description: right } : void 0,
+      data: { presentation: { bold: own, mutedFrom: utf8Length(name), ...icon2 ? { icon: { text: icon2[0], color: icon2[1], background: icon2[1] + "1f" } } : {} }, original: index },
+      // Without an explicit edit the menu inserts the label; keep inserting just the name.
+      ...!original.textEdit && !original.insertText ? { insertText: name } : {}
+    };
+    originals.set(keyOf(item), original);
+    return item;
+  });
+  const rank = (item) => item.data.presentation.bold ? 0 : 1;
+  shaped.sort((a, b) => rank(a) - rank(b) || String(a.sortText ?? a.label).localeCompare(String(b.sortText ?? b.label)) || a.data.original - b.data.original);
+  return Array.isArray(result) ? shaped : { ...result, items: shaped };
+}
+function hoverParts(hover2) {
+  const contents = hover2?.contents;
+  const one = (c) => typeof c === "string" ? [{ markdown: c }] : c && typeof c.value === "string" ? c.kind === "markdown" || c.kind === "plaintext" ? [{ markdown: c.value }] : [{ code: c.value, language: c.language }] : [];
+  return Array.isArray(contents) ? contents.flatMap(one) : one(contents);
+}
+function lastTopLevelSpace(text) {
+  let depth = 0, at = -1;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === "<" || c === "(" || c === "[") depth++;
+    else if (c === ">" || c === ")" || c === "]") depth = Math.max(0, depth - 1);
+    else if (c === " " && depth === 0) at = i;
+  }
+  return at;
+}
+function splitTopLevel(text) {
+  const out = [];
+  let depth = 0, start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === "<" || c === "(" || c === "[") depth++;
+    else if (c === ">" || c === ")" || c === "]") depth = Math.max(0, depth - 1);
+    else if (c === "," && depth === 0) {
+      out.push(text.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  const last = text.slice(start).trim();
+  if (last) out.push(last);
+  return out;
+}
+function packageOf(uri) {
+  const path = decodeURIComponent(uri.replace(/^file:\/\//, "").replace(/#.*$/, ""));
+  const m = /\/(?:src\/(?:main|test)\/java|src\/(?:main|test)\/kotlin|java|src)\/(.+)\/[^/]+\.\w+$/.exec(path);
+  return m ? m[1].replace(/\//g, ".") : null;
+}
+function shapeDocs(markdown) {
+  const lines2 = markdown.split("\n"), out = [];
+  for (let i = 0; i < lines2.length; i++) {
+    const section = /^\s*\*\s+\*\*(.+?):\*\*\s*$/.exec(lines2[i]);
+    if (!section) {
+      out.push(lines2[i]);
+      continue;
+    }
+    const entries = [];
+    while (i + 1 < lines2.length && /^\s{2,}\*\s+/.test(lines2[i + 1])) {
+      const entry = lines2[++i].replace(/^\s+\*\s+/, "");
+      const named = /^\*\*([\w$<>]+)\*\*\s*(.*)$/.exec(entry);
+      entries.push(named ? `\`${named[1]}\` – ${named[2]}` : entry);
+    }
+    const label = section[1] === "Parameters" ? "Params" : section[1];
+    if (!entries.length) continue;
+    out.push("", [`**${label}:** ${entries[0]}`, ...entries.slice(1)].join("\\\n"));
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+function declarationAt(text, line, declared) {
+  const lines2 = text.split("\n");
+  let statement = "";
+  for (let i = line - 1; i >= 0 && i < lines2.length && i < line + 4; i++) {
+    statement += (statement ? " " : "") + lines2[i].trim();
+    if (statement.includes(";") || statement.endsWith("{")) break;
+  }
+  statement = statement.replace(/;.*$/s, "").replace(/\s*\{$/, "").replace(/\s+/g, " ").trim();
+  const at = statement.indexOf(declared);
+  if (at < 0 || !statement.slice(at + declared.length).trimStart().startsWith("=") || statement.length - at > 300) return null;
+  return statement.slice(at);
+}
+function shapeHover(hover2, context = {}) {
+  const parts = hoverParts(hover2);
+  if (!parts.some((p) => (p.code ?? p.markdown ?? "").trim())) return null;
+  const codePart = parts.find((p) => p.code !== void 0);
+  if (!codePart?.code?.trim()) return hover2;
+  const code = codePart.code.trim();
+  const language = codePart.language || context.language || "";
+  const docs = [];
+  let source = null;
+  for (const p of parts) {
+    if (p.markdown === void 0 || !p.markdown.trim()) continue;
+    const text = p.markdown.trim();
+    const s = /^Source:\s*\*?\[([^\]]+)\]\(([^)]+)\)\*?$/.exec(text);
+    const plain = /^Source:\s*\*?([^*\n]+?)\*?$/.exec(text);
+    if (s) source = { name: s[1], uri: s[2], line: Number(/#(\d+)$/.exec(s[2])?.[1] || 0) };
+    else if (plain) source = { name: plain[1].trim(), uri: "", line: 0 };
+    else docs.push(shapeDocs(p.markdown));
+  }
+  if (/^[a-z_$][\w$]*$/.test(code) && !docs.length) return null;
+  let header = "", signature = code, context2 = "";
+  const paren = code.indexOf("(");
+  const variable = /^(.+?)\s+-\s+(.+)$/.exec(code);
+  if (paren > 0 && code.endsWith(")") && !variable) {
+    const head = code.slice(0, paren), split = lastTopLevelSpace(head);
+    const ret = split >= 0 ? head.slice(0, split) : "";
+    const qualified = head.slice(split + 1);
+    const dot = qualified.lastIndexOf(".");
+    const owner = dot > 0 ? qualified.slice(0, dot) : "";
+    const name = qualified.slice(dot + 1);
+    const params = splitTopLevel(code.slice(paren + 1, -1));
+    const pkg = owner && !owner.includes(".") && source ? packageOf(source.uri) : null;
+    header = owner ? pkg ? `${pkg}.${owner}` : owner : "";
+    signature = `${ret ? ret + " " : ""}${name}(${params.length ? "\n" + params.map((p) => "    " + p).join(",\n") + "\n" : ""})`;
+  } else if (variable) {
+    signature = variable[1];
+    context2 = variable[2];
+    if (source && context.text && context.path && source.uri.replace(/#.*$/, "").endsWith("/" + context.path)) {
+      signature = declarationAt(context.text, source.line, signature) || signature;
+    }
+  }
+  const project = source?.name.replace(/_[0-9a-f]{6,}$/i, "");
+  const blocks = [
+    ...header ? [`*${header}*`] : [],
+    "```" + language + "\n" + signature + "\n```",
+    ...context2 ? [`*in ${context2}*`] : [],
+    ...docs.length ? ["---", ...docs] : [],
+    ...project ? ["---", `*${project}*`] : []
+  ];
+  return { ...hover2?.range ? { range: hover2.range } : {}, contents: { kind: "markdown", value: blocks.join("\n\n") } };
+}
+
+// ../sdk/text-diff.ts
+function myers(a, b, maxD) {
+  const n = a.length, m = b.length, max = n + m, offset = max;
+  maxD = Math.min(maxD, Math.floor(8e6 / (2 * max + 2)));
+  const v = new Int32Array(2 * max + 2);
+  const trace = [];
+  for (let d = 0; d <= Math.min(max, maxD); d++) {
+    trace.push(v.slice());
+    for (let k = -d; k <= d; k += 2) {
+      let x = k === -d || k !== d && v[offset + k - 1] < v[offset + k + 1] ? v[offset + k + 1] : v[offset + k - 1] + 1;
+      let y = x - k;
+      while (x < n && y < m && a[x] === b[y]) {
+        x++;
+        y++;
+      }
+      v[offset + k] = x;
+      if (x >= n && y >= m) {
+        const ops = [];
+        let cx = n, cy = m;
+        for (let dd = d; dd > 0; dd--) {
+          const pv = trace[dd], kk = cx - cy;
+          const prevK = kk === -dd || kk !== dd && pv[offset + kk - 1] < pv[offset + kk + 1] ? kk + 1 : kk - 1;
+          const px = pv[offset + prevK], py = px - prevK;
+          while (cx > px && cy > py) {
+            ops.push({ kind: " ", line: a[--cx] });
+            cy--;
+          }
+          if (cx === px) ops.push({ kind: "+", line: b[--cy] });
+          else ops.push({ kind: "-", line: a[--cx] });
+        }
+        while (cx > 0 && cy > 0) {
+          ops.push({ kind: " ", line: a[--cx] });
+          cy--;
+        }
+        return ops.reverse();
+      }
+    }
+  }
+  return null;
+}
+function diffLines(a, b, maxD = 4e3) {
+  let start = 0;
+  while (start < a.length && start < b.length && a[start] === b[start]) start++;
+  let endA = a.length, endB = b.length;
+  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
+    endA--;
+    endB--;
+  }
+  const midA = a.slice(start, endA), midB = b.slice(start, endB);
+  const mid = myers(midA, midB, maxD) ?? [...midA.map((line) => ({ kind: "-", line })), ...midB.map((line) => ({ kind: "+", line }))];
+  return [...a.slice(0, start).map((line) => ({ kind: " ", line })), ...mid, ...a.slice(endA).map((line) => ({ kind: " ", line }))];
+}
+
+// modules/ui/viewer/src/js-declarations.ts
+var identifier = /^[$\p{ID_Start}][$\u200c\u200d\p{ID_Continue}]*$/u;
+var tokenPattern = /[$\p{ID_Start}][$\u200c\u200d\p{ID_Continue}]*|\d[\w.]*(?:[eE][+-]\d+)?|=>|\?\.|\+\+|--|&&|\|\||\?\?|[^\s]/uy;
+var regexLiteral = /\/(?:\\[^\r\n]|\[(?:\\[^\r\n]|[^\]\\\r\n])*\]|[^/\\[\r\n])+\/[a-z]*/y;
+var tagName = /[\w$][\w$.:-]*/y;
+var controls = /* @__PURE__ */ new Set(["if", "while", "for", "with", "switch", "catch"]);
+var expressionPrefix = /* @__PURE__ */ new Set(["", "(", "[", "{", "=", ":", ",", ";", "!", "~", "?", "&&", "||", "??", "+", "-", "*", "%", "&", "|", "^", "/", "<", ">", "=>", "return", "throw", "case", "yield", "await", "void", "typeof", "delete", "in", "of", "else", "do"]);
+var closeFor = { "(": ")", "[": "]", "{": "}" };
+function tokenize(text, jsx) {
+  const word = new RegExp(tokenPattern);
+  const regex = new RegExp(regexLiteral);
+  const tag = new RegExp(tagName);
+  const matches = (pattern, at) => {
+    pattern.lastIndex = at;
+    return pattern.exec(text)?.[0];
+  };
+  const spaces = (at) => {
+    while (at < text.length && /\s/.test(text[at])) at++;
+    return at;
+  };
+  const quotedEnd = (at, quote) => {
+    let i = at + 1;
+    for (; i < text.length && text[i] !== "\n" && text[i] !== "\r"; i++) {
+      if (text[i] === "\\") {
+        i += text.startsWith("\r\n", i + 1) ? 2 : 1;
+        continue;
+      }
+      if (text[i] === quote) return i + 1;
+    }
+    return Math.min(i, text.length);
+  };
+  function readTokens(at, interpolation, depth) {
+    const tokens = [];
+    const groups = [];
+    let afterControl = false, afterBlock = false;
+    while ((at = spaces(at)) < text.length) {
+      const c = text[at], next = text[at + 1];
+      if (c === "}" && interpolation && !groups.length) return { tokens, end: at + 1 };
+      if (c === "/" && next === "/" || at === 0 && c === "#" && next === "!") {
+        while (at < text.length && !/[\r\n]/.test(text[at])) at++;
+        continue;
+      }
+      if (c === "/" && next === "*") {
+        const end2 = text.indexOf("*/", at + 2);
+        at = end2 === -1 ? text.length : end2 + 2;
+        continue;
+      }
+      const previous = tokens[tokens.length - 1]?.value ?? "";
+      const startsExpression = afterControl || afterBlock || expressionPrefix.has(previous);
+      const statementBlock = c === "{" && (afterControl || ["else", "try", "finally", "do"].includes(previous));
+      afterControl = afterBlock = false;
+      let value = matches(word, at) ?? c;
+      let end = at + value.length;
+      if (c === "'" || c === '"') {
+        end = quotedEnd(at, c);
+        value = "string";
+      } else if (c === "`") {
+        end = templateEnd(at, depth);
+        value = "literal";
+      } else if (startsExpression && c === "/") {
+        const literal = matches(regex, at);
+        if (literal) {
+          end = at + literal.length;
+          value = "literal";
+        }
+      } else if (startsExpression && jsx && c === "<" && depth < 64) {
+        const element = jsxEnd(at, depth + 1);
+        if (element !== void 0) {
+          end = element;
+          value = "literal";
+        }
+      }
+      const index = tokens.length;
+      const token = { value, start: at, end };
+      if (Object.prototype.hasOwnProperty.call(closeFor, value)) {
+        if (statementBlock) token.statementBlock = true;
+        groups.push(index);
+      } else if (groups.length) {
+        const openIndex = groups[groups.length - 1];
+        const open = tokens[openIndex];
+        if (closeFor[open.value] === value) {
+          groups.pop();
+          open.pair = index;
+          token.pair = openIndex;
+          afterBlock = value === "}" && open.statementBlock === true;
+          afterControl = value === ")" && ![".", "?."].includes(tokens[openIndex - 2]?.value) && (controls.has(tokens[openIndex - 1]?.value) || tokens[openIndex - 1]?.value === "await" && tokens[openIndex - 2]?.value === "for");
+        }
+      }
+      tokens.push(token);
+      at = end;
+    }
+    return { tokens, end: at };
+  }
+  function templateEnd(at, depth) {
+    if (depth >= 64) return text.length;
+    for (let i = at + 1; i < text.length; ) {
+      if (text[i] === "`") return i + 1;
+      if (text[i] === "\\") i += 2;
+      else if (text.startsWith("${", i)) i = readTokens(i + 2, true, depth + 1).end;
+      else i++;
+    }
+    return text.length;
+  }
+  function jsxEnd(at, depth) {
+    if (depth >= 64) return;
+    const name = text[at + 1] === ">" ? "" : matches(tag, at + 1);
+    if (name === void 0) return;
+    let i = at + 1 + name.length;
+    while ((i = spaces(i)) < text.length && text[i] !== ">") {
+      if (text.startsWith("/>", i)) return i + 2;
+      if (text[i] === "{") {
+        i = readTokens(i + 1, true, depth + 1).end;
+        continue;
+      }
+      const attr = matches(tag, i);
+      if (!attr) return;
+      i = spaces(i + attr.length);
+      if (text[i] !== "=") continue;
+      i = spaces(i + 1);
+      if (text[i] === '"' || text[i] === "'") {
+        const end = text.indexOf(text[i], i + 1);
+        if (end === -1) return;
+        i = end + 1;
+      } else if (text[i] === "{") {
+        i = readTokens(i + 1, true, depth + 1).end;
+      } else return;
+    }
+    for (i++; i < text.length; ) {
+      if (text.startsWith("</", i)) {
+        const end = spaces(i + 2 + name.length);
+        return text.startsWith(name, i + 2) && text[end] === ">" ? end + 1 : void 0;
+      }
+      if (text[i] === "<") {
+        const end = jsxEnd(i, depth + 1);
+        if (end === void 0) return;
+        i = end;
+      } else if (text[i] === "{") {
+        i = readTokens(i + 1, true, depth + 1).end;
+      } else i++;
+    }
+    return void 0;
+  }
+  return readTokens(0, false, 0).tokens;
+}
+var declarationModifiers = /* @__PURE__ */ new Set(["export", "default", "declare", "abstract", "async"]);
+var memberModifiers = /* @__PURE__ */ new Set(["public", "protected", "private", "static", "abstract", "declare", "override", "readonly", "accessor", "async", "get", "set"]);
+var continuation = /* @__PURE__ */ new Set([".", "?.", "(", "[", "?", ":", ",", ";", "+", "-", "*", "/", "%", "&", "|", "^", "&&", "||", "??", ">", "<", "=", "as", "satisfies", "in", "instanceof"]);
+function javascriptDeclarations(text, jsx = false) {
+  if (text.length > 2e6) return [];
+  const tokens = tokenize(text, jsx);
+  const lineStarts = [0];
+  for (let i = 0; i < text.length; i++) if (text[i] === "\n") lineStarts.push(i + 1);
+  const lineOf = (offset) => {
+    let lo = 0, hi = lineStarts.length - 1;
+    while (lo < hi) {
+      const mid = lo + hi + 1 >> 1;
+      if (lineStarts[mid] <= offset) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo;
+  };
+  const value = (i) => tokens[i]?.value ?? "";
+  const isName = (i) => identifier.test(value(i));
+  const group = (i) => {
+    const pair = tokens[i]?.pair;
+    return pair !== void 0 && pair > i ? pair + 1 : i + 1;
+  };
+  const newLine = (i) => i > 0 && i < tokens.length && lineOf(tokens[i].start) > lineOf(tokens[i - 1].end - 1);
+  const endsExpression = (i) => !expressionPrefix.has(value(i)) && !continuation.has(value(i));
+  const statementStart = (i) => i === 0 || ["{", "}", ";"].includes(value(i - 1)) || newLine(i) && endsExpression(i - 1) && !continuation.has(value(i));
+  function afterGenerics(i) {
+    if (value(i) !== "<") return i;
+    let depth = 1;
+    for (let j = i + 1; j < tokens.length; j = group(j)) {
+      if (value(j) === "<") depth++;
+      else if (value(j) === ">" && --depth === 0) return j + 1;
+      else if (value(j) === ";" || value(j) === "}") break;
+    }
+    return i;
+  }
+  function afterType(i, terminator) {
+    if (value(i) !== ":") return i;
+    for (let j = i + 1; j < tokens.length; ) {
+      const v = value(j);
+      if (v === terminator) {
+        if (v !== "{" || j > i + 1 && !["|", "&", "?", ":", "extends"].includes(value(j - 1))) return j;
+      }
+      if (v === ";" || v === "}" || terminator === "=" && v === ",") return j;
+      if (v === "{") {
+        if (group(j) === j + 1) return j;
+      }
+      const next = v === "<" ? afterGenerics(j) : j;
+      j = next === j ? group(j) : next;
+    }
+    return tokens.length;
+  }
+  const block = (kind, name, body) => ({ kind, name, body, end: group(body) - 1 });
+  function functionHeader(i, fallback, anonymous = false) {
+    let name = i + 1;
+    if (value(name) === "*") name++;
+    if (!isName(name) && fallback < 0 && !anonymous) return;
+    const params = afterGenerics(isName(name) ? name + 1 : name);
+    if (value(params) !== "(" || group(params) === params + 1) return;
+    const body = afterType(group(params), "{");
+    if (value(body) === "{") return block("method", fallback >= 0 ? fallback : isName(name) ? name : i, body);
+  }
+  function classHeader(i) {
+    const name = isName(i + 1) && value(i + 1) !== "extends" ? i + 1 : i;
+    for (let body = afterGenerics(name + 1); body < tokens.length; ) {
+      const v = value(body);
+      if (v === "{") return block("type", name, body);
+      if (["}", ";", "=", ")"].includes(v) || body > name + 1 && statementStart(body)) return;
+      const next = v === "<" ? afterGenerics(body) : body;
+      body = next === body ? group(body) : next;
+    }
+  }
+  function constHeader(i) {
+    const name = i + 1;
+    if (!isName(name)) return;
+    const equals = afterType(name + 1, "=");
+    if (value(equals) !== "=") return;
+    let init = equals + 1;
+    if (value(init) === "async" && !newLine(init + 1) && value(init + 1) !== "=>") init++;
+    if (value(init) === "function") return functionHeader(init, name);
+    const params = afterGenerics(init);
+    const arrow = value(params) === "(" && group(params) > params + 1 ? afterType(group(params), "=>") : isName(params) ? params + 1 : params;
+    if (value(arrow) !== "=>" || newLine(arrow)) return;
+    if (value(arrow + 1) === "{") return block("method", name, arrow + 1);
+    let end = arrow + 1;
+    for (; end < tokens.length && ![";", "}", ")", "]", ","].includes(value(end)); end = group(end)) {
+      if (end > arrow + 1 && newLine(end) && endsExpression(end - 1) && !continuation.has(value(end))) break;
+    }
+    return { kind: "method", name, body: -1, end: value(end) === ";" ? end : end - 1 };
+  }
+  function memberHeader(i) {
+    let name = i;
+    while (memberModifiers.has(value(name)) && !["(", "<", "?", "!", ";", "=", ":", "}"].includes(value(name + 1))) name++;
+    if (value(name) === "*") name++;
+    if (value(name) === "#") name++;
+    const nameEnd = value(name) === "[" ? group(name) : name + 1;
+    if (!isName(name) && !["string", "["].includes(value(name)) && !/^\d/.test(value(name))) return;
+    const params = afterGenerics(value(nameEnd) === "?" ? nameEnd + 1 : nameEnd);
+    if (value(params) !== "(" || group(params) === params + 1) return;
+    const body = afterType(group(params), "{");
+    if (value(body) === "{") return block("method", name, body);
+    if (value(body) === ";") return { kind: "method", name, body: -1, end: body };
+  }
+  const declarations = [];
+  const blocks = [];
+  let classBody = -1;
+  for (let i = 0; i < tokens.length; i++) {
+    const v = value(i);
+    if (v === "{") {
+      blocks.push(i === classBody);
+      continue;
+    }
+    if (v === "}") {
+      blocks.pop();
+      continue;
+    }
+    const inClass = blocks[blocks.length - 1];
+    const startsMember = inClass && (statementStart(i) || v === "[" && newLine(i));
+    if (v === "(" || v === "[" && !startsMember) {
+      i = group(i) - 1;
+      continue;
+    }
+    if (!startsMember && !statementStart(i)) continue;
+    let header;
+    if (inClass) {
+      header = memberHeader(i);
+    } else {
+      let keyword = i;
+      while (declarationModifiers.has(value(keyword)) && !(value(keyword) === "async" && newLine(keyword + 1))) keyword++;
+      switch (value(keyword)) {
+        case "function":
+          header = functionHeader(keyword, -1, value(i) === "export" && value(i + 1) === "default");
+          break;
+        case "class":
+          header = classHeader(keyword);
+          break;
+        case "const":
+          header = constHeader(keyword);
+          break;
+      }
+    }
+    if (!header) {
+      if (v === "[") i = group(i) - 1;
+      continue;
+    }
+    const name = tokens[header.name];
+    const label = name.value === "[" ? text.slice(name.start, tokens[group(header.name) - 1].end) : name.value === "string" ? text.slice(name.start, name.end) : name.value;
+    declarations.push({ kind: header.kind, name: label, line: lineOf(name.start), start: lineOf(tokens[i].start), end: lineOf(tokens[header.end].end - 1) });
+    if (header.kind === "type") classBody = header.body;
+    i = header.body < 0 ? header.end : header.body - 1;
+  }
+  return declarations;
+}
+
+// modules/ui/viewer/src/declarations.ts
+function blankJava(text) {
+  const out = text.split("");
+  const blank = (from, to) => {
+    for (let i2 = from; i2 < to && i2 < out.length; i2++) if (out[i2] !== "\n") out[i2] = " ";
+  };
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i], next = text[i + 1];
+    if (c === "/" && next === "/") {
+      const end = text.indexOf("\n", i);
+      blank(i, end < 0 ? text.length : end);
+      i = end < 0 ? text.length : end;
+    } else if (c === "/" && next === "*") {
+      const end = text.indexOf("*/", i + 2);
+      const stop = end < 0 ? text.length : end + 2;
+      blank(i, stop);
+      i = stop;
+    } else if (c === '"' && text.startsWith('"""', i)) {
+      const end = text.indexOf('"""', i + 3);
+      const stop = end < 0 ? text.length : end + 3;
+      blank(i + 1, stop - 1);
+      i = stop;
+    } else if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < text.length && text[j] !== c && text[j] !== "\n") j += text[j] === "\\" ? 2 : 1;
+      blank(i + 1, j);
+      i = j + 1;
+    } else i++;
+  }
+  return out.join("");
+}
+var NOT_METHODS = /* @__PURE__ */ new Set(["if", "for", "while", "switch", "catch", "synchronized", "try", "else", "do", "return", "new", "throw", "case", "assert", "finally", "yield"]);
+var TYPE = /\b(class|interface|enum|record|@\s*interface)\s+([A-Za-z_$][\w$]*)/;
+var METHOD = /([A-Za-z_$][\w$]*)\s*\(([^()]|\([^()]*\))*\)\s*(\[\s*\]\s*)*(throws\s+[\w$.<>,\s]+)?\s*$/;
+function javaDeclarations(text) {
+  if (text.length > 2e6) return [];
+  const src = blankJava(text);
+  const lineStarts = [0];
+  for (let i = 0; i < src.length; i++) if (src[i] === "\n") lineStarts.push(i + 1);
+  const lineOf = (offset) => {
+    let lo = 0, hi = lineStarts.length - 1;
+    while (lo < hi) {
+      const mid = lo + hi + 1 >> 1;
+      if (lineStarts[mid] <= offset) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo;
+  };
+  const out = [];
+  const stack = [];
+  let headerStart = 0, parens = 0;
+  const header = (end) => {
+    const raw = src.slice(headerStart, end);
+    const lead = raw.length - raw.trimStart().length;
+    return { text: raw.trim(), start: headerStart + lead };
+  };
+  const declare = (end, body) => {
+    const h = header(end);
+    if (!h.text) return null;
+    const inType = stack.length === 0 || stack[stack.length - 1].type;
+    const type = TYPE.exec(h.text);
+    if (type && body) {
+      const at2 = h.start + type.index + type[0].length - type[2].length;
+      return { kind: "type", name: type[2], line: lineOf(at2), start: lineOf(h.start), end: lineOf(end) };
+    }
+    if (!inType || stack.length === 0 || /=|->|\bnew\s/.test(h.text)) return null;
+    const method = METHOD.exec(h.text);
+    if (!method || NOT_METHODS.has(method[1])) return null;
+    const before = h.text.slice(0, method.index).trim();
+    const owner = [...stack].reverse().find((b) => b.decl?.kind === "type")?.decl?.name;
+    if (!before && method[1] !== owner) return null;
+    const at = h.start + method.index;
+    return { kind: "method", name: method[1], line: lineOf(at), start: lineOf(h.start), end: lineOf(end) };
+  };
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (c === "(") parens++;
+    else if (c === ")") parens = Math.max(0, parens - 1);
+    else if (parens > 0) continue;
+    else if (c === "{") {
+      const decl = declare(i, true);
+      stack.push({ type: decl?.kind === "type", decl });
+      headerStart = i + 1;
+    } else if (c === "}") {
+      const block = stack.pop();
+      if (block?.decl) {
+        block.decl.end = lineOf(i);
+        out.push(block.decl);
+      }
+      headerStart = i + 1;
+    } else if (c === ";") {
+      const decl = declare(i, false);
+      if (decl) out.push(decl);
+      headerStart = i + 1;
+    }
+  }
+  return out.sort((a, b) => a.line - b.line || (a.kind === b.kind ? a.start - b.start : a.kind === "type" ? -1 : 1));
+}
+var scanners = /* @__PURE__ */ new Map([
+  ["java", javaDeclarations],
+  ["javascript", (text) => javascriptDeclarations(text, true)],
+  // JS, JSX, MJS and CJS
+  ["typescript", javascriptDeclarations],
+  ["tsx", (text) => javascriptDeclarations(text, true)]
+]);
+var declarationsFor = (grammar, text) => scanners.get(grammar ?? "")?.(text) ?? [];
+var hasDeclarations = (grammar) => scanners.has(grammar ?? "");
+
+// modules/ui/viewer/src/authorship.ts
+var blames = /* @__PURE__ */ new Map();
+var pending = /* @__PURE__ */ new Map();
+var generation = 0;
+var key = (workspaceId2, path) => `${workspaceId2}|${path}`;
+function forgetBlames() {
+  blames.clear();
+  generation++;
+}
+async function refreshBlame(ctx, workspaceId2, path, text) {
+  const k = key(workspaceId2, path), mine = ++generation;
+  pending.set(k, mine);
+  try {
+    const r = await ctx.modules.call("git", "blame", { workspaceId: workspaceId2, path, text }, { timeoutMs: 6e4 });
+    if (pending.get(k) !== mine) return false;
+    blames.delete(k);
+    blames.set(k, { text, commits: r.commits || [], lines: r.lines || [], tracked: !!r.tracked });
+    while (blames.size > 24) blames.delete(blames.keys().next().value);
+    return true;
+  } catch (e) {
+    ctx.log.warn(`blame ${path}: ${String(e)}`);
+    return false;
+  } finally {
+    if (pending.get(k) === mine) pending.delete(k);
+  }
+}
+function currentLines(b, text) {
+  if (b.text === text) return b.lines;
+  const before = b.text.split("\n"), after = text.split("\n");
+  if (before.length > 2e4 || after.length > 2e4) return [];
+  const out = [];
+  let old = 0;
+  for (const op of diffLines(before, after)) {
+    if (op.kind === " ") out.push(b.lines[old++] ?? -1);
+    else if (op.kind === "+") out.push(-1);
+    else old++;
+  }
+  return out;
+}
+function ago(seconds) {
+  const s = Math.max(0, Date.now() / 1e3 - seconds);
+  const unit = (n, word) => `${n} ${word}${n === 1 ? "" : "s"} ago`;
+  if (s < 3600) return s < 120 ? "just now" : unit(Math.floor(s / 60), "minute");
+  if (s < 86400) return unit(Math.floor(s / 3600), "hour");
+  if (s < 86400 * 30) return unit(Math.floor(s / 86400), "day");
+  if (s < 86400 * 365) return unit(Math.floor(s / (86400 * 30)), "month");
+  return unit(Math.floor(s / (86400 * 365)), "year");
+}
+var memo = null;
+function declarationAnnotations(workspaceId2, path, grammar, text) {
+  if (typeof text !== "string") return [];
+  const b = blames.get(key(workspaceId2, path));
+  if (!b?.tracked) return [];
+  const args = [workspaceId2, path, grammar, text, b, Math.floor(Date.now() / 6e4)];
+  if (memo && memo.args.every((v, i) => v === args[i])) return memo.result;
+  const result = compute(b, grammar, text);
+  memo = { args, result };
+  return result;
+}
+function compute(b, grammar, text) {
+  const declarations = declarationsFor(grammar, text);
+  if (!declarations.length) return [];
+  const lines2 = currentLines(b, text);
+  if (!lines2.length) return [];
+  return declarations.map((d) => {
+    let latest = null, uncommitted = false;
+    const authors = /* @__PURE__ */ new Set();
+    for (let line = d.start; line <= d.end; line++) {
+      const i = lines2[line];
+      if (i === void 0 || i < 0) {
+        uncommitted = true;
+        continue;
+      }
+      const c = b.commits[i];
+      authors.add(c.email || c.author);
+      if (!latest || c.time > latest.time) latest = c;
+    }
+    if (uncommitted) return { line: d.line, text: "Uncommitted changes" };
+    if (!latest) return null;
+    const others = authors.size - 1;
+    return { line: d.line, text: `${latest.author}${others > 0 ? ` +${others}` : ""}, ${ago(latest.time)}` };
+  }).filter((a) => !!a);
+}
+
+// ../sdk/mcp.ts
+function exportMcpTools(ctx, title, tools) {
+  let pending2 = 0;
+  const publish = () => ctx.state.set(`${ctx.moduleId}.mcp`, {
+    title,
+    generation: ctx.generation,
+    tools: tools.map(({ handler: _handler, ...definition }) => definition)
+  });
+  ctx.events.on("internal-mcp.call", async (request) => {
+    if (request?.module !== ctx.moduleId || request.generation !== ctx.generation || typeof request.id !== "string") return;
+    const tool = tools.find((tool2) => tool2.name === request.tool);
+    pending2++;
+    try {
+      if (!tool) throw new Error("Unknown module MCP command");
+      const scope = request.scope;
+      if (!scope || typeof scope.workspaceId !== "string" || typeof scope.conversationId !== "string" || typeof scope.machineId !== "string") throw new Error("Missing authenticated MCP scope");
+      const result = await tool.handler(request.args || {}, scope);
+      ctx.events.emit(`${ctx.moduleId}.mcp.result`, { id: request.id, generation: ctx.generation, result: result === void 0 ? null : result });
+    } catch (e) {
+      ctx.events.emit(`${ctx.moduleId}.mcp.result`, { id: request.id, generation: ctx.generation, error: errMsg(e) });
+    } finally {
+      pending2--;
+    }
+  });
+  publish();
+  return { publish, pending: () => pending2 };
+}
+
+// modules/ui/viewer/src/history.ts
+var H = null;
+var seq = 0;
+var epoch = 0;
+var size = { width: 1180, height: 760 };
+var SIZE_KEY = "viewer.historyWindow";
+function mapToCommitted(committed, text, start, end) {
+  const a = committed.split("\n"), b = text.split("\n");
+  if (a.length > 2e4 || b.length > 2e4) return [start, end];
+  let oldLine = 0, newLine = 0, first = -1, last = -1;
+  const take = (line) => {
+    if (first < 0) first = line;
+    last = line;
+  };
+  for (const op of diffLines(a, b)) {
+    if (op.kind === " ") {
+      if (newLine >= start && newLine <= end) take(oldLine);
+      oldLine++;
+      newLine++;
+    } else if (op.kind === "+") newLine++;
+    else {
+      if (newLine >= start && newLine <= end) take(oldLine);
+      oldLine++;
+    }
+  }
+  const lastLine = Math.max(0, a.length - (a[a.length - 1] === "" ? 2 : 1));
+  return first < 0 ? null : [Math.min(first, lastLine), Math.min(last, lastLine)];
+}
+async function restoreHistory(ctx, prev) {
+  const saved = await ctx.modules.call("persistence", "settings.get", { key: SIZE_KEY }).catch(() => null);
+  if (saved && Number(saved.width) >= 480 && Number(saved.height) >= 320) size = { width: Number(saved.width), height: Number(saved.height) };
+  if (prev?.history?.workspaceId) {
+    H = { ...prev.history, loading: false, diffLoading: false };
+    seq = H.seq;
+  }
+}
+var historySnapshot = () => H && { ...H, loading: false, diffLoading: false };
+async function openHistory(ctx, request) {
+  epoch++;
+  H = { seq: ++seq, ...request, head: null, commits: [], more: false, untracked: false, loading: false, error: null, chosen: null, document: null, diffLoading: false, empty: false, wholeFile: false };
+  ctx.ui.invalidate();
+  await loadPage(ctx);
+}
+async function loadPage(ctx) {
+  const h = H;
+  if (!h || h.loading) return;
+  const mine = epoch;
+  h.loading = true;
+  ctx.ui.invalidate();
+  try {
+    const r = await ctx.modules.call("git", "fileHistory", {
+      workspaceId: h.workspaceId,
+      path: h.path,
+      head: h.head,
+      skip: h.commits.length,
+      ...h.range ? { startLine: h.range[0], endLine: h.range[1] } : {}
+    }, { timeoutMs: 6e4 });
+    if (mine !== epoch || H !== h) return;
+    h.head = r.head;
+    h.untracked = !!r.untracked;
+    h.more = !!r.more;
+    h.error = null;
+    const known = new Set(h.commits.map((c) => c.id));
+    h.commits.push(...r.commits.filter((c) => !known.has(c.id)));
+    if (!h.chosen && h.commits.length) void choose(ctx, h.commits[0].id);
+  } catch (e) {
+    if (H === h) {
+      h.error = errMsg(e);
+      h.more = false;
+    }
+  } finally {
+    if (H === h) h.loading = false;
+    ctx.ui.invalidate();
+  }
+}
+async function choose(ctx, id) {
+  const h = H;
+  const index = h ? h.commits.findIndex((c2) => c2.id === id) : -1;
+  if (!h || index < 0) return;
+  const c = h.commits[index];
+  h.chosen = id;
+  h.diffLoading = true;
+  ctx.ui.invalidate();
+  try {
+    const args = h.range && !h.wholeFile ? { workspaceId: h.workspaceId, id, path: h.path, head: h.head, startLine: h.range[0], endLine: h.range[1], index } : { workspaceId: h.workspaceId, id, repoPath: c.path, previousPath: c.previousPath };
+    const r = await ctx.modules.call("git", "fileCommitDiff", args, { timeoutMs: 6e4 });
+    if (H !== h || h.chosen !== id) return;
+    h.document = r.document;
+    h.empty = !!r.empty;
+    h.error = null;
+  } catch (e) {
+    if (H === h && h.chosen === id) h.error = errMsg(e);
+  } finally {
+    if (H === h && h.chosen === id) h.diffLoading = false;
+    ctx.ui.invalidate();
+  }
+}
+function ago2(iso) {
+  const days = (Date.now() - Date.parse(iso)) / 864e5;
+  if (!Number.isFinite(days)) return "";
+  if (days < 1) {
+    const hours = Math.floor(days * 24);
+    return hours < 1 ? "just now" : `${hours} h ago`;
+  }
+  if (days < 30) return `${Math.floor(days)} d ago`;
+  if (days < 365) return `${Math.floor(days / 30)} mo ago`;
+  return `${Math.floor(days / 365)} y ago`;
+}
+var when = (iso) => iso ? iso.slice(0, 16).replace("T", " ") : "";
+var lines = (r) => r[0] === r[1] ? `line ${r[0] + 1}` : `lines ${r[0] + 1}–${r[1] + 1}`;
+function historyWindow(diffMode2, softWrap) {
+  const h = H;
+  if (!h) return null;
+  const name = h.path.split("/").pop() || h.path;
+  const title = h.shown ? `History of ${name}, ${lines(h.shown)}` : `History of ${name}`;
+  const c = h.commits.find((x) => x.id === h.chosen);
+  const emptyText = h.untracked ? "This file has no committed history yet." : h.range ? "No commits changed these lines." : "No commits changed this file.";
+  const list = h.commits.length || h.loading ? {
+    type: "tree",
+    key: "commits",
+    grow: true,
+    rowHeight: 46,
+    indent: 0,
+    selectAction: "history.select",
+    expandAction: "history.noop",
+    endReachedAction: h.more && !h.loading && !h.error ? "history.more" : void 0,
+    rows: h.commits.map((x) => ({
+      key: x.id,
+      label: x.subject || "(no message)",
+      depth: 0,
+      expandable: false,
+      expanded: false,
+      selected: x.id === h.chosen,
+      detail: `${x.id.slice(0, 8)} · ${x.author} · ${ago2(x.date)}`,
+      badge: x.status === "A" ? "added" : x.previousPath ? "renamed" : void 0,
+      tooltip: `${x.subject}
+${x.id}
+${x.author} <${x.email}>
+${when(x.date)}${x.previousPath ? `
+Renamed from ${x.previousPath}` : ""}`
+    }))
+  } : { type: "label", key: "empty", text: emptyText, color: "muted", wrap: true };
+  return { type: "window", key: `file-history-${h.seq}`, title, width: size.width, height: size.height, closeAction: "history.closed", children: [
+    { type: "column", key: "root", grow: true, padding: 10, gap: 8, children: [
+      { type: "row", key: "header", gap: 8, align: "center", children: [
+        { type: "column", key: "title", grow: true, gap: 2, children: [
+          { type: "label", key: "path", text: h.path, weight: "semibold", size: "sm", selectable: true },
+          {
+            type: "label",
+            key: "scope",
+            size: "xs",
+            color: "muted",
+            text: `${h.shown ? `Commits that changed ${lines(h.shown)}` : "Commits that changed this file, following renames"} · ${h.commits.length}${h.more ? "+" : ""} loaded`
+          }
+        ] },
+        ...h.range ? [{ type: "switch", key: "whole", label: "Whole file diff", checked: h.wholeFile, action: "history.wholeFile" }] : [],
+        { type: "button", key: "layout", text: diffMode2 === "split" ? "Unified" : "Side by side", action: "history.diffMode", small: true, variant: "ghost", tooltip: "Switch diff layout" },
+        { type: "button", key: "refresh", text: "Refresh", action: "history.refresh", small: true, variant: "ghost", disabled: h.loading }
+      ] },
+      ...h.error ? [{ type: "status", key: "error", text: h.error, level: "error" }] : [],
+      { type: "split", key: "body", direction: "horizontal", sizes: [0.34, 0.66], grow: true, children: [
+        { type: "column", key: "log", grow: true, gap: 4, children: [
+          list,
+          ...h.loading ? [{ type: "progress", key: "loading", indeterminate: true, label: h.commits.length ? "Loading older commits…" : "Loading history…" }] : []
+        ] },
+        { type: "column", key: "detail", grow: true, gap: 6, children: [
+          ...c ? [
+            { type: "label", key: "subject", text: c.subject || "(no message)", weight: "semibold", size: "sm", wrap: true, selectable: true },
+            { type: "label", key: "meta", text: `${c.author} <${c.email}> · ${when(c.date)} · ${c.id}${c.previousPath ? ` · renamed from ${c.previousPath}` : ""}`, size: "xs", color: "muted", wrap: true, selectable: true }
+          ] : [],
+          {
+            type: "diff",
+            key: `diff-${h.chosen || "none"}`,
+            document: h.diffLoading ? null : h.document,
+            mode: diffMode2,
+            softWrap,
+            grow: true,
+            placeholder: h.chosen ? "Loading changes…" : "Choose a commit to see what it changed.",
+            emptyText: "This commit changed no content here (mode or merge only).",
+            changeNavigation: { previous: "Previous change", next: "Next change" }
+          }
+        ] }
+      ] }
+    ] }
+  ] };
+}
+async function historyEvent(ctx, action, ev, toggleDiffMode) {
+  if (!action.startsWith("history.")) return false;
+  const h = H;
+  switch (action) {
+    case "history.closed": {
+      H = null;
+      epoch++;
+      const v = ev.value || {};
+      if (Number(v.width) >= 480 && Number(v.height) >= 320) {
+        size = { width: Math.round(v.width), height: Math.round(v.height) };
+        await ctx.modules.call("persistence", "settings.set", { key: SIZE_KEY, value: size }).catch(() => {
+        });
+      }
+      break;
+    }
+    case "history.more":
+      await loadPage(ctx);
+      break;
+    case "history.select":
+      if (ev.rowKey && ev.rowKey !== h?.chosen) await choose(ctx, String(ev.rowKey));
+      break;
+    case "history.wholeFile":
+      if (h) {
+        h.wholeFile = !h.wholeFile;
+        if (h.chosen) await choose(ctx, h.chosen);
+      }
+      break;
+    case "history.diffMode":
+      await toggleDiffMode();
+      break;
+    case "history.refresh":
+      if (h) {
+        epoch++;
+        Object.assign(h, { head: null, commits: [], more: false, chosen: null, document: null, error: null, loading: false });
+        await loadPage(ctx);
+      }
+      break;
+  }
+  ctx.ui.invalidate();
+  return true;
+}
+
+// ../sdk/debug-values.ts
+var icon = (body) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
+var valueIcons = {
+  primitive: icon("<circle cx='12' cy='12' r='3.2' fill='currentColor'/>"),
+  string: icon("<path d='M7 7h4v4c0 3-1.5 5-4 6M14 7h4v4c0 3-1.5 5-4 6'/>"),
+  array: icon("<path d='M8 4H5v16h3M16 4h3v16h-3'/>"),
+  map: icon("<path d='M8 4c-2 0-3 1-3 3v2.5c0 1.5-1 2.5-2 2.5 1 0 2 1 2 2.5V17c0 2 1 3 3 3M16 4c2 0 3 1 3 3v2.5c0 1.5 1 2.5 2 2.5-1 0-2 1-2 2.5V17c0 2-1 3-3 3'/>"),
+  object: icon("<rect x='4.5' y='4.5' width='15' height='15' rx='3'/><path d='M9 10h6M9 14h4'/>"),
+  date: icon("<rect x='4' y='5.5' width='16' height='14' rx='2'/><path d='M4 10h16M8 3.5v4M16 3.5v4'/>"),
+  enumeration: icon("<path d='M5 7h3M5 12h3M5 17h3M11 7h8M11 12h8M11 17h8'/>"),
+  fn: icon("<path d='M14 4c-3 0-3.5 2-4 5l-1.5 7c-.5 2.5-1.5 4-4 4M7 10h8'/>"),
+  error: icon("<path d='M12 3.5 21 19.5H3z'/><path d='M12 10v4M12 17v.2'/>"),
+  promise: icon("<circle cx='12' cy='12' r='8'/><path d='M12 7.5V12l3 2'/>"),
+  virtual: icon("<path d='M5 12h14' stroke-dasharray='2 3'/>")
+};
+var STRING_MAX = 120;
+var JAVA_BOXED = /* @__PURE__ */ new Set(["Integer", "Long", "Short", "Byte", "Double", "Float", "Character", "Boolean", "BigDecimal", "BigInteger", "AtomicInteger", "AtomicLong", "AtomicBoolean"]);
+var JAVA_DATES = /^(Instant|LocalDate|LocalDateTime|LocalTime|ZonedDateTime|OffsetDateTime|OffsetTime|Date|Timestamp|Calendar|GregorianCalendar|Duration|Period)$/;
+var MAP_TYPES = /(Map|Dictionary|Properties|Hashtable|Record)$/;
+var SET_TYPES = /Set$/;
+var LIST_TYPES = /(List|Collection|Queue|Deque|Vector|Stack|Iterable|Array|Buffer)$|\[\]$/;
+function shortType(type) {
+  if (!type) return void 0;
+  const t = type.trim();
+  const lt = t.indexOf("<");
+  const base = (lt < 0 ? t : t.slice(0, lt)).split(/[.$]/).pop() || t;
+  if (lt < 0) return base;
+  const body = t.slice(lt + 1, t.lastIndexOf(">"));
+  const args = [];
+  let depth = 0, from = 0;
+  for (let i = 0; i <= body.length; i++) {
+    const c = body[i];
+    if (c === "<") depth++;
+    else if (c === ">") depth--;
+    else if (c === "," && depth === 0 || i === body.length) {
+      args.push(body.slice(from, i).trim());
+      from = i + 1;
+    }
+  }
+  const short = args.map((a) => {
+    const g = a.indexOf("<");
+    const n = (g < 0 ? a : a.slice(0, g)).split(/[.$]/).pop() || "?";
+    return g < 0 ? n : `${n}<…>`;
+  });
+  const inner = short.join(",");
+  return `${base}<${inner.length > 24 ? short[0] + ",…" : inner}>`;
+}
+function sizeOf(v) {
+  const m = /\bsize=(\d+)/.exec(v.value) || /^[\w$.]*(?:Array|Map|Set|List)\((\d+)\)/.exec(v.value) || /\[(\d+)\]$/.exec(v.value) || /^[\w$.]+\[(\d+)\]/.exec(v.value);
+  if (m) return Number(m[1]);
+  return v.indexedVariables && v.indexedVariables > 0 ? v.indexedVariables : void 0;
+}
+function escapeString(s) {
+  return s.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t").replace(/[\u0000-\u001f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+function clip(s, max = STRING_MAX) {
+  return s.length > max ? [s.slice(0, max - 1) + "…", true] : [s, false];
+}
+function unquote(value) {
+  const q = value[0];
+  if ((q === '"' || q === "'" || q === "`") && value.length >= 2 && value.endsWith(q)) return value.slice(1, -1);
+  return null;
+}
+function relativeTime(text, now = Date.now()) {
+  const iso = /\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?/.exec(text)?.[0];
+  const t = iso ? Date.parse(iso) : Date.parse(text);
+  if (!Number.isFinite(t)) return null;
+  const d = (t - now) / 1e3, a = Math.abs(d);
+  const [n, u] = a < 60 ? [Math.round(a), "s"] : a < 3600 ? [Math.round(a / 60), "min"] : a < 86400 ? [Math.round(a / 3600), "h"] : a < 86400 * 60 ? [Math.round(a / 86400), "d"] : [Math.round(a / (86400 * 30.4)), "mo"];
+  if (a < 1) return "now";
+  return d < 0 ? `${n} ${u} ago` : `in ${n} ${u}`;
+}
+function describeValue(v) {
+  const raw = v.value ?? "";
+  const type = v.type?.trim();
+  const badge = shortType(type);
+  const base = (badge || "").replace(/<.*$/, "");
+  const hint = v.presentationHint;
+  const view = (kind, summary, color, iconSvg, extra = {}) => ({ kind, summary, color, badge, truncated: false, iconSvg, ...extra });
+  if (hint?.lazy) return view("virtual", "…", "muted", valueIcons.virtual, { badge: badge || "getter" });
+  if (hint?.kind === "virtual" || /^\[\[.*\]\]$|^\[\d+…\d+\]$/.test(v.name)) return view("virtual", raw, "muted", valueIcons.virtual);
+  if (/^<?(not available|optimized out|unavailable)>?$/i.test(raw) || /^<error/i.test(raw)) return view("unavailable", raw, "muted", valueIcons.virtual);
+  const str = unquote(raw);
+  if (str !== null || base === "String" || type === "string") {
+    const content = str ?? raw.replace(/^String@\d+\s*/, "").replace(/^"(.*)"$/s, "$1");
+    const [text2, cut2] = clip(escapeString(content));
+    return view("string", `"${text2}"`, "success", valueIcons.string, { truncated: cut2 || content.includes("\n"), size: content.length, badge: badge || "string" });
+  }
+  if (raw === "null" || raw === "None" || raw === "nil") return view("null", "null", "muted", valueIcons.primitive);
+  if (raw === "undefined") return view("undefined", "undefined", "muted", valueIcons.primitive);
+  if (raw === "true" || raw === "false") return view("boolean", raw, "primary", valueIcons.primitive, { badge: badge || "boolean" });
+  if (/^-?\d+n$/.test(raw)) return view("bigint", raw, "info", valueIcons.primitive, { badge: badge || "bigint" });
+  if (/^-?(\d[\d_]*(\.\d+)?([eE][+-]?\d+)?|NaN|Infinity|0x[\da-fA-F]+)[dDfFlL]?$/.test(raw) || type === "number") return view("number", raw, "info", valueIcons.primitive, { badge: badge || "number" });
+  if (/^Symbol\(/.test(raw)) return view("symbol", raw, "warning", valueIcons.primitive);
+  if (/^\/.+\/[dgimsuyv]*$/.test(raw)) return view("regexp", raw, "warning", valueIcons.primitive, { badge: badge || "RegExp" });
+  if (JAVA_BOXED.has(base)) {
+    const inner = raw.replace(/^[\w$.]+@[\da-f]+\s*/, "").replace(/^"(.*)"$/, "$1");
+    return view(base === "Boolean" || base === "AtomicBoolean" ? "boolean" : "number", inner, base.startsWith("Bool") || base === "AtomicBoolean" ? "primary" : "info", valueIcons.primitive);
+  }
+  if (/^(ƒ|function\b|async\b|\(.*\)\s*=>|[\w$]+\s*=>)/.test(raw) || type === "function" || /\$\$Lambda|Function$|Supplier$|Consumer$|Runnable$|Callable$/.test(type || "")) {
+    const sig = raw.replace(/^ƒ\s*/, "").replace(/\s*\{[\s\S]*$/, "");
+    return view("function", clip(`ƒ ${sig}`, 80)[0], "muted", valueIcons.fn, { badge: badge || "function" });
+  }
+  if (/^class\s/.test(raw)) return view("class", raw.replace(/\s*\{[\s\S]*$/, ""), "muted", valueIcons.object);
+  if (/^Promise\b/.test(raw) || base === "Promise" || /Future$/.test(base)) {
+    const state = /<(pending|fulfilled|rejected)>|\b(pending|fulfilled|rejected|resolved|completed)\b/i.exec(raw);
+    const s = (state?.[1] || state?.[2] || "").toLowerCase();
+    return view("promise", s ? `${base || "Promise"} · ${s}` : raw, s === "rejected" ? "danger" : s ? "success" : "warning", valueIcons.promise);
+  }
+  if (/(Error|Exception|Throwable)$/.test(base) || /^[\w$.]*(Error|Exception)\b[:@]/.test(raw)) {
+    const msg = raw.split("\n")[0].replace(/^[\w$.]+@[\da-f]+\s*/, "");
+    return view("error", clip(msg, 100)[0], "danger", valueIcons.error, { truncated: raw.includes("\n") });
+  }
+  if (JAVA_DATES.test(base) || /^Date\b/.test(raw)) {
+    const text2 = raw.replace(/^[\w$.]+@[\da-f]+\s*/, "").replace(/^Date\s+/, "").replace(/^"(.*)"$/, "$1");
+    const rel = relativeTime(text2);
+    return view("date", rel ? `${text2}  ·  ${rel}` : text2, "warning", valueIcons.date);
+  }
+  if (hint?.kind === "enum" || /\bEnum\b/.test(type || "") || /^[A-Z][A-Z0-9_]+$/.test(raw) && !!type && !/^(int|long|char)$/.test(type)) {
+    return view("enum", raw.replace(/^[\w$.]+@[\da-f]+\s*/, ""), "warning", valueIcons.enumeration);
+  }
+  const size2 = sizeOf(v);
+  const sized = (kind, iconSvg, color = "default") => view(kind, size2 !== void 0 ? size2 === 0 ? "empty" : `size ${size2}` : raw.replace(/^[\w$.]+@[\da-f]+\s*/, "") || raw, size2 === 0 ? "muted" : color, iconSvg, { size: size2 });
+  if (MAP_TYPES.test(base) || /^Map\(/.test(raw)) return sized("map", valueIcons.map);
+  if (SET_TYPES.test(base) || /^Set\(/.test(raw)) return sized("set", valueIcons.array);
+  if (LIST_TYPES.test(base) || /^(Array|\w+Array)\(\d+\)/.test(raw) || /\[\d+\]$/.test(raw)) return sized("array", valueIcons.array);
+  if (v.indexedVariables && v.indexedVariables > 0) return sized("collection", valueIcons.array);
+  const preview = raw.replace(/^[\w$.]+@[\da-f]+\s*/, "").trim();
+  const [text, cut] = clip(preview && preview !== base ? preview : raw || base, 100);
+  return view(v.variablesReference > 0 ? "object" : "unavailable", text, "default", valueIcons.object, { truncated: cut });
+}
+var VALUE_PAGE = 100;
+var childKey = (r) => r.start === void 0 ? `${r.variablesReference}` : `${r.variablesReference}:${r.start}:${r.count}`;
+var valueIdentity = (v, key2) => v.evaluateName || key2.replace(/^[^/]*\//, "");
+function row(v, key2, depth, open, o) {
+  const d = describeValue(v);
+  const prev = o.previous?.get(valueIdentity(v, key2));
+  const changed = prev !== void 0 && prev !== v.value;
+  const readOnly = v.presentationHint?.attributes?.includes("readOnly");
+  const badges = [];
+  if (changed) badges.push({ text: "changed", color: "warning" });
+  if (d.kind === "string" && d.size !== void 0 && d.size > 40) badges.push({ text: `${d.size} chars`, color: "muted" });
+  const tooltip = [`${v.type ? `${v.type} ` : ""}${v.name}`, changed ? `was ${prev}` : "", readOnly ? "read-only" : "", d.truncated ? `${v.value.slice(0, 400)}${v.value.length > 400 ? "…" : ""}
+(right-click to copy the full value)` : ""].filter(Boolean).join("\n");
+  return {
+    key: key2,
+    label: v.name,
+    value: d.summary,
+    valueColor: changed ? "warning" : d.color,
+    badge: d.badge,
+    badges: badges.length ? badges : void 0,
+    iconSvg: d.iconSvg,
+    iconColor: changed ? "warning" : d.color === "default" ? "muted" : d.color,
+    depth,
+    expandable: v.variablesReference > 0,
+    expanded: open,
+    selected: false,
+    weight: v.presentationHint?.visibility === "private" || d.kind === "virtual" ? void 0 : depth === 0 ? "medium" : void 0,
+    tooltip: tooltip.slice(0, 500),
+    contextMenu: [
+      { text: "Copy value", action: "", copyText: v.value },
+      ...v.evaluateName ? [{ text: "Copy expression", action: "", copyText: v.evaluateName }] : [],
+      ...o.menu ? o.menu(v, key2) : []
+    ]
+  };
+}
+function valueTreeRows(range, prefix, depth, o, out = [], indexed = 0) {
+  const max = o.maxRows ?? 2e3;
+  if (out.length >= max) return out;
+  if (indexed > VALUE_PAGE && range.start === void 0) {
+    const named = o.children(childKey(range)) || [];
+    const seen2 = /* @__PURE__ */ new Set();
+    for (const v of named.filter((x) => !/^\d+$/.test(x.name))) pushVar(v, prefix, depth, o, out, seen2);
+    for (let start = 0; start < indexed && out.length < max; start += VALUE_PAGE) {
+      const count = Math.min(VALUE_PAGE, indexed - start);
+      const key2 = `${prefix}/[${start}]`;
+      const page = { variablesReference: range.variablesReference, start, count, filter: "indexed" };
+      o.ranges?.set(key2, page);
+      const open = o.expanded.has(key2);
+      out.push({ key: key2, label: `[${start}…${start + count - 1}]`, depth, expandable: true, expanded: open, selected: false, iconSvg: valueIcons.array, iconColor: "muted" });
+      if (open) valueTreeRows(page, key2, depth + 1, o, out);
+    }
+    return out;
+  }
+  const list = o.children(childKey(range));
+  if (!list) {
+    out.push({ key: `${prefix}/…loading`, label: "Loading…", depth, expandable: false, expanded: false, selected: false, busy: true });
+    return out;
+  }
+  if (!list.length && depth > 0) out.push({ key: `${prefix}/…empty`, label: "No fields", depth, expandable: false, expanded: false, selected: false });
+  const seen = /* @__PURE__ */ new Set();
+  for (const v of list) {
+    if (out.length >= max) break;
+    pushVar(v, prefix, depth, o, out, seen);
+  }
+  if (out.length >= max) out.push({ key: `${prefix}/…more`, label: "Too many rows. Narrow with a watch expression.", depth, expandable: false, expanded: false, selected: false });
+  return out;
+}
+function pushVar(v, prefix, depth, o, out, seen) {
+  let key2 = `${prefix}/${v.name}`;
+  for (let n = 2; seen.has(key2); n++) key2 = `${prefix}/${v.name}#${n}`;
+  seen.add(key2);
+  o.vars?.set(key2, v);
+  const paged = (v.indexedVariables || 0) > VALUE_PAGE;
+  if (v.variablesReference > 0) o.ranges?.set(key2, { variablesReference: v.variablesReference, ...paged ? { filter: "named" } : {} });
+  const open = o.expanded.has(key2) && v.variablesReference > 0;
+  out.push(row(v, key2, depth, open, o));
+  if (open) valueTreeRows({ variablesReference: v.variablesReference }, key2, depth + 1, o, out, v.indexedVariables || 0);
+}
+
+// ../sdk/debug.ts
+function debugExpressionAt(text, offset) {
+  if (!Number.isInteger(offset) || offset < 0 || offset >= text.length) return null;
+  const lineStart = offset === 0 ? 0 : text.lastIndexOf("\n", offset - 1) + 1;
+  const newline = text.indexOf("\n", offset);
+  const line = text.slice(lineStart, newline === -1 ? void 0 : newline);
+  const identifier2 = String.raw`[$_\p{ID_Start}][$\u200c\u200d\p{ID_Continue}]*`;
+  const chains = new RegExp(String.raw`(?<![$\u200c\u200d\p{ID_Continue}])${identifier2}(?:[ \t]*\.[ \t]*${identifier2})*`, "gu");
+  for (const match of line.matchAll(chains)) {
+    const start = lineStart + match.index;
+    if (start > offset) break;
+    const end = start + match[0].length;
+    if (offset < end) return { start, end, text: match[0] };
+  }
+  return null;
+}
+var DEBUG_EVENTS = {
+  /** {workspaceId, sessions: DebugSessionInfo[]} on session state changes. */
+  changed: "debug.changed",
+  /** {workspaceId, breakpoints: Breakpoint[], exceptions: ExceptionBreakpoints} when the set changes. */
+  breakpoints: "debug.breakpoints"
+};
+function inlineValues(lineText, variables, max = 5) {
+  const words = new Set(lineText.match(/[A-Za-z_$][\w$]*/g) || []);
+  return variables.filter((v) => words.has(v.name)).slice(0, max).map((v) => `${v.name} = ${v.value.length > 40 ? v.value.slice(0, 39) + "…" : v.value}`).join(", ");
+}
+
+// ../sdk/motion.ts
+var motionDuration = { fast: 120, base: 180, slow: 240 };
+var motionEasing = {
+  enter: [0.2, 0, 0, 1],
+  exit: [0.4, 0, 1, 1]
+};
+var motionExitRatio = 0.7;
+var interactionMotion = {
+  durationMs: motionDuration.fast,
+  easing: motionEasing.enter
+};
+var anchoredMotion = {
+  enter: { durationMs: motionDuration.base, easing: motionEasing.enter, opacity: 0, offsetPx: [0, -4] },
+  exit: { durationMs: Math.round(motionDuration.base * motionExitRatio), easing: motionEasing.exit, opacity: 0, offsetPx: [0, -4] }
+};
+var anchoredAboveMotion = {
+  enter: { ...anchoredMotion.enter, offsetPx: [0, 4] },
+  exit: { ...anchoredMotion.exit, offsetPx: [0, 4] }
+};
+var tooltipMotion = {
+  ...anchoredMotion,
+  enter: { ...anchoredMotion.enter, offsetPx: [0, 4] },
+  exit: { ...anchoredMotion.exit, offsetPx: [0, 4] }
+};
+var toastMotion = {
+  enter: { durationMs: motionDuration.base, easing: motionEasing.enter, opacity: 0, offsetPx: [0, 8] },
+  exit: { durationMs: Math.round(motionDuration.base * motionExitRatio), easing: motionEasing.exit, opacity: 0 }
+};
+var dockRevealMotion = {
+  enter: { durationMs: 260, easing: motionEasing.enter, opacity: 0 },
+  exit: { durationMs: 210, easing: [0.4, 0, 0.2, 1], opacity: 0 }
+};
+
+// modules/ui/viewer/src/debug-gutter.ts
+var svg = (body) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">${body}</svg>`;
+var icons = {
+  breakpoint: svg("<circle cx='12' cy='12' r='7' fill='currentColor'/>"),
+  conditional: svg("<circle cx='12' cy='12' r='7.5' fill='currentColor'/><path d='M9.8 10a2.3 2.3 0 1 1 3.2 2.1c-.7.3-1 .8-1 1.5M12 16.3v.2' stroke='white' stroke-width='1.8' fill='none' stroke-linecap='round'/>"),
+  logpoint: svg("<path d='M12 4.5 19.5 12 12 19.5 4.5 12z' fill='currentColor'/>"),
+  disabled: svg("<circle cx='12' cy='12' r='6.5' fill='none' stroke='currentColor' stroke-width='2'/>"),
+  unverified: svg("<circle cx='12' cy='12' r='6.5' fill='none' stroke='currentColor' stroke-width='2' stroke-dasharray='3 2.4'/>"),
+  paused: svg("<path d='M4 8.5h8V4.5l8 7.5-8 7.5v-4H4z' fill='currentColor'/>")
+};
+var runIcon = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="m7 4 14 8-14 8z"/></svg>';
+var workspaceId = null;
+var breakpoints = [];
+var breakpointVersion = 0;
+var sessionVersion = 0;
+var workspaceLoad = 0;
+var pendingToggles = /* @__PURE__ */ new Map();
+var sessions = [];
+var inline = null;
+var lastStop = "";
+var debugAvailable = false;
+var debugTypes = [];
+var bpEditor = null;
+var bpError = "";
+var hooks;
+function initDebug(ctx, h) {
+  hooks = h;
+  ctx.events.on("debug-panel.focusFrame", (e) => {
+    if (e?.workspaceId === workspaceId && Number.isInteger(e.frameId) && typeof e.id === "string") {
+      const next = { id: e.id, conn: e.conn, frameId: e.frameId, path: typeof e.path === "string" ? e.path : null };
+      if (!focusedFrame || next.id !== focusedFrame.id || next.conn !== focusedFrame.conn || next.frameId !== focusedFrame.frameId) closeHover();
+      focusedFrame = next;
+      hooks.invalidate();
+    }
+    if (e?.workspaceId === workspaceId && typeof e.path === "string" && !e.path.startsWith("/") && Number.isInteger(e.line)) hooks.reveal(e.path, e.line);
+  });
+  ctx.events.on(DEBUG_EVENTS.breakpoints, (e) => {
+    if (e?.workspaceId === workspaceId) {
+      breakpoints = e.breakpoints || [];
+      breakpointVersion++;
+      debugAvailable = true;
+      hooks.invalidate();
+    }
+  });
+  ctx.events.on(DEBUG_EVENTS.changed, (e) => {
+    if (e?.workspaceId !== workspaceId) return;
+    sessions = e.sessions || [];
+    sessionVersion++;
+    debugAvailable = true;
+    const paused = sessions.find((s) => s.stopped);
+    const key2 = paused?.stopped ? `${paused.id}:${paused.stopped.conn}:${paused.stopped.threadId}:${paused.stopped.frameId}` : "";
+    if (key2 && key2 !== lastStop && paused.stopped.path && !paused.stopped.path.startsWith("/")) hooks.reveal(paused.stopped.path, paused.stopped.line);
+    if (key2 !== lastStop) {
+      focusedFrame = null;
+      closeHover();
+    }
+    lastStop = key2;
+    void refreshInline(ctx);
+    hooks.invalidate();
+  });
+}
+async function loadDebug(ctx, id) {
+  workspaceId = id;
+  breakpoints = [];
+  sessions = [];
+  inline = null;
+  bpEditor = null;
+  lastStop = "";
+  focusedFrame = null;
+  closeHover();
+  debugAvailable = false;
+  debugTypes = [];
+  const load2 = ++workspaceLoad;
+  if (!id) return;
+  const version = breakpointVersion, liveVersion = sessionVersion;
+  try {
+    const [list, live, caps] = await Promise.all([
+      ctx.modules.call("debug", "breakpointsList", { workspaceId: id }),
+      ctx.modules.call("debug", "sessions", { workspaceId: id }),
+      ctx.modules.call("debug", "capabilities", { workspaceId: id })
+    ]);
+    if (load2 !== workspaceLoad) return;
+    if (version === breakpointVersion) breakpoints = list?.breakpoints || [];
+    if (liveVersion === sessionVersion) sessions = live || [];
+    debugAvailable = !!caps?.debug;
+    debugTypes = caps?.debugTypes || [];
+  } catch {
+    if (load2 !== workspaceLoad) return;
+  }
+  hooks.invalidate();
+}
+async function refreshInline(ctx) {
+  const s = sessions.find((x) => x.stopped?.path);
+  if (!s?.stopped?.path || !workspaceId) {
+    inline = null;
+    return;
+  }
+  const st = s.stopped, key2 = `${s.id}:${st.conn}:${st.frameId}`;
+  if (inline?.key === key2) return;
+  const text = hooks.currentText(st.path);
+  if (text === null) {
+    inline = null;
+    return;
+  }
+  try {
+    const scopes = await ctx.modules.call("debug", "scopes", { workspaceId, id: s.id, conn: st.conn, frameId: st.frameId });
+    const scope = scopes.find((x) => !x.expensive && x.variablesReference > 0);
+    const vars = scope ? await ctx.modules.call("debug", "variables", { workspaceId, id: s.id, conn: st.conn, variablesReference: scope.variablesReference }) : [];
+    const lineText = text.split("\n")[st.line] || "";
+    const value = inlineValues(lineText, vars);
+    inline = value ? { key: key2, path: st.path, line: st.line, text: value } : null;
+  } catch {
+    inline = null;
+  }
+  hooks.invalidate();
+}
+function debugEditorFields(path, runLines, annotations) {
+  if (!path) return { gutterMarkers: [], lineHighlights: [], lineAnnotations: annotations };
+  const markers = /* @__PURE__ */ new Map();
+  for (const line of runLines) markers.set(line, { line, iconSvg: runIcon, color: "success", value: { kind: "run", line } });
+  const status = new Map(sessions.flatMap((s) => s.breakpoints).map((b) => [b.id, b]));
+  const live = sessions.some((s) => s.state !== "ended");
+  const visible = new Map(breakpoints.filter((b) => b.path === path).map((b) => [b.line, b]));
+  const prefix = toggleKey(workspaceId, path);
+  for (const [key2, pending2] of pendingToggles) {
+    if (!key2.startsWith(prefix)) continue;
+    const line = Number(key2.slice(prefix.length));
+    if (pending2.breakpoint) visible.set(line, pending2.breakpoint);
+    else visible.delete(line);
+  }
+  for (const b of visible.values()) {
+    const st = status.get(b.id);
+    const unverified = live && b.enabled && st && !st.verified;
+    const icon2 = !b.enabled ? icons.disabled : unverified ? icons.unverified : b.logMessage ? icons.logpoint : b.condition || b.hitCondition ? icons.conditional : icons.breakpoint;
+    markers.set(b.line, { line: b.line, iconSvg: icon2, color: !b.enabled || unverified ? "muted" : b.logMessage ? "warning" : "danger", value: { kind: "bp", line: b.line, id: b.id } });
+  }
+  const paused = sessions.find((s) => s.stopped?.path === path)?.stopped;
+  if (paused) markers.set(paused.line, { line: paused.line, iconSvg: icons.paused, color: "warning", value: { kind: "paused", line: paused.line, id: markers.get(paused.line)?.value.id } });
+  const lineAnnotations = inline && inline.path === path ? [...(annotations || []).filter((a) => a.line !== inline.line), { line: inline.line, text: inline.text, color: "info" }] : annotations;
+  return {
+    gutterMarkers: [...markers.values()],
+    gutterHoverIconSvg: debugAvailable ? icons.breakpoint : void 0,
+    lineHighlights: paused ? [{ line: paused.line, color: "warning", opacity: 0.2 }] : [],
+    lineAnnotations
+  };
+}
+var gutterTooltip = () => debugAvailable ? "Click to toggle a breakpoint · right-click for conditions and log messages" : "Run configuration actions";
+function hasRunMarker(value) {
+  return !!value && typeof value === "object" && value.kind === "run";
+}
+function toggleKey(id, path) {
+  return JSON.stringify([id, path]) + ":";
+}
+async function toggleBreakpoint(ctx, path, line) {
+  const id = workspaceId;
+  if (!id || !debugAvailable) return;
+  const key2 = toggleKey(id, path) + line;
+  const prior = pendingToggles.get(key2);
+  const exists = prior ? !!prior.breakpoint : breakpoints.some((b) => b.path === path && b.line === line);
+  const breakpoint = exists ? null : { id: "pending", path, line, enabled: true };
+  const done = (prior?.done ?? Promise.resolve()).then(async () => {
+    try {
+      await ctx.modules.call("debug", breakpoint ? "breakpointsSet" : "breakpointsRemove", { workspaceId: id, path, line });
+      if (workspaceId !== id || pendingToggles.get(key2)?.done !== done) return;
+      const version = breakpointVersion;
+      const list = await ctx.modules.call("debug", "breakpointsList", { workspaceId: id });
+      if (workspaceId === id && version === breakpointVersion) breakpoints = list.breakpoints;
+    } catch (e) {
+      if (workspaceId === id) bpError = errMsg(e);
+    } finally {
+      if (pendingToggles.get(key2)?.done === done) pendingToggles.delete(key2);
+      if (workspaceId === id) hooks.invalidate();
+    }
+  });
+  pendingToggles.set(key2, { breakpoint, done });
+  hooks.invalidate();
+  await done;
+}
+function openEditor(path, line, y, runLine, anchor) {
+  bpEditor = { path, line, y, runLine, anchor };
+  bpError = "";
+  hooks.invalidate();
+}
+async function editorEvent(ctx, action, value, inputs) {
+  if (!action.startsWith("bp") || !workspaceId) return false;
+  const ed = bpEditor;
+  const existing = ed ? breakpoints.find((b) => b.path === ed.path && b.line === ed.line) : void 0;
+  try {
+    if (action === "bpClose") bpEditor = null;
+    else if (ed && action === "bpSave") {
+      await ctx.modules.call("debug", "breakpointsSet", {
+        workspaceId,
+        path: ed.path,
+        line: ed.line,
+        enabled: existing?.enabled ?? true,
+        condition: inputs["bp-condition"] ?? existing?.condition ?? "",
+        hitCondition: inputs["bp-hit"] ?? existing?.hitCondition ?? "",
+        logMessage: inputs["bp-log"] ?? existing?.logMessage ?? ""
+      });
+      bpEditor = null;
+    } else if (ed && action === "bpEnabled") await ctx.modules.call("debug", "breakpointsSet", { workspaceId, path: ed.path, line: ed.line, enabled: !!value });
+    else if (ed && action === "bpRemove") {
+      if (existing) await ctx.modules.call("debug", "breakpointsRemove", { workspaceId, breakpointId: existing.id });
+      bpEditor = null;
+    } else if (ed && action === "bpRunTo") {
+      const s = sessions.find((x) => x.state === "paused");
+      if (s) await ctx.modules.call("debug", "runToLine", { workspaceId, id: s.id, path: ed.path, line: ed.line });
+      bpEditor = null;
+    }
+    bpError = "";
+  } catch (e) {
+    bpError = errMsg(e);
+  }
+  hooks.invalidate();
+  return true;
+}
+function editorPopover(path, runMenu2) {
+  const ed = bpEditor;
+  if (!ed || ed.path !== path) return null;
+  const b = breakpoints.find((x) => x.path === ed.path && x.line === ed.line);
+  const paused = sessions.some((s) => s.state === "paused");
+  const input = (key2, label, value, placeholder, tooltip) => ({ type: "column", key: `${key2}-field`, gap: 3, children: [
+    { type: "label", key: "label", text: label, size: "xs", weight: "medium", tooltip },
+    { type: "textInput", key: key2, value: value || "", placeholder, submitAction: "bpSave", cancelAction: "bpClose", style: { font: "mono" } }
+  ] });
+  return {
+    type: "popover",
+    key: "bp-editor",
+    transition: anchoredMotion,
+    width: 340,
+    windowAnchor: ed.anchor,
+    top: Math.max(36, ed.y + 54),
+    left: 24,
+    closeAction: "bpClose",
+    style: { background: "panel", padding: 10, radius: 8, borderWidth: 1, borderColor: "border", shadow: "md" },
+    children: [
+      { type: "row", key: "head", gap: 6, align: "center", children: [
+        { type: "label", key: "title", text: `${b ? "Breakpoint" : "New breakpoint"} · line ${ed.line + 1}`, weight: "semibold", size: "sm", grow: true },
+        ...b ? [{ type: "switch", key: "enabled", label: "Enabled", checked: b.enabled, action: "bpEnabled" }] : []
+      ] },
+      input("bp-condition", "Condition", b?.condition, "e.g. count > 10", "Pause only when this expression is true"),
+      input("bp-hit", "Hit count", b?.hitCondition, "e.g. 5 or >= 5", "Pause when the hit count matches"),
+      input("bp-log", "Log message", b?.logMessage, "e.g. total = {total}", "Log instead of pausing; {expression} is interpolated"),
+      ...bpError ? [{ type: "status", key: "error", text: bpError, level: "error" }] : [],
+      { type: "row", key: "actions", gap: 6, align: "center", children: [
+        ...paused ? [{ type: "button", key: "run-to", text: "Run to line", action: "bpRunTo", small: true, variant: "ghost", tooltip: "Continue until this line" }] : [],
+        ...b ? [{ type: "button", key: "remove", text: "Remove", action: "bpRemove", small: true, variant: "ghost", style: { color: "danger" } }] : [],
+        { type: "column", key: "space", grow: true, children: [] },
+        { type: "button", key: "cancel", text: "Cancel", action: "bpClose", small: true, variant: "ghost" },
+        { type: "button", key: "save", text: b ? "Save" : "Add breakpoint", action: "bpSave", small: true, variant: "primary" }
+      ] },
+      ...ed.runLine && runMenu2.length ? [{ type: "divider", key: "run-divider" }, ...runMenu2] : []
+    ]
+  };
+}
+var focusedFrame = null;
+var hover = null;
+var pendingHover = null;
+var hoverChildren = /* @__PURE__ */ new Map();
+var hoverExpanded = /* @__PURE__ */ new Set();
+var hoverRanges = /* @__PURE__ */ new Map();
+var KEYWORDS = /* @__PURE__ */ new Set([
+  "if",
+  "else",
+  "for",
+  "while",
+  "do",
+  "return",
+  "new",
+  "const",
+  "let",
+  "var",
+  "function",
+  "class",
+  "import",
+  "export",
+  "from",
+  "public",
+  "private",
+  "protected",
+  "static",
+  "final",
+  "void",
+  "try",
+  "catch",
+  "finally",
+  "throw",
+  "throws",
+  "switch",
+  "case",
+  "default",
+  "break",
+  "continue",
+  "async",
+  "await",
+  "typeof",
+  "instanceof",
+  "in",
+  "of",
+  "extends",
+  "implements",
+  "interface",
+  "package",
+  "enum",
+  "true",
+  "false",
+  "null",
+  "undefined"
+]);
+function closeHover() {
+  pendingHover = null;
+  hover = null;
+  hoverChildren.clear();
+  hoverExpanded.clear();
+  hoverRanges.clear();
+}
+function hoverFrame(path) {
+  if (focusedFrame?.path === path && sessions.some((s2) => s2.id === focusedFrame?.id && s2.state === "paused")) return focusedFrame;
+  const s = sessions.find((x) => x.state === "paused" && x.stopped?.path === path);
+  return s?.stopped ? { id: s.id, conn: s.stopped.conn, frameId: s.stopped.frameId } : null;
+}
+function debugHoverFields(path) {
+  if (!path || !hoverFrame(path)) return {};
+  const node = hover && hover.path === path ? hoverNode(hover) : null;
+  return { hoverAction: "debugHover", hoverDismissAction: "debugHoverDismiss", ...node && hover ? { hoverPopover: { requestId: hover.requestId, node } } : {} };
+}
+function expressionAt(text, offset) {
+  const hit = debugExpressionAt(text, offset);
+  if (!hit) return null;
+  const rest = text.slice(offset, hit.end);
+  const segmentEnd = offset + (/^[$\u200c\u200d\p{ID_Continue}]*/u.exec(rest)?.[0].length ?? 0);
+  const expr = text.slice(hit.start, segmentEnd).replace(/\s+/g, "");
+  const last = expr.split(".").pop() || "";
+  if (!expr || KEYWORDS.has(last) || /^\d/.test(last)) return null;
+  return expr;
+}
+async function hoverEvent(ctx, action, value, path) {
+  if (!action.startsWith("debugHover")) return false;
+  if (action === "debugHoverDismiss") {
+    if (value?.requestId === pendingHover || value?.requestId === hover?.requestId) {
+      closeHover();
+      hooks.invalidate();
+    }
+    return true;
+  }
+  if (action === "debugHover") {
+    const frame = path ? hoverFrame(path) : null;
+    const text = path ? hooks.currentText(path) : null;
+    const expression = text !== null && Number.isInteger(value?.offset) ? expressionAt(text, value.offset) : null;
+    if (!frame || !path || !expression || !workspaceId || !Number.isSafeInteger(value?.requestId)) return true;
+    const requestId = value.requestId;
+    closeHover();
+    pendingHover = requestId;
+    try {
+      const result = await ctx.modules.call("debug", "evaluate", { workspaceId, id: frame.id, conn: frame.conn, frameId: frame.frameId, expression, context: "hover" });
+      if (pendingHover !== requestId || !result || typeof result.value !== "string") return true;
+      pendingHover = null;
+      hover = { requestId, path, expression, frame, result };
+      if (result.variablesReference > 0) {
+        hoverExpanded.add("hover");
+        hooks.invalidate();
+        await loadHoverChildren(ctx, hoverRange(result));
+      }
+    } catch {
+    } finally {
+      if (pendingHover === requestId) pendingHover = null;
+    }
+    hooks.invalidate();
+    return true;
+  }
+  if (!hover || hover.path !== path) return true;
+  if (action === "debugHoverExpand") {
+    const key2 = value?.rowKey;
+    const range = typeof key2 === "string" ? hoverRanges.get(key2) : void 0;
+    if (!range) return true;
+    if (hoverExpanded.has(key2)) hoverExpanded.delete(key2);
+    else {
+      hoverExpanded.add(key2);
+      hooks.invalidate();
+      await loadHoverChildren(ctx, range);
+    }
+  } else if (action === "debugHoverWatch") {
+    ctx.events.emit("viewer.debugAddWatch", { workspaceId, expression: typeof value === "string" && value ? value : hover.expression });
+  }
+  hooks.invalidate();
+  return true;
+}
+var hoverRange = (v) => ({ variablesReference: v.variablesReference, ...(v.indexedVariables || 0) > VALUE_PAGE ? { filter: "named" } : {} });
+async function loadHoverChildren(ctx, range) {
+  const h = hover;
+  if (!h || hoverChildren.has(childKey(range))) return;
+  const { variablesReference, start, count, filter } = range;
+  const list = await ctx.modules.call("debug", "variables", {
+    workspaceId,
+    id: h.frame.id,
+    conn: h.frame.conn,
+    variablesReference,
+    ...filter ? { filter } : {},
+    ...start !== void 0 ? { start, count } : {}
+  }).catch(() => []);
+  if (hover === h) hoverChildren.set(childKey(range), list || []);
+}
+var ROW = 22;
+var ROW_GAP = 0;
+var HOVER_WIDTH = 360;
+var TREE_MAX = 236;
+function hoverNode(h) {
+  const v = h.result, d = describeValue(v);
+  hoverRanges.clear();
+  const rows = v.variablesReference > 0 && hoverExpanded.has("hover") ? valueTreeRows(hoverRange(v), "hover", 0, {
+    children: (k) => hoverChildren.get(k),
+    expanded: hoverExpanded,
+    ranges: hoverRanges,
+    maxRows: 500,
+    menu: (x) => x.evaluateName ? [{ text: "Add to watches", action: "debugHoverWatch", value: x.evaluateName }] : []
+  }, [], v.indexedVariables || 0) : [];
+  return {
+    type: "column",
+    key: "debug-hover",
+    width: HOVER_WIDTH,
+    gap: 4,
+    style: { background: "panel", padding: 8, radius: 8, borderWidth: 1, borderColor: "border", shadow: "md" },
+    children: [
+      { type: "row", key: "head", gap: 6, align: "center", children: [
+        { type: "label", key: "expr", text: h.expression, mono: true, weight: "semibold", size: "sm", selectable: true, style: { noShrink: true } },
+        ...d.badge ? [{ type: "label", key: "type", text: d.badge, size: "xs", color: "muted", tooltip: v.type }] : [],
+        { type: "column", key: "space", grow: true, children: [] },
+        ...v.evaluateName || h.expression ? [{
+          type: "button",
+          key: "watch",
+          text: "",
+          iconSvg: WATCH_ICON,
+          iconSize: 14,
+          action: "debugHoverWatch",
+          value: h.expression,
+          variant: "ghost",
+          small: true,
+          width: 24,
+          tooltip: "Add to watches"
+        }] : [],
+        { type: "button", key: "copy", text: "", iconSvg: COPY_ICON, iconSize: 14, action: "", copyText: v.value, variant: "ghost", small: true, width: 24, tooltip: "Copy value" }
+      ] },
+      {
+        type: "label",
+        key: "value",
+        text: d.kind === "object" && rows.length ? d.summary : d.kind === "string" && d.truncated ? v.value : d.summary,
+        mono: true,
+        wrap: true,
+        selectable: true,
+        color: d.color,
+        size: "sm",
+        maxHeight: d.kind === "string" ? 120 : void 0
+      },
+      ...rows.length ? [{
+        type: "tree",
+        key: "fields",
+        rows,
+        selectAction: "",
+        expandAction: "debugHoverExpand",
+        rowHeight: ROW,
+        rowGap: ROW_GAP,
+        indent: 14,
+        height: Math.min(TREE_MAX, rows.length * (ROW + ROW_GAP))
+      }] : []
+    ]
+  };
+}
+var WATCH_ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+var COPY_ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg>';
+
+// modules/ui/viewer/src/index.ts
+var heads = /* @__PURE__ */ new Map();
+var hunks = [];
+var hunkView = null;
+var runGutter = null;
+var runAvailable = false;
+var runMenu = null;
+var runSourceKey = "";
+function publishRunSource(ctx) {
+  const source = current && !current.diff && !current.virtual && !current.binary && !current.truncated ? { workspaceId: current.workspaceId, path: current.relativePath } : null;
+  const key2 = source ? JSON.stringify(source) : "";
+  if (key2 === runSourceKey) return;
+  runSourceKey = key2;
+  runMenu = null;
+  ctx.state.set("viewer.runSource", source);
+}
+async function openRunLocation(ctx, location) {
+  if (!location || location.workspaceId !== ws?.id || !Number.isInteger(location.line) || location.line < 0) return;
+  const { workspaceId: workspaceId2, line } = location, root = ws.rootAbsolutePath;
+  const character = Number.isInteger(location.character) && location.character >= 0 ? location.character : 0;
+  let path = typeof location.path === "string" ? location.path.replace(/\\/g, "/").replace(/^\.\//, "") : null;
+  if (path && (path.startsWith("/") || /^[A-Za-z]:/.test(path))) path = workspacePath(root, fileUri(path));
+  if (!path && typeof location.suffix === "string" && location.suffix.length <= 300 && !location.suffix.split("/").includes("..")) {
+    const suffix = location.suffix.replace(/^\/+/, "");
+    const { entries } = await ctx.modules.call("files", "search", { workspaceId: workspaceId2, query: suffix.split("/").pop(), hideIgnored: true });
+    const rank = (name) => /(^|\/)(src\/main|main)\//.test(name) ? 0 : /(^|\/)(test|tests|src\/test)\//.test(name) ? 2 : 1;
+    path = entries.filter((e) => e.kind === "file").map((e) => e.relativePath).filter((p) => p === suffix || p.endsWith("/" + suffix)).sort((a, b) => rank(a) - rank(b) || a.length - b.length || a.localeCompare(b))[0] ?? null;
+  }
+  if (workspaceId2 !== ws?.id) return;
+  if (!path || path.split("/").some((segment) => segment === ".." || !segment) || /[\r\n\0]/.test(path)) throw new Error("Source location could not be found in this workspace.");
+  navigation = { workspaceId: workspaceId2, path, key: crypto.randomUUID(), line, character };
+  await ctx.modules.call("workspace", "view.patch", { workspaceId: workspaceId2, patch: { previewPath: path } });
+  ctx.ui.invalidate();
+}
+var gitMarkers = true;
+var declarationAuthors = true;
+var headKey = (workspaceId2, path) => `${workspaceId2}|${path}`;
+function computeHunks(head, text) {
+  if (head === null || typeof text !== "string") return [];
+  const a = head.split("\n"), b = text.split("\n");
+  if (a.length > 2e4 || b.length > 2e4) return [];
+  const out = [];
+  let line = 0, cur = null;
+  for (const op of diffLines(a, b)) {
+    if (op.kind === " ") {
+      cur = null;
+      line++;
+      continue;
+    }
+    if (!cur) {
+      cur = { line, added: 0, removed: [], current: [] };
+      out.push(cur);
+    }
+    if (op.kind === "+") {
+      cur.added++;
+      cur.current.push(op.line);
+      line++;
+    } else cur.removed.push(op.line);
+  }
+  return out;
+}
+var showMetadata = true;
+var renderMarkdown = true;
+var diffMode = "split";
+var editorWrap = false;
+var viewerWrap = true;
+var publishSettings = () => {
+};
+var presentation = null;
+var ws = null;
+var current = null;
+var error = null;
+var loadingPath = null;
+var editable = true;
+var autosave = true;
+var autosaveDelay = 800;
+var AUTOSAVE_DELAYS = [300, 800, 2e3, 5e3];
+var GLOBAL_FONT = "global";
+var editorFontOptions = [{ value: GLOBAL_FONT, label: "Global default" }, ...fontOptions.filter((o) => o.value !== "system")];
+var FONT_NUMBERS = {
+  fontWeight: { min: 100, max: 900, step: 100, unit: "", label: "Font weight" },
+  fontSize: { min: 8, max: 40, step: 1, unit: " px", label: "Size" },
+  lineHeight: { min: 1, max: 3, step: 0.05, unit: "×", label: "Line height" }
+};
+var editorFont = { family: GLOBAL_FONT, fontWeight: "", fontSize: "", lineHeight: "" };
+function fontNumber(key2, raw) {
+  const text = String(raw ?? "").trim();
+  if (!text) return "";
+  const value = Number(text), { min, max, label } = FONT_NUMBERS[key2];
+  if (!Number.isFinite(value) || value < min || value > max) throw new Error(`${label} must be between ${min} and ${max}, or empty for the global default`);
+  return String(value);
+}
+function editorFontNode() {
+  const font = {};
+  if (editorFont.family !== GLOBAL_FONT) font.family = editorFont.family;
+  if (editorFont.fontWeight) font.weight = Number(editorFont.fontWeight);
+  if (editorFont.fontSize) font.size = Number(editorFont.fontSize);
+  if (editorFont.lineHeight) font.lineHeight = Number(editorFont.lineHeight);
+  return Object.keys(font).length ? font : void 0;
+}
+var buffers = /* @__PURE__ */ new Map();
+var saveTimer = null;
+function bufferFor(path) {
+  if (!path || !ws) return void 0;
+  for (const b of buffers.values()) if (b.workspaceId === ws.id && b.path === path) return b;
+  return void 0;
+}
+var unsaved = (b) => !!b && b.state !== "clean";
+var virtuals = /* @__PURE__ */ new Map();
+var virtualKey = (workspaceId2, tab) => `${workspaceId2}|${tab}`;
+var virtualSaves = /* @__PURE__ */ new Map();
+function saveVirtual(ctx, b, text, force) {
+  const requestId = crypto.randomUUID();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      virtualSaves.delete(requestId);
+      reject(new Error(`${parseVirtualTab(b.path)?.provider} did not save the document. Is its plugin enabled?`));
+    }, 3e4);
+    virtualSaves.set(requestId, { tab: b.path, workspaceId: b.workspaceId, text, force, taken: false, resolve, reject, timer });
+    ctx.events.emit("viewer.virtualSave", { requestId, workspaceId: b.workspaceId, tab: b.path });
+  });
+}
+function ownSave(a, caller) {
+  const pending2 = virtualSaves.get(String(a?.requestId || ""));
+  if (!pending2 || !caller || parseVirtualTab(pending2.tab)?.provider !== caller) throw new Error("Unknown save request");
+  return pending2;
+}
+function showVirtual(v) {
+  current = {
+    virtual: true,
+    ...v.diff ? { diff: true } : {},
+    workspaceId: v.workspaceId,
+    tab: v.tab,
+    relativePath: v.tab,
+    title: v.title,
+    document: v.error ? null : v.document,
+    text: v.text,
+    editable: v.diff ? false : v.editable,
+    language: languageForPath(languages, v.tab)?.grammar || (/\.md$/i.test(v.tab) ? "markdown" : "text"),
+    size: new TextEncoder().encode(v.text).length
+  };
+  error = v.error ?? null;
+  languageError = null;
+  hunks = [];
+  hunkView = null;
+}
+var tabTitle = (tab) => ws && virtuals.get(virtualKey(ws.id, tab))?.title || diffTabPath(tab) || tab;
+async function save(ctx, b, force = false) {
+  if (b.text === null) return;
+  if (b.inflight) {
+    b.again = true;
+    return;
+  }
+  b.inflight = true;
+  b.again = false;
+  b.state = "saving";
+  ctx.ui.invalidate();
+  const text = b.text;
+  try {
+    const virtual = !!parseVirtualTab(b.path);
+    const r = virtual ? await saveVirtual(ctx, b, text, force) : await ctx.modules.call("files", "save", { workspaceId: b.workspaceId, relativePath: b.path, text, expectedMtime: b.mtime, force }, { timeoutMs: 6e5 });
+    b.mtime = r?.mtime ?? b.mtime;
+    const v = virtuals.get(virtualKey(b.workspaceId, b.path));
+    if (v) v.text = text;
+    if (current?.workspaceId === b.workspaceId && current.relativePath === b.path) current.text = text;
+    if (b.text === text) {
+      b.state = "clean";
+      b.text = null;
+    } else b.state = "dirty";
+    b.error = void 0;
+    if (current?.workspaceId === b.workspaceId && current.relativePath === b.path) refreshAuthorship(ctx);
+    if (languageService && !virtual) void ctx.modules.call("language-service", "saved", { workspaceId: b.workspaceId, path: b.path, text }, { timeoutMs: 175e3 }).catch((e) => ctx.log.warn(errMsg(e)));
+  } catch (e) {
+    const msg = errMsg(e);
+    b.state = e?.code === "ECONFLICT" || /changed on disk/.test(msg) ? "conflict" : "error";
+    b.error = msg;
+    b.again = false;
+  } finally {
+    b.inflight = false;
+    if (b.again && b.state === "dirty") void save(ctx, b);
+    ctx.ui.invalidate();
+  }
+}
+function scheduleSaves(ctx, now = false) {
+  if (saveTimer) clearTimeout(saveTimer);
+  const run = () => {
+    saveTimer = null;
+    for (const b of buffers.values()) if (b.state === "dirty") void save(ctx, b);
+  };
+  if (now) run();
+  else saveTimer = setTimeout(run, autosaveDelay);
+}
+var tabs = [];
+var tabMenu = null;
+var shellRequests = /* @__PURE__ */ new Map();
+function runShellBlock(ctx, args) {
+  const requestId = crypto.randomUUID();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      shellRequests.delete(requestId);
+      reject(new Error("Opening the shell block terminal timed out."));
+    }, 6e4);
+    shellRequests.set(requestId, { resolve, reject, timer });
+    ctx.events.emit("viewer.runCode", { requestId, ...args });
+  });
+}
+var generation2 = 0;
+var languages = [];
+var languageService = false;
+var languageError = null;
+var projectLanguageEnabled = true;
+var languageTimer = null;
+function languageRequest() {
+  const buffer = current?.document ? buffers.get(current.document) : void 0;
+  return {
+    workspaceId: ws?.id,
+    path: current?.relativePath,
+    text: buffer?.text ?? current?.text,
+    documents: [...buffers.values()].filter((b) => b.workspaceId === ws?.id && b.text !== null).map((b) => ({ path: b.path, text: b.text }))
+  };
+}
+var semantic = /* @__PURE__ */ new Map();
+var SEMANTIC_CAPTURES = {
+  interface: ["type", "type.interface"],
+  enum: ["type", "type.enum"],
+  typeParameter: ["type", "type.typeParameter"],
+  property: ["variable", "property"],
+  enumMember: ["variable", "constant"]
+};
+function nameCaptures(workspaceId2, path) {
+  var _a;
+  const names = workspaceId2 && path ? semantic.get(headKey(workspaceId2, path)) : void 0;
+  if (!names) return void 0;
+  const out = {};
+  for (const [name, kind] of Object.entries(names)) {
+    const target = SEMANTIC_CAPTURES[kind];
+    if (target) (out[_a = target[0]] ?? (out[_a] = {}))[name] = target[1];
+  }
+  return Object.keys(out).length ? out : void 0;
+}
+async function refreshSemantic(ctx, request) {
+  const key2 = headKey(request.workspaceId, request.path);
+  try {
+    const names = await ctx.modules.call("language-service", "semanticNames", request, { timeoutMs: 6e4 });
+    if (!names || typeof names !== "object") return;
+    if (!Object.keys(names).length && semantic.has(key2)) return;
+    if (JSON.stringify(semantic.get(key2)) === JSON.stringify(names)) return;
+    semantic.delete(key2);
+    semantic.set(key2, names);
+    while (semantic.size > 40) semantic.delete(semantic.keys().next().value);
+    if (request.workspaceId === ws?.id && request.path === current?.relativePath) ctx.ui.invalidate();
+  } catch (e) {
+    ctx.log.warn(`semantic names: ${errMsg(e)}`);
+  }
+}
+async function synchronizeLanguage(ctx) {
+  const request = languageRequest();
+  const language = languageForPath(languages, request.path || "");
+  if (!languageService || !language?.server || current?.virtual || current?.binary || current?.truncated || current?.diff || typeof request.text !== "string") {
+    projectLanguageEnabled = true;
+    ctx.ui.invalidate();
+    return;
+  }
+  const project = await ctx.modules.call("language-service", "project.get", { workspaceId: request.workspaceId, serverId: language.server.id }).catch(() => null);
+  projectLanguageEnabled = project?.config.enabled !== false;
+  if (request.workspaceId !== ws?.id || request.path !== current?.relativePath || !projectLanguageEnabled) return;
+  try {
+    await ctx.modules.call("language-service", "synchronize", request, { timeoutMs: 175e3 });
+    if (request.workspaceId === ws?.id && request.path === current?.relativePath) {
+      languageError = null;
+      ctx.ui.invalidate();
+      void refreshSemantic(ctx, request);
+    }
+  } catch (e) {
+    if (request.workspaceId === ws?.id && request.path === current?.relativePath) {
+      languageError = errMsg(e);
+      ctx.ui.invalidate();
+    }
+  }
+}
+async function editorRequest(ctx, a, method) {
+  const buffer = buffers.get(a.document);
+  const empty = method === "hover" || method === "signatureHelp" ? null : [];
+  if (!languageService || !buffer || buffer.workspaceId !== a.workspaceId || buffer.path !== a.path || typeof a.text !== "string") return empty;
+  try {
+    const result = await ctx.modules.call("language-service", method, {
+      ...a,
+      documents: [...buffers.values()].filter((b) => b.workspaceId === buffer.workspaceId && b.text !== null).map((b) => ({ path: b.path, text: b.text }))
+    }, { timeoutMs: 175e3 });
+    languageError = null;
+    ctx.ui.invalidate();
+    return result;
+  } catch (e) {
+    languageError = errMsg(e);
+    ctx.ui.invalidate();
+    return empty;
+  }
+}
+var shapedOriginals = /* @__PURE__ */ new Map();
+var shapeKey = (item) => `${item.label}\0${JSON.stringify(item.data ?? null)}`;
+async function completionOwner(ctx, a) {
+  if (typeof a.text !== "string" || !validPosition(a.position)) return null;
+  const lines2 = a.text.split("\n");
+  const line = lines2[a.position.line] ?? "";
+  let offset = 0;
+  for (let i = 0; i < a.position.line; i++) offset += lines2[i].length + 1;
+  const enclosing = enclosingType(a.text, offset + a.position.character);
+  const receiver = receiverAt(line, a.position.character);
+  if (!receiver) return enclosing;
+  if (receiver.name === "this") return enclosing;
+  const hover2 = await editorRequest(ctx, { ...a, position: { line: a.position.line, character: receiver.character } }, "hover");
+  return hoverType(hover2) ?? (/^[A-Z]/.test(receiver.name) ? receiver.name : null);
+}
+var navigation = null;
+async function refreshLanguages(ctx) {
+  const { plugins } = await ctx.host.plugins.list();
+  languages = languageDefinitions(plugins);
+  runAvailable = plugins.some((p) => p.id === "run" && p.enabled && !!p.active);
+  languageService = plugins.some((p) => p.id === "language-service" && p.enabled && !!p.active);
+  ctx.ui.invalidate();
+  void synchronizeLanguage(ctx);
+}
+function restoreTabs() {
+  const saved = ws?.view?.ui?.viewerTabs;
+  tabs = Array.isArray(saved) ? saved.filter((p) => typeof p === "string") : [];
+}
+async function saveTabs(ctx) {
+  await ctx.modules.call("workspace", "view.patch", { workspaceId: ws.id, patch: { ui: { viewerTabs: [...tabs] } } });
+}
+async function load(ctx, force = false) {
+  const path = ws?.view?.previewPath || null;
+  const workspaceId2 = ws?.id;
+  if (!workspaceId2 || !path) {
+    generation2++;
+    loadingPath = null;
+    current = null;
+    projectLanguageEnabled = true;
+    error = null;
+    publishRunSource(ctx);
+    ctx.ui.invalidate();
+    return;
+  }
+  if (!tabs.includes(path)) {
+    tabs.push(path);
+    await saveTabs(ctx);
+  }
+  if (ws?.id !== workspaceId2 || ws?.view?.previewPath !== path) return;
+  if (!force && current?.workspaceId === workspaceId2 && current.tab === path || loadingPath === path) return;
+  const virtualTab = parseVirtualTab(path);
+  if (virtualTab) {
+    const known2 = virtuals.get(virtualKey(workspaceId2, path));
+    if (known2 && !force) {
+      generation2++;
+      loadingPath = null;
+      showVirtual(known2);
+      ctx.ui.invalidate();
+      return;
+    }
+    const mine2 = ++generation2;
+    if (!force) current = null;
+    error = null;
+    loadingPath = path;
+    ctx.ui.invalidate();
+    ctx.events.emit("viewer.virtualRequest", { workspaceId: workspaceId2, tab: path });
+    setTimeout(() => {
+      if (mine2 !== generation2 || loadingPath !== path) return;
+      loadingPath = null;
+      error = `Cannot open ${path.split("/").pop()}: the ${virtualTab.provider} plugin did not respond. Is it enabled?`;
+      ctx.ui.invalidate();
+    }, 1e4);
+    return;
+  }
+  const mine = ++generation2;
+  const diffPath = diffTabPath(path);
+  const known = !force && !diffPath ? opened.get(openedKey(workspaceId2, path)) : void 0;
+  if (known) {
+    current = known;
+    languageError = null;
+    updateHunks();
+  } else if (!force) {
+    current = null;
+    languageError = null;
+  }
+  error = null;
+  loadingPath = path;
+  ctx.ui.invalidate();
+  if (known) void synchronizeLanguage(ctx);
+  try {
+    const r = diffPath ? { ...await ctx.modules.call("git", "diff", { workspaceId: workspaceId2, path: diffPath, ...isTaskDiffTab(path) ? { taskBaseline: true } : {} }, { timeoutMs: 45e3 }), diff: true, relativePath: diffPath } : await ctx.modules.call("files", "open", { workspaceId: workspaceId2, relativePath: path, includeText: true });
+    const keep = known && r.document !== known.document && unsaved(buffers.get(known.document));
+    if (mine === generation2 && !keep) {
+      current = { ...r, workspaceId: workspaceId2, tab: path };
+      error = null;
+      if (!r.diff && !r.binary && r.document) rememberOpened(current);
+      if (!r.diff && r.document && !buffers.has(r.document)) {
+        for (const [doc, b] of buffers) if (b.workspaceId === workspaceId2 && b.path === r.relativePath && b.state === "clean") buffers.delete(doc);
+        buffers.set(r.document, { workspaceId: workspaceId2, path: r.relativePath, mtime: r.mtime ?? null, text: null, state: "clean" });
+      }
+    }
+  } catch (e) {
+    if (mine === generation2) {
+      error = errMsg(e);
+      current = null;
+      opened.delete(openedKey(workspaceId2, path));
+    }
+  } finally {
+    if (mine === generation2) {
+      loadingPath = null;
+      if (!known || current?.document !== known.document) void synchronizeLanguage(ctx);
+      publishRunSource(ctx);
+      void refreshHead(ctx);
+      refreshAuthorship(ctx);
+    }
+    ctx.ui.invalidate();
+  }
+}
+var opened = /* @__PURE__ */ new Map();
+var OPENED_LIMIT = 40;
+var openedKey = (workspaceId2, path) => `${workspaceId2}|${path}`;
+function rememberOpened(result) {
+  const key2 = openedKey(result.workspaceId, result.tab);
+  opened.delete(key2);
+  opened.set(key2, result);
+  while (opened.size > OPENED_LIMIT) opened.delete(opened.keys().next().value);
+}
+function updateHunks() {
+  const head = current && !current.diff && !current.binary && !current.truncated && ws ? heads.get(headKey(ws.id, current.relativePath)) : void 0;
+  const text = current?.document ? buffers.get(current.document)?.text ?? current.text : void 0;
+  hunks = gitMarkers && head?.tracked ? computeHunks(head.text, text) : [];
+  if (hunkView && !hunks[hunkView.index]) hunkView = null;
+}
+async function refreshHead(ctx) {
+  if (!gitMarkers || !ws || !current || current.diff || current.binary || current.virtual) {
+    updateHunks();
+    ctx.ui.invalidate();
+    return;
+  }
+  const workspaceId2 = ws.id, path = current.relativePath;
+  try {
+    const r = await ctx.modules.call("git", "headText", { workspaceId: workspaceId2, path }, { timeoutMs: 3e4 });
+    heads.set(headKey(workspaceId2, path), { text: r?.text ?? null, tracked: !!r?.tracked });
+  } catch {
+    heads.delete(headKey(workspaceId2, path));
+  }
+  updateHunks();
+  ctx.ui.invalidate();
+}
+function refreshAuthorship(ctx) {
+  if (!declarationAuthors || !ws || !current || current.diff || current.virtual || current.binary || current.truncated || !current.document) return;
+  if (!hasDeclarations(languageForPath(languages, current.relativePath)?.grammar)) return;
+  const text = buffers.get(current.document)?.text ?? current.text;
+  if (typeof text !== "string") return;
+  void refreshBlame(ctx, ws.id, current.relativePath, text).then((changed) => {
+    if (changed) ctx.ui.invalidate();
+  });
+}
+async function setDeclarationAuthors(ctx, enabled) {
+  await ctx.modules.call("persistence", "settings.set", { key: "viewer.declarationAuthors", value: enabled });
+  declarationAuthors = enabled;
+  if (enabled) refreshAuthorship(ctx);
+  ctx.ui.invalidate();
+}
+function tabLabel(tab) {
+  const file = diffTabPath(tab) ?? tab;
+  const name = file.split("/").pop() || file;
+  return diffTabPath(tab) ? `Δ ${name}` : unsaved(bufferFor(tab)) ? `● ${name}` : name;
+}
+async function refreshFromDisk(ctx) {
+  if (!current || current.diff || current.virtual || current.binary || !ws) return;
+  const b = buffers.get(current.document);
+  if (!b || b.state !== "clean" || b.inflight) return;
+  const st = await ctx.modules.call("files", "stat", { workspaceId: ws.id, relativePath: current.relativePath }).catch(() => null);
+  if (!st || st.error || st.mtime == null || st.mtime === b.mtime) return;
+  if (buffers.get(current?.document) === b && b.state === "clean") void load(ctx, true);
+}
+function saveStatus(b) {
+  if (!b) return { text: "", color: "muted" };
+  switch (b.state) {
+    case "saving":
+      return { text: "Saving…", color: "muted" };
+    case "dirty":
+      return { text: autosave ? "Edited" : "Unsaved", color: autosave ? "muted" : "warning" };
+    case "error":
+      return { text: "Save failed", color: "danger", tooltip: b.error };
+    case "conflict":
+      return { text: parseVirtualTab(b.path) ? "Changed elsewhere" : "Changed on disk", color: "warning", tooltip: b.error };
+    default:
+      return { text: b.mtime != null ? "Saved" : "", color: "muted" };
+  }
+}
+var mod = {
+  id: "viewer",
+  moduleApiVersion: 1,
+  async activate(ctx, prev) {
+    presentation = new FilePresentationClient(ctx);
+    ctx.events.on("terminal-panel.runCodeResult", (result) => {
+      const pending2 = shellRequests.get(result?.requestId);
+      if (!pending2) return;
+      shellRequests.delete(result.requestId);
+      clearTimeout(pending2.timer);
+      if (result.error) pending2.reject(new Error(result.error));
+      else pending2.resolve();
+    });
+    await refreshLanguages(ctx);
+    ctx.events.on("kernel.modules.changed", () => {
+      void refreshLanguages(ctx).catch((e) => ctx.log.warn(errMsg(e)));
+    });
+    const saved = await ctx.modules.call("persistence", "settings.get", { key: "viewer.showMetadata" });
+    showMetadata = typeof saved === "boolean" ? saved : true;
+    const savedMarkdown = await ctx.modules.call("persistence", "settings.get", { key: "viewer.renderMarkdown" });
+    renderMarkdown = typeof savedMarkdown === "boolean" ? savedMarkdown : true;
+    const savedDiffMode = await ctx.modules.call("persistence", "settings.get", { key: "viewer.diffMode" });
+    diffMode = savedDiffMode === "unified" ? "unified" : "split";
+    const savedEditorWrap = await ctx.modules.call("persistence", "settings.get", { key: "viewer.editorWrap" });
+    editorWrap = typeof savedEditorWrap === "boolean" ? savedEditorWrap : false;
+    const savedViewerWrap = await ctx.modules.call("persistence", "settings.get", { key: "viewer.viewerWrap" });
+    viewerWrap = typeof savedViewerWrap === "boolean" ? savedViewerWrap : true;
+    const savedMarkers = await ctx.modules.call("persistence", "settings.get", { key: "viewer.gitMarkers" });
+    gitMarkers = typeof savedMarkers === "boolean" ? savedMarkers : true;
+    const savedAuthors = await ctx.modules.call("persistence", "settings.get", { key: "viewer.declarationAuthors" });
+    declarationAuthors = typeof savedAuthors === "boolean" ? savedAuthors : true;
+    const savedEditable = await ctx.modules.call("persistence", "settings.get", { key: "viewer.editable" });
+    editable = typeof savedEditable === "boolean" ? savedEditable : true;
+    const savedAutosave = await ctx.modules.call("persistence", "settings.get", { key: "viewer.autosave" });
+    autosave = typeof savedAutosave === "boolean" ? savedAutosave : true;
+    const savedDelay = await ctx.modules.call("persistence", "settings.get", { key: "viewer.autosaveDelay" });
+    autosaveDelay = AUTOSAVE_DELAYS.includes(Number(savedDelay)) ? Number(savedDelay) : 800;
+    const savedFont = await ctx.modules.call("persistence", "settings.get", { key: "viewer.editorFont" });
+    editorFont = { family: editorFontOptions.some((o) => o.value === savedFont?.family) ? savedFont.family : GLOBAL_FONT, fontWeight: "", fontSize: "", lineHeight: "" };
+    for (const key2 of Object.keys(FONT_NUMBERS)) {
+      try {
+        editorFont[key2] = fontNumber(key2, savedFont?.[key2]);
+      } catch {
+      }
+    }
+    for (const [doc, b] of Object.entries(prev?.buffers || {})) buffers.set(doc, { ...b, inflight: false, again: false });
+    for (const v of Array.isArray(prev?.virtuals) ? prev.virtuals : []) if (parseVirtualTab(v?.tab) && typeof v.workspaceId === "string") virtuals.set(virtualKey(v.workspaceId, v.tab), v);
+    await restoreHistory(ctx, prev);
+    publishSettings = exportSettings(ctx, () => [{ key: "viewer", title: "Source editor", fields: [
+      {
+        key: "editable",
+        label: "Edit files",
+        type: "toggle",
+        value: editable,
+        description: "Allow editing in the source panel. The first save in a workspace asks for write access."
+      },
+      {
+        key: "autosave",
+        label: "Autosave",
+        type: "toggle",
+        value: autosave,
+        description: "Save edits automatically after you stop typing. When off, use Save in the status bar."
+      },
+      {
+        key: "autosaveDelay",
+        label: "Autosave delay",
+        type: "select",
+        value: String(autosaveDelay),
+        options: AUTOSAVE_DELAYS.map((ms) => ({ value: String(ms), label: ms < 1e3 ? `${ms} ms` : `${ms / 1e3} s` })),
+        description: "Quiet time after the last keystroke before saving."
+      },
+      {
+        key: "editorWrap",
+        label: "Wrap lines in the editor",
+        type: "toggle",
+        value: editorWrap,
+        description: "Soft-wrap long lines when editing source files (including Markdown source)."
+      },
+      {
+        key: "viewerWrap",
+        label: "Wrap lines in diffs",
+        type: "toggle",
+        value: viewerWrap,
+        description: "Soft-wrap long lines in Git diff review. Markdown previews always reflow."
+      },
+      {
+        key: "gitMarkers",
+        label: "Show Git change bars",
+        type: "toggle",
+        value: gitMarkers,
+        description: "Mark added, changed and deleted lines next to the line numbers. Click a bar to review or roll back the change."
+      },
+      {
+        key: "declarationAuthors",
+        label: "Show authors next to declarations",
+        type: "toggle",
+        value: declarationAuthors,
+        description: "Show who last changed a declaration and when in Java, JavaScript and TypeScript."
+      },
+      {
+        key: "showMetadata",
+        label: "Show file metadata",
+        type: "toggle",
+        value: showMetadata,
+        description: "Display the language and file size in the bottom status bar."
+      },
+      {
+        key: "renderMarkdown",
+        label: "Preview Markdown files",
+        type: "toggle",
+        value: renderMarkdown,
+        description: "Render Markdown documents. Switch between Preview and Source in the viewer status bar."
+      },
+      {
+        key: "diffMode",
+        label: "Diff layout",
+        type: "select",
+        value: diffMode,
+        options: [{ value: "split", label: "Side by side" }, { value: "unified", label: "Unified" }],
+        description: "How Git diffs are compared. Switch in the viewer status bar."
+      }
+    ] }, { key: "viewer-font", title: "Editor font", fields: [
+      {
+        key: "fontFamily",
+        label: "Font",
+        type: "select",
+        value: editorFont.family,
+        options: editorFontOptions,
+        description: editorFont.family === GLOBAL_FONT ? "Follows the interface font." : "Source editor only."
+      },
+      ...Object.keys(FONT_NUMBERS).map((key2) => ({
+        key: key2,
+        label: FONT_NUMBERS[key2].label,
+        type: "range",
+        value: editorFont[key2],
+        min: FONT_NUMBERS[key2].min,
+        max: FONT_NUMBERS[key2].max,
+        step: FONT_NUMBERS[key2].step,
+        unit: FONT_NUMBERS[key2].unit,
+        allowDefault: true,
+        defaultLabel: "Global",
+        description: editorFont[key2] ? "Source editor only. ↺ returns to the interface default." : "Follows the interface typography."
+      }))
+    ] }], async (section, key2, value) => {
+      if (section === "viewer-font") {
+        const next = { ...editorFont };
+        if (key2 === "fontFamily") {
+          if (typeof value !== "string" || !editorFontOptions.some((o) => o.value === value)) throw new Error("Invalid editor font");
+          next.family = value;
+        } else if (key2 in FONT_NUMBERS) next[key2] = fontNumber(key2, value);
+        else throw new Error("Invalid editor font setting");
+        await ctx.modules.call("persistence", "settings.set", { key: "viewer.editorFont", value: next });
+        editorFont = next;
+        ctx.ui.invalidate();
+        return;
+      }
+      if (key2 === "diffMode") {
+        if (value !== "split" && value !== "unified") throw new Error("Invalid diff layout");
+        await ctx.modules.call("persistence", "settings.set", { key: "viewer.diffMode", value });
+        diffMode = value;
+        return;
+      }
+      if (key2 === "autosaveDelay") {
+        const ms = Number(value);
+        if (!AUTOSAVE_DELAYS.includes(ms)) throw new Error("Invalid autosave delay");
+        await ctx.modules.call("persistence", "settings.set", { key: "viewer.autosaveDelay", value: ms });
+        autosaveDelay = ms;
+        return;
+      }
+      if (key2 === "declarationAuthors" && typeof value === "boolean") return setDeclarationAuthors(ctx, value);
+      if (!["showMetadata", "renderMarkdown", "editable", "autosave", "editorWrap", "viewerWrap", "gitMarkers"].includes(key2) || typeof value !== "boolean") throw new Error("Invalid viewer setting");
+      await ctx.modules.call("persistence", "settings.set", { key: `viewer.${key2}`, value });
+      if (key2 === "showMetadata") showMetadata = value;
+      else if (key2 === "renderMarkdown") renderMarkdown = value;
+      else if (key2 === "editable") editable = value;
+      else if (key2 === "editorWrap") editorWrap = value;
+      else if (key2 === "viewerWrap") viewerWrap = value;
+      else if (key2 === "gitMarkers") {
+        gitMarkers = value;
+        void refreshHead(ctx);
+      } else {
+        autosave = value;
+        if (value) scheduleSaves(ctx);
+      }
+      ctx.ui.invalidate();
+    });
+    exportMcpTools(ctx, "Source editor", [
+      {
+        name: "declaration_authors_get",
+        description: "Read the desktop-wide setting for declaration author annotations in the source editor.",
+        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+        annotations: { readOnlyHint: true },
+        handler: () => ({ enabled: declarationAuthors })
+      },
+      {
+        name: "declaration_authors_set",
+        description: "Enable or disable declaration author annotations across all workspaces in this desktop editor.",
+        inputSchema: { type: "object", properties: { enabled: { type: "boolean" } }, required: ["enabled"], additionalProperties: false },
+        annotations: { idempotentHint: true },
+        handler: async (args) => {
+          if (typeof args?.enabled !== "boolean") throw new Error("enabled must be a boolean");
+          const enabled = args.enabled;
+          await setDeclarationAuthors(ctx, enabled);
+          publishSettings();
+          return { enabled };
+        }
+      }
+    ]);
+    runSourceKey = "@activate";
+    runGutter = ctx.state.get("run-configurations.gutter") || null;
+    ctx.state.watch("run-configurations.gutter", (value) => {
+      runGutter = value;
+      ctx.ui.invalidate();
+    });
+    const openLocation = (value) => void openRunLocation(ctx, value).catch((e) => {
+      error = errMsg(e);
+      ctx.ui.invalidate();
+    });
+    ctx.events.on("viewer.openLocation", openLocation);
+    ctx.events.on("run-panel.openLocation", openLocation);
+    ws = ctx.state.get("workspace.selected") || null;
+    initDebug(ctx, {
+      invalidate: () => ctx.ui.invalidate(),
+      currentText: (path) => current && !current.diff && current.relativePath === path ? buffers.get(current.document)?.text ?? current.text ?? null : null,
+      reveal: (path, line) => {
+        if (ws) openLocation({ workspaceId: ws.id, path, line });
+      }
+    });
+    void loadDebug(ctx, ws?.id || null);
+    restoreTabs();
+    ctx.events.on("git-panel.statusChanged", (e) => {
+      if (current?.diff && !current.virtual && e?.workspaceId === ws?.id && ws?.view?.previewPath === current.tab) void load(ctx, true);
+    });
+    ctx.events.on("git.changed", (e) => {
+      if (e?.workspaceId !== ws?.id) return;
+      heads.clear();
+      void refreshHead(ctx);
+      forgetBlames();
+      refreshAuthorship(ctx);
+      if (current?.diff && isTaskDiffTab(current.tab) && ws?.view?.previewPath === current.tab) void load(ctx, true);
+    });
+    ctx.events.on("language-service.configurationChanged", () => {
+      void synchronizeLanguage(ctx);
+    });
+    ctx.events.on("language-service.changed", () => {
+      void synchronizeLanguage(ctx);
+    });
+    ctx.events.on("files.changed", (e) => {
+      if (e?.workspaceId === ws?.id) void refreshFromDisk(ctx);
+    });
+    ctx.state.watch("workspace.selected", (v) => {
+      const changed = ws?.id !== v?.id;
+      ws = v;
+      if (changed) void loadDebug(ctx, v?.id || null);
+      if (changed) {
+        projectLanguageEnabled = true;
+        languageError = null;
+        navigation = null;
+        generation2++;
+        current = null;
+        loadingPath = null;
+        restoreTabs();
+      }
+      void load(ctx);
+    });
+    await load(ctx);
+    if (autosave && [...buffers.values()].some((b) => b.state === "dirty")) scheduleSaves(ctx);
+  },
+  async deactivate(ctx) {
+    presentation?.dispose();
+    presentation = null;
+    if (languageTimer) clearTimeout(languageTimer);
+    for (const pending2 of shellRequests.values()) {
+      clearTimeout(pending2.timer);
+      pending2.reject(new Error("Editor reloaded."));
+    }
+    shellRequests.clear();
+    for (const pending2 of virtualSaves.values()) {
+      clearTimeout(pending2.timer);
+      pending2.reject(new Error("Editor reloaded."));
+    }
+    virtualSaves.clear();
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    if (autosave) await Promise.all([...buffers.values()].filter((b) => b.state === "dirty" && !parseVirtualTab(b.path)).map((b) => save(ctx, b)));
+  },
+  snapshot: () => ({ current, history: historySnapshot(), virtuals: [...virtuals.values()], buffers: Object.fromEntries([...buffers].filter(([, b]) => b.state !== "clean" || b.mtime != null).map(([d, b]) => [d, { ...b, inflight: false }])) }),
+  methods: {
+    /** Open or refresh a provider-owned tab (see @hato/sdk/virtual-documents). */
+    async "virtual.show"(ctx, a, meta) {
+      const tab = String(a?.tab || ""), parsed = parseVirtualTab(tab);
+      if (!parsed || !meta?.caller || parsed.provider !== meta.caller) throw new Error("Only the module named in a virtual tab can show it");
+      if (typeof a.workspaceId !== "string" || !a.workspaceId) throw new Error("workspaceId is required");
+      if (typeof a.text === "string" && a.text.length > 4 * 1024 * 1024) throw new Error("Document is too large");
+      const workspaceId2 = a.workspaceId, key2 = virtualKey(workspaceId2, tab), old = virtuals.get(key2);
+      const document = typeof a.document === "string" ? a.document : null;
+      const keep = !!old?.document && old.document !== document && unsaved(buffers.get(old.document));
+      if (keep) old.title = String(a.title || old.title);
+      else {
+        if (old?.document && old.document !== document && buffers.get(old.document)?.state === "clean") buffers.delete(old.document);
+        virtuals.set(key2, {
+          workspaceId: workspaceId2,
+          tab,
+          title: String(a.title || tab.split("/").pop()),
+          document,
+          text: typeof a.text === "string" ? a.text : "",
+          editable: a.editable !== false && !a.diff,
+          error: a.error ? String(a.error) : void 0,
+          ...a.diff ? { diff: true } : {}
+        });
+        if (document && !a.diff && !buffers.has(document)) buffers.set(document, { workspaceId: workspaceId2, path: tab, mtime: null, text: null, state: "clean" });
+      }
+      if (workspaceId2 === ws?.id) {
+        if (a.reveal !== false && ws.view?.previewPath !== tab) {
+          await ctx.modules.call("workspace", "view.patch", { workspaceId: workspaceId2, patch: { previewPath: tab } });
+        } else if (ws.view?.previewPath === tab || loadingPath === tab) {
+          generation2++;
+          loadingPath = null;
+          showVirtual(virtuals.get(key2));
+        }
+      }
+      ctx.ui.invalidate();
+      return { replaced: !keep };
+    },
+    "virtual.take"(_ctx, a, meta) {
+      const pending2 = ownSave(a, meta?.caller);
+      if (pending2.taken) throw new Error("Save request already taken");
+      pending2.taken = true;
+      return { workspaceId: pending2.workspaceId, tab: pending2.tab, text: pending2.text, force: pending2.force };
+    },
+    "virtual.saved"(_ctx, a, meta) {
+      const pending2 = ownSave(a, meta?.caller);
+      virtualSaves.delete(String(a.requestId));
+      clearTimeout(pending2.timer);
+      if (!a?.error) {
+        pending2.resolve({ mtime: Date.now() });
+        return;
+      }
+      const e = new Error(String(a.error));
+      if (a.conflict) e.code = "ECONFLICT";
+      pending2.reject(e);
+    },
+    "language.document"(_ctx, a) {
+      if (a.workspaceId !== ws?.id) throw new Error("The editor is showing a different workspace");
+      return languageRequest();
+    },
+    async "editor.openLocation"(ctx, a) {
+      if (a.workspaceId !== ws?.id || !validPosition(a.position)) throw new Error("Invalid workspace navigation");
+      const path = a.uri ? workspacePath(ws.rootAbsolutePath, a.uri) : a.path ? relativeFile(a.path) : null;
+      if (!path) throw new Error("Symbol is outside this workspace or has no source location");
+      navigation = { workspaceId: ws.id, path, key: crypto.randomUUID(), ...a.position };
+      await ctx.modules.call("workspace", "view.patch", { workspaceId: ws.id, patch: { previewPath: path } });
+    },
+    async "editor.definitions"(ctx, a) {
+      return editorRequest(ctx, a, "definitions");
+    },
+    async "editor.hover"(ctx, a) {
+      const hover2 = await editorRequest(ctx, a, "hover");
+      return hover2 ? shapeHover(hover2, { text: a.text, path: a.path, language: languageForPath(languages, String(a.path || ""))?.grammar }) : hover2;
+    },
+    async "editor.completions"(ctx, a) {
+      const [result, owner] = await Promise.all([editorRequest(ctx, a, "completions"), completionOwner(ctx, a).catch(() => null)]);
+      return shapeCompletions(result, owner, shapedOriginals, shapeKey);
+    },
+    async "editor.signature"(ctx, a) {
+      return editorRequest(ctx, a, "signatureHelp");
+    },
+    async "editor.resolveCompletion"(ctx, a) {
+      const original = shapedOriginals.get(shapeKey(a.item || {}));
+      const buffer = buffers.get(a.document);
+      if (!original || !languageService || !buffer || buffer.workspaceId !== a.workspaceId || buffer.path !== a.path) return a.item;
+      return ctx.modules.call("language-service", "resolveCompletion", { workspaceId: a.workspaceId, path: a.path, item: original }, { timeoutMs: 45e3 }).catch(() => a.item);
+    }
+  },
+  render() {
+    const diff = !!current?.diff;
+    const search = ws?.view?.ui?.viewerSearch;
+    const editorSearch = search?.path === current?.relativePath && typeof search?.query === "string" && typeof search?.key === "string" ? { key: search.key, query: search.query } : void 0;
+    const markdown = current && !diff && !current.binary && (current.language === "markdown" || /\.(md|markdown)$/i.test(current.relativePath));
+    const title = current ? current.virtual ? current.title : diff ? `Changes in ${current.relativePath}` : current.relativePath : ws?.view?.previewPath ? tabTitle(ws.view.previewPath) : "No file selected";
+    const kids = [
+      { type: "row", key: "tabs", gap: 3, wrap: true, children: tabs.map((path) => {
+        const active = ws?.view?.previewPath === path;
+        const appearance = presentation?.get(ws.id, diffTabPath(path) || path) || {};
+        const tint = appearance.background ? { background: appearance.background } : {};
+        const buttonStyle = { ...tabButtonStyle(active), ...tint };
+        return { type: "row", key: path, gap: 0, style: { ...fileTabStyle(active), ...tint }, children: [
+          { type: "button", key: "select", iconSvg: appearance.iconSvg || fileIcons.file, iconColor: appearance.iconColor, text: tabLabel(path), tooltip: diffTabPath(path) ? `Changes in ${diffTabPath(path)}` : tabTitle(path), action: `select:${path}`, middleClickAction: `close:${path}`, contextAction: `tabMenu:${path}`, contextMenu: [
+            { text: "Close", action: `close:${path}` },
+            { text: "Close others", action: "closeOthers", value: path, disabled: tabs.length < 2 },
+            { text: "Close all to the right", action: "closeRight", value: path, disabled: tabs.indexOf(path) === tabs.length - 1 },
+            { text: "Close all", action: "closeAll", value: path }
+          ], small: true, variant: "ghost", style: buttonStyle },
+          { type: "button", key: "close", text: "", iconSvg: uiIcons["x"], tooltip: `Close ${tabTitle(path)}`, action: `close:${path}`, small: true, variant: "ghost", style: buttonStyle }
+        ] };
+      }) }
+    ];
+    if (languageError) kids.push({ type: "status", key: "language-error", text: languageError, level: "warn" });
+    if (error) kids.push({ type: "status", key: "err", text: error, level: "error" });
+    if (loadingPath && current?.tab !== loadingPath) kids.push({ type: "progress", key: "ld", indeterminate: true, label: `Opening ${tabTitle(loadingPath)}…` });
+    if (current && current.binary) kids.push({ type: "status", key: "bin", text: current.message, level: "info" });
+    if (diff) kids.push({ type: "diff", key: "diff", changeNavigation: { previous: "Previous change", next: "Next change" }, document: current.document, mode: diffMode, softWrap: viewerWrap, header: false, emptyText: "No changes against HEAD.", grow: true });
+    else if (markdown && renderMarkdown && current.virtual) {
+      kids.push({ type: "scroll", key: "virtual-preview", padding: 12, grow: true, children: [
+        { type: "markdown", key: "md", text: bufferFor(current.relativePath)?.text ?? current.text, inline: true, linkAction: "openLink" }
+      ] });
+    } else if (markdown && renderMarkdown && !editorSearch) {
+      const markdownText = bufferFor(current.relativePath)?.text ?? current.text;
+      const blocks = typeof markdownText === "string" ? shellBlocks(markdownText) : [];
+      if (!blocks.length) kids.push({ type: "markdown", key: "preview", document: current.document, linkAction: "openLink", grow: true });
+      else {
+        const content = [];
+        let offset = 0;
+        for (const [index, block] of blocks.entries()) {
+          if (offset < block.start) content.push({ type: "markdown", key: `md:${offset}`, text: markdownText.slice(offset, block.start), inline: true, linkAction: "openLink" });
+          let fence = "```";
+          for (const run of block.code.matchAll(/`+/g)) if (run[0].length >= fence.length) fence = "`".repeat(run[0].length + 1);
+          content.push({ type: "column", key: `shell:${block.start}`, style: { paddingY: 12 }, children: [{
+            type: "column",
+            key: "shell-card",
+            gap: 0,
+            style: { borderWidth: 1, borderColor: "border", radius: 8, background: "field" },
+            children: [
+              { type: "row", key: "header", gap: 8, align: "center", style: { background: "panel", borderBottom: 1, borderColor: "border", paddingX: 14, paddingY: 6, minHeight: 36 }, children: [
+                { type: "label", key: "language", text: block.language.toUpperCase(), size: "xs", color: "muted", grow: true },
+                {
+                  type: "button",
+                  key: "run",
+                  text: "",
+                  action: "runShellBlock",
+                  value: block.start,
+                  variant: "ghost",
+                  small: true,
+                  iconSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="m7 4 14 8-14 8Z"/></svg>',
+                  iconSize: 16,
+                  style: { color: "success", background: "surface", radius: 7, paddingX: 7, paddingY: 4 },
+                  tooltip: `Run in block terminal · shell block ${index + 1}`
+                }
+              ] },
+              { type: "markdown", key: "code", codeBlockStyle: { borderWidth: 0, background: "transparent", paddingX: 16, paddingY: 14 }, text: fence + "\n" + block.code + (block.code.endsWith("\n") ? "" : "\n") + fence, inline: true }
+            ]
+          }] });
+          offset = block.end;
+        }
+        if (offset < markdownText.length) content.push({ type: "markdown", key: `md:${offset}`, text: markdownText.slice(offset), inline: true, linkAction: "openLink" });
+        kids.push({ type: "scroll", key: "preview", padding: 12, grow: true, children: content });
+      }
+    } else {
+      const canEdit = editable && !!current && !current.binary && !current.truncated && !!current.document && (!current.virtual || current.editable);
+      const language = current ? languageForPath(languages, current.relativePath) : null;
+      const assist = languageService && !!language?.server && projectLanguageEnabled && !current?.truncated && !current?.virtual;
+      const runLines = runGutter && runGutter.workspaceId === ws?.id && runGutter.path === current?.relativePath ? [...new Set(runGutter.candidates.map((candidate) => candidate.line))] : [];
+      kids.push({
+        type: "codeViewer",
+        key: "code",
+        document: current && !current.binary ? current.document : null,
+        placeholder: ws ? "Open a file from the explorer." : "Select a workspace.",
+        grow: true,
+        editable: canEdit,
+        changeAction: canEdit ? "edit" : void 0,
+        changeDebounceMs: 250,
+        language: language?.grammar,
+        syntaxRules: language?.syntaxRules,
+        softWrap: editorWrap,
+        font: editorFontNode(),
+        highlightQuery: Array.isArray(language?.highlightQuery) ? language.highlightQuery.join("\n") : language?.highlightQuery,
+        nameCaptures: assist ? nameCaptures(ws?.id, current?.relativePath) : void 0,
+        definitionMethod: assist ? "editor.definitions" : void 0,
+        hoverMethod: assist ? "editor.hover" : void 0,
+        completionMethod: assist ? "editor.completions" : void 0,
+        completionTriggers: ["."],
+        completionMenu: { width: 720, minWidth: 420, maxHeight: 420 },
+        signatureMethod: assist && canEdit ? "editor.signature" : void 0,
+        completionResolveMethod: assist && canEdit ? "editor.resolveCompletion" : void 0,
+        lineMarkers: hunks.map((h, index) => ({ line: h.line, endLine: h.line + h.added, color: !h.added ? "danger" : h.removed.length ? "primary" : "success", value: index })),
+        lineMarkerAction: "showHunk",
+        // Breakpoints share the gutter lane with run markers; plain files outside the workspace get neither.
+        ...debugEditorFields(
+          current && !current.virtual && !current.binary ? current.relativePath : null,
+          runLines,
+          declarationAuthors && current && !current.virtual && !current.binary && !current.truncated && ws ? declarationAnnotations(ws.id, current.relativePath, language?.grammar, buffers.get(current.document)?.text ?? current.text) : void 0
+        ),
+        // While paused in this file, hover inspects values instead of showing LSP docs.
+        ...debugHoverFields(current && !current.virtual && !current.binary && !current.truncated ? current.relativePath : null),
+        gutterMarkerAction: "gutterClick",
+        gutterTooltip: gutterTooltip(),
+        ...debugAvailable && current && !current.virtual && !current.binary ? { gutterClickAction: "gutterClick", gutterContextAction: "gutterMenu" } : {},
+        definitionArgs: { workspaceId: ws?.id, path: current?.relativePath },
+        openLocationAction: "openDefinition",
+        search: editorSearch,
+        contextMenu: current && !current.virtual && !current.binary && current.document ? (() => {
+          const untracked = heads.get(headKey(ws.id, current.relativePath))?.tracked === false;
+          return [
+            { text: "View file history", action: "viewHistory", value: "file", disabled: untracked },
+            { text: "View selection history", action: "viewHistory", value: "selection", disabled: untracked }
+          ];
+        })() : void 0,
+        reveal: navigation && navigation.workspaceId === ws?.id && navigation?.path === current?.relativePath ? navigation : void 0
+      });
+    }
+    const buf = !diff && current?.document ? buffers.get(current.document) : void 0;
+    const status = saveStatus(buf);
+    kids.push(
+      { type: "row", key: "status-bar", gap: 6, padding: 3, align: "center", children: [
+        { type: "label", key: "path", text: title, size: "xs", color: "muted", tooltip: title, grow: true },
+        ...diff ? [
+          { type: "button", key: "diff-mode", text: diffMode === "split" ? "Unified" : "Side by side", action: "toggleDiffMode", small: true, variant: "ghost", tooltip: "Switch diff layout" },
+          ...current.kind !== "deleted" && !current.virtual ? [{ type: "button", key: "open-file", text: "Open file", action: "openFile", small: true, variant: "ghost", tooltip: `Open ${current.relativePath}` }] : []
+        ] : [],
+        ...status.text ? [{ type: "label", key: "save-state", text: status.text, size: "xs", color: status.color, tooltip: status.tooltip }] : [],
+        ...buf && (buf.state === "error" || buf.state === "dirty" && !autosave) ? [{ type: "button", key: "save", text: buf.state === "error" ? "Retry" : "Save", action: "save", small: true, variant: "ghost", tooltip: `Save ${title}` }] : [],
+        ...buf?.state === "conflict" ? [
+          { type: "button", key: "overwrite", text: "Overwrite", action: "overwrite", small: true, variant: "ghost", tooltip: current.virtual ? "Replace the stored copy with your edits" : "Replace the file on disk with your edits" },
+          { type: "button", key: "reload", text: "Reload", action: "reload", small: true, variant: "ghost", tooltip: current.virtual ? "Discard your edits and load the stored copy" : "Discard your edits and load the file from disk" }
+        ] : [],
+        ...markdown ? [{ type: "button", key: "markdown-mode", text: renderMarkdown ? "Source" : "Preview", action: "toggleMarkdown", small: true, variant: "ghost", tooltip: renderMarkdown ? "Show Markdown source" : "Render Markdown preview" }] : [],
+        { type: "label", key: "lang", text: diff ? current.truncated ? "diff (truncated)" : "" : current && showMetadata ? `${current.language} · ${current.size} B${current.truncated ? " (truncated)" : ""}` : "", size: "xs", color: "muted" }
+      ] }
+    );
+    const runButtons = (candidates) => candidates.flatMap((candidate, index) => {
+      const debuggable = debugAvailable && debugTypes.includes(candidate.type);
+      return [
+        {
+          type: "button",
+          key: `run:${index}`,
+          text: `Run '${candidate.name}'`,
+          action: "runCandidate",
+          value: index,
+          small: true,
+          variant: "ghost",
+          disabled: !runAvailable,
+          tooltip: runAvailable ? void 0 : "Available when the Run service is installed"
+        },
+        {
+          type: "button",
+          key: `debug:${index}`,
+          text: `Debug '${candidate.name}'`,
+          action: "debugCandidate",
+          value: index,
+          small: true,
+          variant: "ghost",
+          disabled: !runAvailable || !debuggable,
+          tooltip: !debugAvailable ? "Available when the Debugger is installed" : debuggable ? void 0 : `Debugging isn’t supported for ${candidate.type}`
+        },
+        { type: "button", key: `edit:${index}`, text: "Edit configuration…", action: "editRunCandidate", value: index, small: true, variant: "ghost" }
+      ];
+    });
+    const bp = !diff ? editorPopover(current?.relativePath ?? null, runMenu && runMenu.path === current?.relativePath ? runButtons(runMenu.candidates) : []) : null;
+    if (bp) kids.push(bp);
+    else if (runMenu && runMenu.workspaceId === ws?.id && runMenu.path === current?.relativePath) {
+      kids.push({
+        type: "popover",
+        key: "run-menu",
+        transition: anchoredMotion,
+        width: 245,
+        windowAnchor: runMenu.anchor,
+        top: runMenu.y,
+        left: 24,
+        maxHeight: 155,
+        style: { background: "panel", padding: 6, radius: 6, borderWidth: 1, borderColor: "border" },
+        closeAction: "closeRunMenu",
+        children: runButtons(runMenu.candidates)
+      });
+    }
+    if (hunkView) {
+      const h = hunkView.hunk;
+      const kind = !h.added ? "Deleted" : h.removed.length ? "Changed" : "Added";
+      const lines2 = h.added ? `${h.line + 1}${h.added > 1 ? `–${h.line + h.added}` : ""}` : `${h.line}–${h.line + 1}`;
+      let fence = "```";
+      const body = [...h.removed.map((l) => "-" + l), ...h.current.map((l) => "+" + l)].join("\n");
+      for (const run of body.matchAll(/`+/g)) if (run[0].length >= fence.length) fence = "`".repeat(run[0].length + 1);
+      kids.push({ type: "modal", key: "hunk", title: `${kind} lines ${lines2}`, closeAction: "closeHunk", width: 640, children: [
+        { type: "markdown", key: "diff", text: `${fence}diff
+${body}
+${fence}`, inline: true },
+        { type: "row", key: "buttons", gap: 6, children: [
+          { type: "label", key: "hint", text: h.removed.length ? `${h.removed.length} line${h.removed.length === 1 ? "" : "s"} in HEAD` : "Not in HEAD", size: "xs", color: "muted", grow: true },
+          { type: "button", key: "prev", text: "Previous", action: "stepHunk", value: -1, small: true, variant: "ghost", disabled: hunkView.index === 0 },
+          { type: "button", key: "next", text: "Next", action: "stepHunk", value: 1, small: true, variant: "ghost", disabled: hunkView.index >= hunks.length - 1 },
+          { type: "button", key: "rollback", text: "Roll back", action: "rollbackHunk", small: true, variant: "danger", disabled: !editable, tooltip: "Restore these lines from HEAD" },
+          { type: "button", key: "close", text: "Close", action: "closeHunk", small: true }
+        ] }
+      ] });
+    }
+    if (tabMenu && tabs.includes(tabMenu)) kids.push({
+      type: "popover",
+      key: "tab-menu",
+      transition: anchoredMotion,
+      width: 236,
+      top: 34,
+      left: 4,
+      maxHeight: 124,
+      style: { background: "panel", padding: 6, radius: 6, borderWidth: 1, borderColor: "border" },
+      closeAction: "dismissTabMenu",
+      children: [
+        { type: "button", key: "others", text: "Close others", action: "closeOthers", value: tabMenu, variant: "ghost" },
+        { type: "button", key: "right", text: "Close all to the right", action: "closeRight", value: tabMenu, variant: "ghost" },
+        { type: "button", key: "all", text: "Close all", action: "closeAll", value: tabMenu, variant: "ghost" }
+      ]
+    });
+    const history = historyWindow(diffMode, viewerWrap);
+    if (history) kids.push(history);
+    return { type: "column", key: "viewer-root", style: { position: "relative" }, gap: 3, padding: 4, grow: true, children: kids };
+  },
+  async onEvent(ctx, ev) {
+    try {
+      if (await historyEvent(ctx, ev.action, ev, () => mod.onEvent(ctx, { action: "toggleDiffMode", key: "history", inputs: {} }))) return;
+    } catch (e) {
+      error = errMsg(e);
+      ctx.ui.invalidate();
+      return;
+    }
+    if (!ws) return;
+    try {
+      if (await editorEvent(ctx, ev.action, ev.value, ev.inputs || {})) return;
+      const hoverValue = ev.action === "debugHoverExpand" ? { rowKey: ev.rowKey } : ev.value;
+      if (ev.action === "debugHover" && ev.value?.document !== current?.document) return;
+      if (await hoverEvent(
+        ctx,
+        ev.action,
+        hoverValue,
+        current && !current.diff && !current.virtual && !current.binary && !current.truncated ? current.relativePath : null
+      )) return;
+      const runMenuAt = (line, y, anchor) => {
+        if (!runGutter || runGutter.workspaceId !== ws.id || runGutter.path !== current?.relativePath) return false;
+        const candidates = runGutter.candidates.filter((c) => c.line === line);
+        if (!candidates.length) return false;
+        runMenu = { workspaceId: ws.id, path: runGutter.path, candidates, y: Math.max(36, y + 54 || 36), anchor };
+        return true;
+      };
+      if (ev.action === "showRunMenu" || ev.action === "gutterClick") {
+        const v = ev.value;
+        const line = typeof v?.marker === "number" ? v.marker : Number.isInteger(v?.marker?.line) ? v.marker.line : v?.line;
+        if (!Number.isInteger(line) || !current || v?.document && v.document !== current.document) return;
+        if (ev.action === "showRunMenu" || !debugAvailable && (typeof v?.marker === "number" || hasRunMarker(v?.marker))) runMenuAt(line, Number(v?.y), v?.anchor);
+        else await toggleBreakpoint(ctx, current.relativePath, line);
+      } else if (ev.action === "gutterMenu") {
+        const v = ev.value;
+        if (!current || !Number.isInteger(v?.line) || v?.document && v.document !== current.document) return;
+        const runLine = runMenuAt(v.line, Number(v?.y), v?.anchor);
+        openEditor(current.relativePath, v.line, Number(v?.y) || 0, runLine, v?.anchor);
+      } else if (ev.action === "closeRunMenu") runMenu = null;
+      else if (ev.action === "editRunCandidate" || ev.action === "runCandidate" || ev.action === "debugCandidate") {
+        const c = runMenu?.candidates[Number(ev.value)];
+        runMenu = null;
+        if (bpEditor) await editorEvent(ctx, "bpClose", null, {});
+        if (c) ctx.events.emit(ev.action === "editRunCandidate" ? "viewer.runConfiguration" : "viewer.startRunCandidate", { ...c, workspaceId: ws.id, mode: ev.action === "debugCandidate" ? "debug" : "run" });
+      } else if (ev.action === "viewHistory") {
+        const v = ev.value || {};
+        if (!current || current.diff || v.document !== current.document) return;
+        const path = current.relativePath, workspaceId2 = ws.id;
+        if (v.value !== "selection") {
+          await openHistory(ctx, { workspaceId: workspaceId2, path, range: null, shown: null });
+          return;
+        }
+        const sel = v.selection || {};
+        let start = Number(sel.start?.line) || 0, end = Number(sel.end?.line) || 0;
+        if (end < start) [start, end] = [end, start];
+        if (end > start && Number(sel.end?.character) === 0) end--;
+        let head = heads.get(headKey(workspaceId2, path));
+        if (!head) {
+          const r = await ctx.modules.call("git", "headText", { workspaceId: workspaceId2, path }, { timeoutMs: 3e4 });
+          head = { text: r?.text ?? null, tracked: !!r?.tracked };
+          heads.set(headKey(workspaceId2, path), head);
+        }
+        if (!head.tracked) throw new Error(`${path} has no committed history yet.`);
+        const text = buffers.get(current.document)?.text ?? current.text;
+        const range = head.text !== null && typeof text === "string" ? mapToCommitted(head.text, text, start, end) : [start, end];
+        if (!range) throw new Error("The selected lines are not committed yet, so they have no history.");
+        await openHistory(ctx, { workspaceId: workspaceId2, path, range, shown: [start, end] });
+      } else if (ev.action === "openDefinition") {
+        const value = ev.value || {};
+        if (value.document !== current?.document) return;
+        const path = workspacePath(ws.rootAbsolutePath, String(value.uri));
+        if (!path) throw new Error("This definition is outside the workspace or uses a virtual document URI; opening it is not supported yet.");
+        const position = value.selection?.start;
+        if (!validPosition(position)) return;
+        navigation = { workspaceId: ws.id, path, key: crypto.randomUUID(), line: position.line, character: position.character };
+        languageError = null;
+        await ctx.modules.call("workspace", "view.patch", { workspaceId: ws.id, patch: { previewPath: path } });
+      } else if (ev.action === "edit") {
+        const v = ev.value || {};
+        const b = typeof v.document === "string" ? buffers.get(v.document) : void 0;
+        if (!b || typeof v.text !== "string") return;
+        b.text = v.text;
+        if (b.state === "clean" || b.state === "error") b.state = "dirty";
+        if (autosave && b.state === "dirty") scheduleSaves(ctx);
+        if (current?.document === v.document) updateHunks();
+        if (languageTimer) clearTimeout(languageTimer);
+        languageTimer = setTimeout(() => {
+          languageTimer = null;
+          void synchronizeLanguage(ctx);
+        }, 500);
+      } else if (ev.action === "runShellBlock" && current && !current.diff) {
+        const text = bufferFor(current.relativePath)?.text ?? current.text;
+        const blocks = typeof text === "string" ? shellBlocks(text) : [];
+        const index = blocks.findIndex((block2) => block2.start === ev.value);
+        const block = blocks[index];
+        if (!block || !block.code.trim()) return;
+        await runShellBlock(ctx, { workspaceId: ws.id, path: current.relativePath, block: index, code: block.code, language: block.language });
+      } else if (ev.action === "showHunk") {
+        const index = Number(ev.value?.marker);
+        if (hunks[index]) hunkView = { index, hunk: hunks[index] };
+      } else if (ev.action === "closeHunk") {
+        hunkView = null;
+      } else if (ev.action === "stepHunk" && hunkView) {
+        const index = hunkView.index + Number(ev.value);
+        if (hunks[index]) {
+          hunkView = { index, hunk: hunks[index] };
+          navigation = { workspaceId: ws.id, path: current.relativePath, key: crypto.randomUUID(), line: hunks[index].line, character: 0 };
+        }
+      } else if (ev.action === "rollbackHunk" && hunkView && current?.document) {
+        const b = buffers.get(current.document);
+        const text = b?.text ?? current.text;
+        const h = hunks[hunkView.index];
+        if (!b || typeof text !== "string" || !h || JSON.stringify(h) !== JSON.stringify(hunkView.hunk)) {
+          hunkView = null;
+          return;
+        }
+        const lines2 = text.split("\n");
+        lines2.splice(h.line, h.added, ...h.removed);
+        b.text = lines2.join("\n");
+        b.state = "dirty";
+        hunkView = null;
+        await save(ctx, b);
+        const state = b.state;
+        if (state === "error" || state === "conflict") throw new Error(b.error || "Could not save the rolled back file");
+        navigation = { workspaceId: ws.id, path: current.relativePath, key: crypto.randomUUID(), line: h.line, character: 0 };
+        if (state === "clean") await load(ctx, true);
+      } else if (ev.action === "save") {
+        const b = current?.document ? buffers.get(current.document) : void 0;
+        if (b && b.text !== null) {
+          b.state = "dirty";
+          await save(ctx, b);
+        }
+      } else if (ev.action === "overwrite") {
+        const b = current?.document ? buffers.get(current.document) : void 0;
+        if (b) await save(ctx, b, true);
+      } else if (ev.action === "reload") {
+        if (current?.document) buffers.delete(current.document);
+        await load(ctx, true);
+      } else if (ev.action === "toggleDiffMode") {
+        const next = diffMode === "split" ? "unified" : "split";
+        await ctx.modules.call("persistence", "settings.set", { key: "viewer.diffMode", value: next });
+        diffMode = next;
+        publishSettings();
+      } else if (ev.action === "openFile" && current?.diff && !current.virtual) {
+        await ctx.modules.call("workspace", "view.patch", { workspaceId: ws.id, patch: { previewPath: current.relativePath } });
+      } else if (ev.action === "toggleMarkdown") {
+        const next = !renderMarkdown;
+        await ctx.modules.call("persistence", "settings.set", { key: "viewer.renderMarkdown", value: next });
+        renderMarkdown = next;
+        publishSettings();
+      } else if (ev.action === "openLink" && current?.virtual) {
+        ctx.events.emit("viewer.virtualLink", { workspaceId: ws.id, tab: current.tab, href: String(ev.value || "") });
+      } else if (ev.action === "openLink") {
+        const base = current?.relativePath ? current.relativePath.split("/").slice(0, -1).join("/") : "";
+        const path = resolveWorkspaceLink(String(ev.value || ""), ws.rootAbsolutePath, base);
+        if (!path) throw new Error(`Cannot open link outside the workspace: ${ev.value}`);
+        await ctx.modules.call("workspace", "view.patch", { workspaceId: ws.id, patch: { previewPath: path } });
+      } else if (ev.action === "dismissTabMenu") {
+        tabMenu = null;
+      } else if (ev.action.startsWith("tabMenu:")) {
+        tabMenu = ev.action.slice(8);
+      } else if (ev.action === "closeRight" || ev.action === "closeAll" || ev.action === "closeOthers") {
+        const keep = typeof ev.value === "string" ? ev.value : tabMenu || "";
+        const index = tabs.indexOf(keep);
+        if (index < 0) return;
+        if (ev.action === "closeOthers" && ws.view?.previewPath !== keep) await ctx.modules.call("workspace", "view.patch", { workspaceId: ws.id, patch: { previewPath: keep } });
+        const closing = ev.action === "closeAll" ? [...tabs] : ev.action === "closeOthers" ? tabs.filter((t) => t !== keep) : tabs.slice(index + 1);
+        tabMenu = null;
+        for (const path of closing) await mod.onEvent(ctx, { action: `close:${path}`, key: "menu", inputs: {} });
+      } else if (ev.action.startsWith("select:")) {
+        const path = ev.action.slice(7);
+        if (tabs.includes(path)) await ctx.modules.call("workspace", "view.patch", { workspaceId: ws.id, patch: { previewPath: path } });
+      } else if (ev.action.startsWith("close:")) {
+        const path = ev.action.slice(6), workspaceId2 = ws.id;
+        let index = tabs.indexOf(path);
+        if (index < 0) return;
+        tabMenu = null;
+        const pending2 = bufferFor(path);
+        if (pending2?.state === "dirty") await save(ctx, pending2);
+        if (ws?.id !== workspaceId2) return;
+        index = tabs.indexOf(path);
+        if (index < 0) return;
+        if (unsaved(pending2)) throw new Error(`Cannot close ${path}: save or resolve its unsaved changes first.`);
+        tabs.splice(index, 1);
+        if (parseVirtualTab(path)) {
+          const v = virtuals.get(virtualKey(workspaceId2, path));
+          virtuals.delete(virtualKey(workspaceId2, path));
+          if (v?.document && !unsaved(buffers.get(v.document))) buffers.delete(v.document);
+          ctx.events.emit("viewer.virtualClosed", { workspaceId: workspaceId2, tab: path });
+        }
+        const previewPath = ws.view?.previewPath === path ? tabs[Math.min(index, tabs.length - 1)] || null : ws.view?.previewPath;
+        await ctx.modules.call("workspace", "view.patch", { workspaceId: ws.id, patch: { previewPath, ui: { viewerTabs: [...tabs] } } });
+      }
+    } catch (e) {
+      error = errMsg(e);
+    }
+    ctx.ui.invalidate();
+  }
+};
+var index_default = mod;
+export {
+  index_default as default
+};

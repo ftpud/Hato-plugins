@@ -30,7 +30,7 @@
   },
   "description": "Visual workflow list, designer and run view: blocks, connections, runs, answers and chat.",
   "author": "Hato contributors",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "pluginPackage": "automation",
   "pluginType": "Automation"
 }
