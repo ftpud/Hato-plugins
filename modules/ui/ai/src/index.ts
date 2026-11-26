@@ -886,7 +886,6 @@ const mod: AppModule = {
         // Two fixed rows that fit any panel width: what the chat uses (attachments, tools, model),
         // then how it runs (Auto, settings, context, send). The composer's minimum height fits both.
         const chipStatus = active.steering ? "Steering · " : active.busy ? "Working · " : connected ? "" : `${live?.status || conv.status || "Offline"} · `;
-        const clip = (t: string, n: number) => t.length > n ? t.slice(0, n - 1) + "…" : t;
         const modelChevron = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
         composer.push({ type: "row", key: "chat-tools", gap: 6, align: "center", style: { noShrink: true }, children: [
           { type: "imagePicker", key: "attach", action: "attachImages", iconSvg: uiIcons.paperclip, style: chatStyle.attach, maxFiles: 4, maxBytes: 5 * 1024 * 1024,
@@ -894,12 +893,15 @@ const mod: AppModule = {
           { type: "button", key: "mcp-toggle", text: String((conv.mcpSelection || []).length), iconSvg: uiIcons.plug, action: "toggleMcpPicker",
             style: { ...(mcpOpen ? { ...chatStyle.control, borderColor: "primary" } : chatStyle.control), paddingX: 9, noShrink: true },
             tooltip: `MCP ${(conv.mcpSelection || []).length}${background && backgroundPage ? ` · Skills ${backgroundPage.session.skills.length}` : ""}\nWhat's connected to this chat: MCP servers and tools, skills, instructions and agents` },
-          // A clickable row, not a button: the label stays left-aligned and truncates; chevron on the right.
+          // A clickable row, not a button: the label stays left-aligned and ellipsizes only when the
+          // panel is genuinely too narrow; chevron on the right.
           { type: "row", key: "cfg-model", grow: true, minWidth: 0, gap: 6, align: "center", action: "toggleModels", value: null,
             hoverStyle: { background: "hover" }, tooltip: `Provider and model\n${providerName} · ${modelName} · ${live?.status || conv.status || "offline"}`,
-            style: { height: 32, radius: 8, paddingX: 12, borderWidth: 1, borderColor: modelsOpen ? "primary" : "border", background: "surface" },
+            // minHeight, not height: a fixed height would pin the chip to its content width and
+            // stop it from following the panel width.
+            style: { minHeight: 32, radius: 8, paddingX: 12, borderWidth: 1, borderColor: modelsOpen ? "primary" : "border", background: "surface" },
             children: [
-              { type: "label", key: "t", text: clip(`${chipStatus}${providerName} · ${modelName.replace(/\s*\((recommended|default)\)$/i, "")}`, 28), grow: true, minWidth: 0, style: { fontSize: 14 } },
+              { type: "label", key: "t", text: `${chipStatus}${providerName} · ${modelName.replace(/\s*\((recommended|default)\)$/i, "")}`, grow: true, minWidth: 0, style: { fontSize: 14 } },
               { type: "icon", key: "chev", svg: modelChevron, size: 12, color: "muted", style: { rotate: modelsOpen ? 180 : 0 } },
             ] } as UiNode,
         ] });
