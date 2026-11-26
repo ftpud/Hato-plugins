@@ -6,11 +6,11 @@
 import type { AppModule, ModuleContext, Handle } from "@hato/sdk/types";
 import { errMsg } from "@hato/sdk/runtime";
 import {
-  WORKFLOW_REFERENCE, WORKFLOW_RUNNER_VERSION, type WorkflowDefinition, type WorkflowRun, type WorkflowRunEnv,
-  blockingIssues, edgeType, isAgentBlock, isCapabilityBlock, normalizeDefinition, preview, validateWorkflow,
+  WORKFLOW_REFERENCE, WORKFLOW_RUNNER_VERSION, type WorkflowActiveRun, type WorkflowDefinition, type WorkflowRun, type WorkflowRunEnv,
+  blockingIssues, edgeType, isAgentBlock, isCapabilityBlock, isTriggerBlock, normalizeDefinition, preview, validateWorkflow,
 } from "@hato/sdk/workflows";
 import { WORKFLOW_TEMPLATES } from "@hato/sdk/workflow-templates";
-import { adoptDefinition, promptBlock, recordMcpActivity, recordProviderTurn, setAutonomousClaudeTurns, timerAction, timerDelay, cancel, chat, drive, execs, initEngine, invoke, messages, newExec, stateOf, steer, toolTargets, sessionToolCatalogue, touch, track, transfer, useMeeting, answer, type Exec, type ProviderTurnEvent } from "./engine";
+import { adoptDefinition, promptBlock, recordMcpActivity, recordProviderTurn, setAutonomousClaudeTurns, timerAction, timerDelay, armTriggers, releaseAllTriggers, openTextInputs, sendText, useTrigger, settle, cancel, chat, drive, execs, initEngine, invoke, messages, newExec, stateOf, steer, toolTargets, sessionToolCatalogue, touch, track, transfer, useMeeting, answer, type Exec, type ProviderTurnEvent } from "./engine";
 import { imageAttachments } from "@hato/sdk/images";
 import { initMcp, issueEndpoint, revokeWhere, type Scope } from "./mcp";
 import { terminalAction } from "./terminal";
@@ -105,8 +105,11 @@ function detail(run: WorkflowRun) {
 const object = (properties: any, required: string[] = []) => ({ type: "object", properties, required, additionalProperties: false });
 const RUN_TOOLS = [
   { name: "workflow_connections", description: "Discover connected workflow blocks and capabilities, including MCP server names, invocation methods, and allowed actions. Call before choosing tools or claiming a capability is unavailable.", inputSchema: object({}) },
-  { name: "workflow_use_block", description: "Run or control a connected workflow block. Pass block_id and input; action selects start/status/tail/steer (AI Agent, Chatbox), start/status/kill/tail (Run App), start/status/cancel (Timer; seconds or at sets the delay), publish/tail/diff/wait/status/shake (Meeting; shake requires peer_block_id and a specific message), list/read/write (Terminal Control, key/cursor/text), or fetch (unseen output of any data block).",
-    inputSchema: object({ block_id: { type: "string" }, input: { type: "string" }, action: { type: "string" }, lines: { type: "number" }, timeout_seconds: { type: "number" }, seconds: { type: "number" }, at: { type: "string" }, message: { type: "string" }, peer_block_id: { type: "string" }, key: { type: "string" }, cursor: { type: "number" }, text: { type: "string" }, after: { type: "number" } }, ["block_id"]) },
+  { name: "workflow_use_block", description: "Run or control a connected workflow block. Pass block_id and input; action selects start/status/tail/steer (AI Agent, Chatbox), start/status/kill/tail (Run App), start/status/cancel (Timer; seconds or at sets the delay), publish/tail/diff/wait/status/shake (Meeting; shake requires peer_block_id and a specific message), list/read/write (Terminal Control, key/cursor/text), status/configure/arm/disarm/wait (HTTP, Socket and File/Pipe Triggers; configure and arm accept port, path, method, status_code, response_body, secret, protocol, framing, mode, create_if_missing, continuous, max_events), or fetch (unseen output of any data block).",
+    inputSchema: object({ block_id: { type: "string" }, input: { type: "string" }, action: { type: "string" }, lines: { type: "number" }, timeout_seconds: { type: "number" }, seconds: { type: "number" }, at: { type: "string" }, message: { type: "string" }, peer_block_id: { type: "string" }, key: { type: "string" }, cursor: { type: "number" }, text: { type: "string" }, after: { type: "number" },
+      port: { type: "number" }, path: { type: "string" }, method: { type: "string" }, status_code: { type: "number" }, response_body: { type: "string" }, secret: { type: "string" },
+      protocol: { type: "string", enum: ["tcp", "unix"] }, framing: { type: "string", enum: ["line", "message", "eof"] }, mode: { type: "string", enum: ["auto", "file", "pipe"] },
+      create_if_missing: { type: "boolean" }, continuous: { type: "boolean" }, max_events: { type: "number" } }, ["block_id"]) },
   { name: "workflow_block_output", description: "Read retained output of a connected block in pages without running it.", inputSchema: object({ block_id: { type: "string" }, offset: { type: "number" }, limit: { type: "number" } }, ["block_id"]) },
   { name: "workflow_block_messages", description: "Read recent messages of a connected AI Agent or Chatbox without starting a turn.", inputSchema: object({ block_id: { type: "string" }, count: { type: "number" } }, ["block_id"]) },
   { name: "workflow_choose_path", description: "Choose the outgoing path your output is passed to. Call before finishing when paths are available.", inputSchema: object({ path: { type: "string" } }, ["path"]) },
@@ -214,6 +217,7 @@ async function runToolBody(s: Extract<Scope, { kind: "run" }>, name: string, a: 
     return text ? { text, hasMore: from + text.length < out.length } : { unchanged: true };
   }
   if (t.type === "meeting") return useMeeting(x, t.id, caller, { ...a, action: action || "diff" });
+  if (isTriggerBlock(t)) return useTrigger(x, t.id, a);
   if (t.type === "terminal_control") {
     const value = await terminalAction(ctxRef, x.env, action || "list", a);
     const st = stateOf(x, t.id);
@@ -280,17 +284,22 @@ const mod: AppModule = {
       const run: WorkflowRun = JSON.parse(r.data);
       if (run.status !== "running" && run.status !== "waiting") continue;
       run.status = "failed"; run.error = "Interrupted: the workflow runtime restarted. Sessions and outputs remain for inspection."; run.completedAt = now();
-      for (const s of run.blocks) if (["running", "waiting_timer", "awaiting_user_input", "awaiting_permission", "queued"].includes(s.status)) { s.status = "failed"; s.error = "Interrupted by a runtime restart"; }
+      for (const s of run.blocks) if (["running", "waiting_timer", "waiting_trigger", "waiting_input", "awaiting_user_input", "awaiting_permission", "queued"].includes(s.status)) { s.status = "failed"; s.error = "Interrupted by a runtime restart"; }
       await ctx.host.db.exec(db, "UPDATE runs SET data=? WHERE id=?", [JSON.stringify(run), run.id]);
     }
   },
   canSwap: () => {
-    const active = [...execs.values()].filter(x => x.driving || x.busy.size || x.timers.size || x.answers.size || x.background.size).length;
+    const active = [...execs.values()].filter(x => x.driving || x.busy.size || x.timers.size || x.triggers.size || x.inputs.size || x.answers.size || x.background.size).length;
     return { ok: active === 0 && runningApps() === 0, reason: "Workflow runs or Run App processes are active" };
   },
-  async deactivate(ctx) { if (flushTimer) clearTimeout(flushTimer); await flush(); void ctx; },
+  async deactivate(ctx) {
+    // Armed triggers hold loopback ports, helper processes and watches: release them with this generation.
+    const released = await releaseAllTriggers();
+    if (released) ctx.log.info(`released ${released} armed workflow trigger${released === 1 ? "" : "s"}`);
+    if (flushTimer) clearTimeout(flushTimer); await flush();
+  },
   methods: {
-    health: () => ({ ok: true, version: WORKFLOW_RUNNER_VERSION, workflowTurnBoundaries: true, active: [...execs.values()].filter(x => x.driving || x.busy.size || x.timers.size || x.answers.size).length, apps: runningApps() }),
+    health: () => ({ ok: true, version: WORKFLOW_RUNNER_VERSION, workflowTurnBoundaries: true, active: [...execs.values()].filter(x => x.driving || x.busy.size || x.timers.size || x.triggers.size || x.inputs.size || x.answers.size).length, apps: runningApps() }),
     setPreferences(_ctx, a, meta) { gateway(meta); setAutonomousClaudeTurns(a.trackAutonomousClaudeTurns !== false); return null; },
     async list(_ctx, a) { return listDefinitions(String(a.projectId)); },
     async get(_ctx, a) { return definition(String(a.projectId), String(a.id)); },
@@ -322,9 +331,25 @@ const mod: AppModule = {
       const old = await ctx.host.db.query<any>(db, "SELECT id FROM runs WHERE project=? AND workflow=? ORDER BY created DESC LIMIT -1 OFFSET 30", [run.projectId, run.workflowId]);
       for (const r of old) if (!execs.get(r.id)?.driving) { execs.delete(r.id); await ctx.host.db.exec(db, "DELETE FROM runs WHERE id=?", [r.id]); await revokeWhere(ctx, s => s.kind === "run" && s.runId === r.id); }
       const x = newExec(run, env);
+      // Triggers arm before the run is reported as started; one that cannot bind fails the run.
+      const failure = await armTriggers(x);
+      if (failure) { settle(x); throw new Error(`Workflow run failed to start: ${failure}`); }
+      openTextInputs(x);
       void drive(x).catch(e => ctx.log.error("workflow drive", errMsg(e)));
       return summary(run);
     },
+    /** Open runs with what they are doing and what waits on the user (polled by the desktop rail). */
+    active: () => [...execs.values()].filter(x => !x.cancelled && (x.run.status === "running" || x.run.status === "waiting")).slice(0, 30)
+      .map((x): WorkflowActiveRun => ({
+        runId: x.run.id, workflowId: x.run.workflowId, name: x.run.workflowName, projectId: x.run.projectId, workspaceId: x.run.workspaceId,
+        status: x.run.status as "running" | "waiting", createdAt: x.run.createdAt,
+        running: x.run.blocks.filter(s => s.status === "running").length, armed: x.triggers.size, inputs: x.inputs.size,
+        attention: x.run.blocks.filter(s => s.status === "awaiting_user_input" || s.status === "awaiting_permission").map(s => ({
+          blockId: s.blockId, label: x.def.blocks.find(b => b.id === s.blockId)?.label || s.blockId,
+          kind: s.status === "awaiting_permission" ? "permission" as const : "question" as const,
+          ...(s.question ? { text: s.question.slice(0, 300) } : {}),
+        })),
+      })),
     async runs(ctx, a) {
       const rows = a.workflowId
         ? await ctx.host.db.query<any>(db, "SELECT data FROM runs WHERE project=? AND workflow=? ORDER BY created DESC LIMIT 30", [String(a.projectId), String(a.workflowId)])
@@ -343,6 +368,10 @@ const mod: AppModule = {
     },
     async cancel(_ctx, a, meta) { gateway(meta); const x = await execFor(String(a.id)); await cancel(x); return summary(x.run); },
     async answer(_ctx, a, meta) { gateway(meta); const x = await execFor(String(a.runId)); answer(x, String(a.blockId), String(a.pauseId), String(a.answer ?? "")); return null; },
+    async sendText(_ctx, a, meta) {
+      gateway(meta);
+      return sendText(await execFor(String(a.runId)), String(a.blockId), String(a.text ?? ""));
+    },
     async chat(_ctx, a, meta) {
       gateway(meta);
       const text = String(a.text || "").trim(); if (!text) throw new Error("Message is empty");
@@ -362,7 +391,7 @@ const mod: AppModule = {
     async removeRun(ctx, a, meta) {
       gateway(meta);
       const x = execs.get(String(a.id));
-      if (x && (x.driving || x.busy.size || x.timers.size || x.answers.size || x.background.size)) throw new Error("Cancel the run before deleting it");
+      if (x && (x.driving || x.busy.size || x.timers.size || x.triggers.size || x.inputs.size || x.answers.size || x.background.size)) throw new Error("Cancel the run before deleting it");
       const stored = await loadRun(String(a.id)); if (!stored) return { sessions: [] };
       execs.delete(String(a.id)); dirty.delete(String(a.id));
       await ctx.host.db.exec(db, "DELETE FROM runs WHERE id=?", [String(a.id)]);

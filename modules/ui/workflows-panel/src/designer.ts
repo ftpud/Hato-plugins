@@ -4,11 +4,11 @@ import type { ModuleContext, UiNode, CanvasItem, CanvasEdge } from "@hato/sdk/ty
 import { blockProfile, providerChoiceKey } from "@hato/sdk/workflow-provider-options";
 import { uiIcons } from "@hato/sdk/ui-icons";
 import {
-  WORKFLOW_BLOCKS, blockInfo, blockingIssues, edgeType, isAgentBlock, isStartBlock, newBlockId, newEdgeId, validateWorkflow,
+  WORKFLOW_BLOCKS, blockInfo, blockingIssues, edgeType, isAgentBlock, isStartBlock, isTriggerBlock, newBlockId, newEdgeId, validateWorkflow,
   type WorkflowBlock, type WorkflowDefinition, type WorkflowEdge, type WorkflowEdgeType,
 } from "@hato/sdk/workflows";
 import { transferEdges } from "./transfers";
-import { CARD, blockColor, blockIcon, edgeStyle, statusColor, statusText } from "./style";
+import { BLOCK_GROUPS, CARD, blockColor, blockIcon, edgeStyle, statusColor, statusText } from "./style";
 import { S, ACTIVE, btn, call, field, icon, input, muted, shownRun, text } from "./state";
 import { browserPreview, blockStatus, blockRunView, statusLabel } from "./runs";
 
@@ -44,6 +44,10 @@ export function addBlock(type: string) {
   const pos = sel ? { x: sel.position.x + CARD.width + 60, y: sel.position.y } : { x: 40 + (d.blocks.length % 4) * (CARD.width + 50), y: 40 + Math.floor(d.blocks.length / 4) * (CARD.height + 70) };
   const b: WorkflowBlock = { id, type: info.type, label: info.label, prompt: "", position: { x: Math.round(pos.x / CARD.snap) * CARD.snap, y: Math.round(pos.y / CARD.snap) * CARD.snap } };
   if (type === "timer") b.seconds = 60;
+  if (type === "http_trigger") b.trigger = { port: 0, path: "/hook", method: "POST" };
+  if (type === "socket_trigger") b.trigger = { protocol: "tcp", port: 0, framing: "line" };
+  if (type === "text_input") b.description = "Type text for the next step";
+  if (type === "file_trigger") b.trigger = { path: "trigger.txt", mode: "auto", framing: "message", createIfMissing: true };
   if (type === "script") b.command = "git status --short";
   if (type === "run_app") { b.command = "npm run dev"; b.app = { name: id, actions: ["start", "status", "kill", "tail"] }; }
   if (type === "ai" || type === "user_prompt" || type === "yes_no_prompt") b.prompt = "{{input}}";
@@ -52,7 +56,7 @@ export function addBlock(type: string) {
   if (type === "mcp") b.mcp = { serverId: S.catalog?.mcps?.[0]?.id || "" };
   mutate(dd => { dd.blocks.push(b); });
   // "Add next": connect from the selected block in the current mode.
-  if (sel && (S.mode !== "use" || isAgentBlock(sel)) && !isStartBlock(b)) connect(sel.id, id);
+  if (sel && (S.mode !== "use" || isAgentBlock(sel)) && !isStartBlock(b) && !isTriggerBlock(b) && b.type !== "text_input") connect(sel.id, id);
   S.selection = { kind: "block", id };
 }
 export function connect(from: string, to: string) {
@@ -97,7 +101,7 @@ export async function saveDraft(ctx: ModuleContext) {
   S.defs.set(r.id, r.definition);
 }
 export function setField(target: any, f: string, raw: any) {
-  const numeric = ["seconds", "timeoutSeconds", "timeoutMs", "maxLoopCount", "maxSteps"].includes(f);
+  const numeric = ["seconds", "timeoutSeconds", "timeoutMs", "maxLoopCount", "maxSteps", "queueLimit"].includes(f);
   const value = numeric ? (String(raw).trim() === "" ? undefined : Number(raw)) : raw;
   if (value === undefined || (value === "" && f !== "prompt" && f !== "label")) delete target[f];
   else if (!numeric || Number.isFinite(value)) target[f] = value;
@@ -124,7 +128,7 @@ function cardFor(b: WorkflowBlock): CanvasItem {
   const issue = S.issues.find(i => i.blockId === b.id && i.severity !== "warning");
   const c = S.catalog;
   const detail = b.type === "script" || b.type === "run_app" ? (b.command || "").split("\n")[0]
-    : b.type === "timer" ? `${b.seconds ?? 0} s` : b.type === "skill" && b.skillId ? b.skillId
+    : b.type === "timer" ? `${b.seconds ?? 0} s` : isTriggerBlock(b) ? triggerDetail(b) : b.type === "skill" && b.skillId ? b.skillId
     : b.type === "browser" ? (b.browser?.name || b.browser?.sessionId || "Choose a session")
     : b.type === "mcp" ? (c?.mcps?.find((m: any) => m.id === b.mcp?.serverId)?.name || b.mcp?.serverId || "")
     : isAgentBlock(b) ? `${c?.profiles?.find((p: any) => p.id === b.profileId)?.name || b.provider || "Default provider"}${b.model ? ` · ${b.model}` : ""}`
@@ -157,16 +161,44 @@ function edgesFor(): CanvasEdge[] {
       color: selected ? "primary" : st.color, width: selected ? 3 : 1.6, dashed: st.dashed, label: t === "path" ? e.label || "path" : e.loop ? "loop" : t };
   }), designerRun());
 }
+/** Grouped, filterable Add block menu (groups and order come from style.ts BLOCK_GROUPS). */
+function addBlockMenu(): UiNode {
+  const q = S.addFilter.trim().toLowerCase();
+  const listed = new Set(BLOCK_GROUPS.flatMap(g => g.types));
+  const groups = [...BLOCK_GROUPS, { title: "Other", types: WORKFLOW_BLOCKS.map(b => b.type).filter(t => !listed.has(t)) }];
+  const filter = { type: "textInput", key: "add-filter", value: S.addFilter, changeAction: "addFilter", placeholder: "Filter blocks", autoFocus: true, prefixSvg: uiIcons.search } as UiNode;
+  const children: UiNode[] = [];
+  let estimate = 0; // The popup only caps its height, so the scrolling list needs an explicit one.
+  for (const g of groups) {
+    const items = g.types.map(t => WORKFLOW_BLOCKS.find(b => b.type === t)).filter((b): b is (typeof WORKFLOW_BLOCKS)[number] => !!b)
+      .filter(b => !q || b.label.toLowerCase().includes(q) || b.summary.toLowerCase().includes(q) || b.type.includes(q));
+    if (!items.length) continue;
+    children.push(muted(`grp-${g.title}`, g.title.toUpperCase(), { weight: "semibold" }));
+    estimate += 26 + items.length * 50;
+    for (const b of items) children.push({ type: "row", key: `add-${b.type}`, gap: 8, align: "center", children: [
+      { type: "icon", key: "i", svg: blockIcon[b.type] || blockIcon.workflow, size: 16, color: blockColor[b.type] } as UiNode,
+      { type: "column", key: "c", grow: true, children: [{ type: "choice", key: "ch", text: b.label, description: b.summary, action: "addBlock", value: b.type, selected: false, mark: "",
+        style: { background: "transparent", borderWidth: 0, paddingX: 4, paddingY: 3 } } as UiNode] },
+    ] } as UiNode);
+  }
+  if (!children.length) { children.push(muted("no-blocks", "No block matches the filter.")); estimate = 30; }
+  return { type: "dropdown", key: "add-block", text: "Add block  ⌄", iconSvg: uiIcons.plus, variant: "ghost", action: "addMenu", open: S.addMenuOpen, menuWidth: 400, maxHeight: 600,
+    children: [{ type: "column", key: "add-menu", gap: 8, padding: 10, children: [
+      filter,
+      { type: "column", key: "add-list", gap: 4, scroll: true, height: Math.min(Math.max(estimate, 30), 500), children } as UiNode,
+    ] }] } as UiNode;
+}
+
 function toolbar(): UiNode {
   const d = S.draft!, blocking = blockingIssues(S.issues).length, run = designerRun();
   return { type: "row", key: "designer-toolbar", gap: 4, padding: 6, bg: "panel", wrap: true, children: [
     ...(!S.designerInline ? [{ type: "row", key: "window-drag", windowDrag: true, width: 24, height: 28, tooltip: "Drag to move designer window",
       children: [muted("grip", "⠿", { size: "md" })] } as UiNode] : []),
     { type: "textInput", key: `wf-name:${d.id}`, value: d.name, changeAction: "wfName", placeholder: "Workflow name", width: 220 },
-    { type: "select", key: "add-block", placeholder: "Add block…", value: null, action: "addBlock", options: WORKFLOW_BLOCKS.map(b => ({ value: b.type, label: b.label })) } as UiNode,
+    addBlockMenu(),
     muted("mode-label", "Connect:", { wrap: false }),
-    ...(["follow", "use", "path"] as WorkflowEdgeType[]).map(m => btn(`mode-${m}`, edgeStyle[m].name, "mode", { value: m, variant: S.mode === m ? "primary" : "ghost",
-      tooltip: m === "follow" ? "Run the target with this block's output" : m === "use" ? "The target becomes a tool of this AI Agent or Chatbox" : "A named route chosen by an AI Agent or Yes/No Prompt" })),
+    ...(["follow", "queue", "use", "path"] as WorkflowEdgeType[]).map(m => btn(`mode-${m}`, edgeStyle[m].name, "mode", { value: m, variant: S.mode === m ? "primary" : "ghost",
+      tooltip: m === "follow" ? "Run the target with this block's output" : m === "queue" ? "Like Follow, but waits in line while the target is busy and feeds it in once free" : m === "use" ? "The target becomes a tool of this AI Agent or Chatbox" : "A named route chosen by an AI Agent or Yes/No Prompt" })),
     icon("undo", blockIcon.undo, "undo", "Undo", { disabled: !S.undo.length }),
     icon("redo", blockIcon.redo, "redo", "Redo", { disabled: !S.redo.length }),
     { type: "spacer", key: "sp" },
@@ -181,6 +213,48 @@ function toolbar(): UiNode {
 
 // ---------------------------------------------------------------- inspector
 
+function triggerDetail(b: WorkflowBlock) {
+  const t = b.trigger || {};
+  if (b.type === "http_trigger") return `${t.method && t.method !== "ANY" ? `${t.method} ` : ""}127.0.0.1:${t.port || "auto"}${t.path || "/"}`;
+  if (b.type === "socket_trigger") return (t.protocol || (t.path && !t.port ? "unix" : "tcp")) === "unix" ? `unix:${t.path || "?"}` : `tcp 127.0.0.1:${t.port || "auto"}`;
+  return `${t.mode === "pipe" ? "pipe" : "file"}: ${t.path || "Choose a path"}`;
+}
+
+/** Trigger configuration form; every field is stored on `block.trigger` (see WorkflowTriggerConfig). */
+function triggerInspector(b: WorkflowBlock): UiNode[] {
+  const t = b.trigger || {}, k = (f: string) => `trig:${b.id}:${f}`, out: UiNode[] = [];
+  const sel = (f: string, label: string, value: string, options: [string, string][]) =>
+    field(`tr-${f}`, label, { type: "select", key: k(f), value, action: "triggerField", options: options.map(([value, label]) => ({ value, label })) } as UiNode);
+  const sw = (f: string, label: string, checked: boolean) => ({ type: "switch", key: k(f), label, checked, action: "triggerBool" } as UiNode);
+  const portField = () => field("tr-port", "Port (0 or empty: pick a free port; 1024–65535)", input(k("port"), t.port || undefined, "triggerField", { placeholder: "auto" }));
+  if (b.type === "http_trigger") {
+    out.push(portField());
+    out.push(field("tr-path", "Path (/* matches a prefix)", input(k("path"), t.path, "triggerField", { placeholder: "/" })));
+    out.push(sel("method", "Method", t.method || "ANY", ["ANY", "GET", "POST", "PUT", "PATCH", "DELETE"].map(m => [m, m === "ANY" ? "Any method" : m])));
+    out.push(field("tr-status", "Response status (default 200)", input(k("statusCode"), t.statusCode, "triggerField", { placeholder: "200" })));
+    out.push(field("tr-body", "Response body (default: JSON acknowledgment)", input(k("responseBody"), t.responseBody, "triggerField", { multiline: true, rows: 3 })));
+    out.push(field("tr-secret", "Secret (Authorization: Bearer … or X-Hato-Token)", input(k("secret"), t.secret, "triggerField", { placeholder: "None" })));
+  }
+  if (b.type === "socket_trigger") {
+    const protocol = t.protocol || (t.path && !t.port ? "unix" : "tcp");
+    out.push(sel("protocol", "Protocol", protocol, [["tcp", "TCP (127.0.0.1)"], ["unix", "Unix domain socket"]]));
+    if (protocol === "unix") out.push(field("tr-path", "Socket path (workspace-relative)", input(k("path"), t.path, "triggerField", { placeholder: "run/trigger.sock" })));
+    else out.push(portField());
+    out.push(sel("framing", "Event per", t.framing || "line", [["line", "Line"], ["message", "Received chunk"], ["eof", "Connection (on close)"]]));
+    out.push(field("tr-reply", "Reply sent per event (optional)", input(k("responseBody"), t.responseBody, "triggerField", { placeholder: "None" })));
+  }
+  if (b.type === "file_trigger") {
+    out.push(field("tr-path", "File or named pipe (workspace-relative)", input(k("path"), t.path, "triggerField", { placeholder: "logs/trigger.txt" })));
+    out.push(sel("mode", "Kind", t.mode || "auto", [["auto", "Detect file or pipe"], ["file", "Regular file (fires on edit)"], ["pipe", "Named pipe / FIFO (fires on write)"]]));
+    out.push(sel("framing", "Event per", t.framing || "message", [["message", "Edit or write (whole content)"], ["line", "New line"]]));
+    out.push(sw("createIfMissing", "Create the file or pipe when the run starts if missing", !!t.createIfMissing));
+  }
+  out.push(sw("continuous", "Stay armed after each event", !!t.continuous));
+  if (!t.continuous) out.push(field("tr-max", "Disarm after events (default 1)", input(k("maxEvents"), t.maxEvents, "triggerField", { placeholder: "1" })));
+  out.push(muted("tr-help", "Armed when the run starts; the run fails if it cannot bind or watch. Connected agents can status, configure, arm, disarm and wait."));
+  return out;
+}
+
 function blockInspector(b: WorkflowBlock): UiNode[] {
   const k = (f: string) => `f:${b.id}:${f}`, info = blockInfo(b.type), c = S.catalog;
   const out: UiNode[] = [
@@ -194,8 +268,12 @@ function blockInspector(b: WorkflowBlock): UiNode[] {
     field("label", "Name", input(k("label"), b.label, "field")),
     field("id", "ID (used in {{blocks.ID.output}})", input(`id:${b.id}`, b.id, "", { submitAction: "renameId", placeholder: "Press Enter to rename" })),
   ];
-  const promptTitle: Record<string, string> = { ai: "Prompt template ({{input}}, {{blocks.ID.output}})", chatbox: "Session guidance", start_button: "Run input", text: "Text", markdown: "Markdown template (empty: pass the input)", user_prompt: "Question", yes_no_prompt: "Question", skill: "Instructions (or link a skill below)" };
+  const promptTitle: Record<string, string> = { text_input: "Output template (empty: pass the typed text; {{input}} is the text)", http_trigger: "Output template (empty: pass the request JSON; {{input}} is the body)", socket_trigger: "Output template (empty: pass the message)", file_trigger: "Output template (empty: pass the file content or pipe data)", ai: "Prompt template ({{input}}, {{blocks.ID.output}})", chatbox: "Session guidance", start_button: "Run input", text: "Text", markdown: "Markdown template (empty: pass the input)", user_prompt: "Question", yes_no_prompt: "Question", skill: "Instructions (or link a skill below)" };
   if (promptTitle[b.type]) out.push(field("prompt", promptTitle[b.type], input(k("prompt"), b.prompt, "field", { multiline: true, rows: isAgentBlock(b) ? 10 : 6 })));
+  if (b.type === "text_input") {
+    out.push(field("desc", "Hint shown in the text box", input(k("description"), b.description, "field")));
+    out.push({ type: "switch", key: k("keepOpen"), label: "Keep the run open waiting for text (otherwise sending reopens a finished run)", checked: b.keepOpen !== false, action: "fieldBool" } as UiNode);
+  }
   if (b.type === "skill" || b.type === "meeting" || isAgentBlock(b)) out.push(field("desc", b.type === "skill" ? "When to use (shown to agents)" : "Description (shown to callers)", input(k("description"), b.description, "field", { multiline: true, rows: 2 })));
   if (isAgentBlock(b)) {
     out.push(field("prov", "Provider", { type: "select", key: k("profileId"), value: b.profileId || "", action: "field",
@@ -223,6 +301,7 @@ function blockInspector(b: WorkflowBlock): UiNode[] {
     out.push({ type: "row", key: "acts", gap: 6, wrap: true, children: (["start", "status", "kill", "tail"] as const).map(a => ({ type: "toggle", key: `act:${b.id}:${a}`, label: a, checked: !b.app?.actions?.length || b.app.actions.includes(a), action: "appAct", value: a } as UiNode)) });
   }
   if (b.type === "timer") out.push(field("secs", "Seconds", input(k("seconds"), b.seconds, "field")));
+  if (isTriggerBlock(b)) out.push(...triggerInspector(b));
   if (b.type === "skill") out.push(field("skill", "Existing workspace skill", { type: "select", key: k("skillId"), value: b.skillId || "", action: "field",
     options: [{ value: "", label: "Custom instructions" }, ...(c?.skills || []).map((s: any) => ({ value: s.path, label: s.name }))] } as UiNode));
   if (b.type === "browser") {
@@ -249,7 +328,9 @@ function edgeInspector(e: WorkflowEdge): UiNode[] {
   return [
     { type: "row", key: "eh", gap: 6, children: [text("et", "Connection", { weight: "semibold", grow: true, size: "md" }), icon("edel", uiIcons.trash, "deleteEdge", "Delete connection", { value: e.id })] },
     text("ends", `${a?.label || e.from} → ${b?.label || e.to}`),
-    field("type", "Type", { type: "select", key: `e:${e.id}:type`, value: t, action: "edgeField", options: [{ value: "follow", label: "Follow: run with the output" }, { value: "use", label: "Use: tool of the source agent" }, { value: "path", label: "Path: named route" }] } as UiNode),
+    field("type", "Type", { type: "select", key: `e:${e.id}:type`, value: t, action: "edgeField", options: [{ value: "follow", label: "Follow: run with the output" }, { value: "queue", label: "Queue: wait while the target is busy" }, { value: "use", label: "Use: tool of the source agent" }, { value: "path", label: "Path: named route" }] } as UiNode),
+    ...(t === "queue" ? [field("qlim", "Max waiting items (default 100)", input(`e:${e.id}:queueLimit`, e.queueLimit, "edgeField", { placeholder: "100" })),
+      muted("qhelp", "Items run one at a time in arrival order. When full, new items are dropped and an HTTP Trigger answers 503.")] : []),
     ...(t === "path" ? [field("route", "Route name", input(`e:${e.id}:label`, e.label, "edgeField"))] : []),
     ...(t === "use" ? [field("tmo", "Tool call timeout (seconds, default 300)", input(`e:${e.id}:timeoutMs`, e.timeoutMs ? e.timeoutMs / 1000 : undefined, "edgeField"))] : []),
     ...(t !== "use" ? [{ type: "switch", key: `e:${e.id}:loop`, label: "Loop (intentionally returns to an earlier block)", checked: !!e.loop, action: "edgeLoop" } as UiNode] : []),

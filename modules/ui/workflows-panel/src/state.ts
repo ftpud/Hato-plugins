@@ -29,7 +29,7 @@ export const S = {
   selectedId: null as string | null, draft: null as WorkflowDefinition | null, revision: null as number | null, dirty: false, issues: [] as WorkflowIssue[],
   undo: [] as string[], redo: [] as string[], lastSnapshot: { at: 0, field: "" },
   selection: null as Selection, mode: "follow" as WorkflowEdgeType,
-  designerOpen: false, designerInline: false, designerSize: { width: 1280, height: 820 }, askText: "",
+  addMenuOpen: false, addFilter: "", designerOpen: false, designerInline: false, designerSize: { width: 1280, height: 820 }, askText: "",
   // chrome
   importText: "", importOpen: false, libOpen: false, libEntries: [] as { id: string; name: string; description: string; revision: number; fileCount?: number }[], error: null as string | null, notice: null as string | null, busy: false,
   confirm: null as { kind: "workflow" | "run" | "block"; id: string; wf?: string } | null,

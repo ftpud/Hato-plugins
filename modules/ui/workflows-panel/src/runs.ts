@@ -154,6 +154,12 @@ export function blockRunView(run: RunDetail, b: WorkflowBlock, st: WorkflowBlock
   }
   const permissionId = st.agentActivity?.status === "waiting" ? st.agentActivity.permissionId : st.permissionId;
   if ((st.status === "awaiting_permission" || st.agentActivity?.status === "waiting") && st.sessionId && permissionId) out.push(btn(k("perm"), "Review permission", "reviewPermission", { value: { sessionId: st.sessionId, permissionId }, variant: "primary" }));
+  if (b.type === "text_input" && st.status !== "cancelled" && run.status !== "cancelled") out.push({ type: "row", key: k("tin"), gap: 6, align: "end", children: [
+    { type: "textInput", key: `tin:${run.id}:${b.id}`, changeAction: "textInputText", submitAction: "textInputSend", placeholder: b.description || "Type text, then Enter", grow: true, multiline: true, rows: 2 } as UiNode,
+    btn("send", "Send", "textInputSend", { value: `tin:${run.id}:${b.id}`, variant: "primary" }),
+  ] });
+  if (st.queueDepth) out.push(muted(k("queue"), `${st.queueDepth} waiting in queue`, { color: "info" }));
+  if (st.status === "waiting_trigger" && st.triggerEndpoint) out.push(muted(k("trigger"), `Armed on ${st.triggerEndpoint}`, { color: "info" }));
   if (st.status === "waiting_timer" && st.waitingUntil) out.push(muted(k("timer"), `Fires at ${new Date(st.waitingUntil).toLocaleTimeString()}`, { color: "info" }));
   if (b.type === "chatbox") {
     const agent = chatStatus(st);

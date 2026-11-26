@@ -10,7 +10,17 @@ export const blockColor: Record<WorkflowBlockType, string> = {
   start_button: "#2f9e5b", start_input: "#2f9e5b", ai: "#7c6cf0", chatbox: "#4f8fde", skill: "#d08b2c", text: "#6f8f5f", markdown: "#6f8f5f",
   script: "#c0603f", run_app: "#c0603f", timer: "#8a8f99", user_prompt: "#c99a12", yes_no_prompt: "#c99a12", meeting: "#3aa98e",
   terminal_control: "#7d7d7d", task_controls: "#7d7d7d", mcp: "#7d7d7d", browser: "#386ea0",
+  http_trigger: "#2f9e8f", socket_trigger: "#2f9e8f", file_trigger: "#2f9e8f", text_input: "#2f9e5b",
 };
+
+/** Groups and order of the designer's Add block menu. Types not listed appear under "Other". */
+export const BLOCK_GROUPS: { title: string; types: string[] }[] = [
+  { title: "Start & events", types: ["start_button", "start_input", "text_input", "http_trigger", "socket_trigger", "file_trigger", "timer"] },
+  { title: "Agents", types: ["ai", "chatbox", "meeting"] },
+  { title: "Steps", types: ["script", "run_app", "text", "markdown"] },
+  { title: "Ask the user", types: ["user_prompt", "yes_no_prompt"] },
+  { title: "Agent tools", types: ["skill", "mcp", "browser", "terminal_control", "task_controls"] },
+];
 
 export const blockIcon: Record<string, string> = {
   start_button: svg("<polygon points='7 4 20 12 7 20 7 4'/>"),
@@ -30,6 +40,10 @@ export const blockIcon: Record<string, string> = {
   task_controls: svg("<circle cx='6' cy='6' r='2'/><circle cx='18' cy='18' r='2'/><path d='M6 8v6a4 4 0 0 0 4 4h6M18 16V6'/>"),
   browser: svg("<circle cx='12' cy='12' r='9'/><path d='M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18Z'/>"),
   mcp: svg("<path d='M9 3v4m6-4v4M7 7h10v4a5 5 0 0 1-10 0V7Zm5 9v5'/>"),
+  text_input: svg("<rect x='3' y='6' width='18' height='12' rx='2'/><path d='M7 10h.01M11 10h.01M15 10h.01M7 14h10'/>"),
+  http_trigger: svg("<circle cx='12' cy='12' r='9'/><path d='M3 12h18M12 3a14 14 0 0 1 0 18M13 8l-2 4h3l-2 4'/>"),
+  socket_trigger: svg("<path d='M7 7V3M17 7V3M5 7h14v4a7 7 0 0 1-14 0V7Z'/><path d='M13 11l-2 3h3l-2 3'/>"),
+  file_trigger: svg("<path d='M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z'/><path d='M14 3v6h6M13 12l-2 3h3l-2 3'/>"),
   workflow: svg("<rect x='3' y='3' width='6' height='6' rx='1'/><rect x='15' y='15' width='6' height='6' rx='1'/><rect x='15' y='3' width='6' height='6' rx='1'/><path d='M9 6h6M18 9v6M6 9v6a3 3 0 0 0 3 3h6'/>"),
   play: svg("<polygon points='6 4 20 12 6 20 6 4'/>"),
   stop: svg("<rect x='6' y='6' width='12' height='12' rx='1'/>"),
@@ -53,13 +67,14 @@ export const edgeStyle: Record<WorkflowEdgeType, { color: string; dashed: boolea
   follow: { color: "muted", dashed: false, fromSide: "right", toSide: "left", name: "Follow" },
   use: { color: "#4f8fde", dashed: true, fromSide: "bottom", toSide: "top", name: "Use" },
   path: { color: "#c99a12", dashed: false, fromSide: "right", toSide: "left", name: "Path" },
+  queue: { color: "#2f9e8f", dashed: true, fromSide: "right", toSide: "left", name: "Queue" },
 };
 
 export const statusColor = (s: WorkflowBlockStatus | WorkflowRunStatus | string) =>
   s === "succeeded" ? "success" : s === "failed" ? "danger" : s === "running" ? "primary" : s === "cancelled" || s === "skipped" ? "muted"
-  : s === "awaiting_user_input" || s === "awaiting_permission" || s === "waiting" ? "warning" : s === "waiting_timer" ? "info" : "muted";
+  : s === "awaiting_user_input" || s === "awaiting_permission" || s === "waiting" ? "warning" : s === "waiting_timer" || s === "waiting_trigger" || s === "waiting_input" ? "info" : "muted";
 
 export const statusText: Record<string, string> = {
   idle: "idle", queued: "queued", running: "running", succeeded: "done", failed: "failed", cancelled: "cancelled", skipped: "skipped",
-  waiting_timer: "timer", awaiting_user_input: "needs answer", awaiting_permission: "needs approval", waiting: "waiting",
+  waiting_timer: "timer", waiting_trigger: "armed", waiting_input: "ready", awaiting_user_input: "needs answer", awaiting_permission: "needs approval", waiting: "waiting",
 };

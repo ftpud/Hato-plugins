@@ -25,6 +25,18 @@ function publishRail(ctx: ModuleContext) {
   ]);
 }
 
+/** A run chosen in the rail, revealed once its workspace is the current one. */
+let pendingReveal: { workspaceId: string; workflowId: string; runId: string } | null = null;
+function revealPending(ctx: ModuleContext) {
+  const p = pendingReveal;
+  if (!p || p.workspaceId !== S.ws?.id) return;
+  pendingReveal = null;
+  S.maximized = p.workflowId; S.open.add(p.workflowId); S.cardRun.set(p.workflowId, p.runId); S.filter = "";
+  publishRail(ctx);
+  ctx.events.emit("workflows-panel.reveal", {});
+  void act(ctx, async () => { await refreshRuns(ctx); await refreshDetails(ctx); });
+}
+
 async function setup(ctx: ModuleContext) {
   const mine = ++S.epoch;
   Object.assign(S, { catalog: null, list: [], recent: [], error: null });
@@ -139,7 +151,7 @@ const mod: AppModule = {
         ...(workspaceDrafts.get(next?.id) || {}) });
       S.lastSnapshot = { at: 0, field: "" };
       S.startText.clear(); S.chatDrafts.clear(); S.answers.clear();
-      S.designerOpen = false; void setup(ctx); schedule(ctx);
+      S.designerOpen = false; void setup(ctx).then(() => revealPending(ctx)); schedule(ctx);
     });
     ctx.state.watch("workspace-layout.panels", (panels: any) => { const was = S.visible; S.visible = !!panels?.workflows; publishRail(ctx); schedule(ctx); if (S.visible && !was && !S.catalog) void setup(ctx); });
     ctx.events.on("workflows.changed", (e: any) => {
@@ -154,6 +166,13 @@ const mod: AppModule = {
         } catch (err) { if (e.workspaceId === S.ws?.id) S.error = errMsg(err); }
         ctx.ui.invalidate();
       })();
+    });
+    // A workflow row in the rail's Working section opens that run (after switching workspace if needed).
+    for (const rail of ["left-sidebar", "sidebar"]) ctx.events.on(`${rail}.openAgent`, (e: any) => {
+      const wf = e?.workflow;
+      if (e?.kind !== "workflow" || typeof e.workspaceId !== "string" || typeof wf?.workflowId !== "string" || typeof wf?.runId !== "string") return;
+      pendingReveal = { workspaceId: e.workspaceId, workflowId: wf.workflowId, runId: wf.runId };
+      revealPending(ctx);
     });
     for (const rail of ["left-sidebar", "sidebar"]) ctx.events.on(`${rail}.panelChild`, (e: any) => {
       if (e?.panel !== "workflows") return;
@@ -286,6 +305,15 @@ const mod: AppModule = {
           return;
         }
         // ---- run interaction
+        case "textInputText": { S.answers.set(key, value); return; }
+        case "textInputSend": {
+          const ref = key.startsWith("tin:") ? key : value;
+          const [, runId, blockId] = ref.split(":");
+          const textValue = String(ev.inputs?.[ref] ?? S.answers.get(ref) ?? "");
+          if (!textValue.trim()) return;
+          await act(ctx, async () => { await call(ctx, "sendText", { runId, blockId, text: textValue }); S.answers.delete(ref); await reloadRun(ctx, runId); });
+          return;
+        }
         case "answerText": { const id = key.split(":").pop()!; S.answers.set(id, value); return; }
         case "answer": await act(ctx, async () => { await call(ctx, "answer", { runId: v.runId, blockId: v.blockId, pauseId: v.pauseId, answer: v.answer }); await reloadRun(ctx, v.runId); }); return;
         case "answerSubmit": {
@@ -360,7 +388,9 @@ const mod: AppModule = {
         case "undo": undoDraft(); ctx.ui.invalidate(); return;
         case "redo": redoDraft(); ctx.ui.invalidate(); return;
         case "mode": S.mode = value as WorkflowEdgeType; ctx.ui.invalidate(); return;
-        case "addBlock": if (value) addBlock(value); ctx.ui.invalidate(); if (S.selection?.kind === "block") await loadProviderChoices(ctx, S.selection.id); return;
+        case "addMenu": S.addMenuOpen = !!v; if (!S.addMenuOpen) S.addFilter = ""; ctx.ui.invalidate(); return;
+        case "addFilter": S.addFilter = String(value || ""); ctx.ui.invalidate(); return;
+        case "addBlock": if (value) addBlock(value); S.addMenuOpen = false; S.addFilter = ""; ctx.ui.invalidate(); if (S.selection?.kind === "block") await loadProviderChoices(ctx, S.selection.id); return;
         case "moveBlock": { const b = block(v?.key); if (!b) return; const x = Math.max(0, Math.round(v.x / CARD.snap) * CARD.snap), y = Math.max(0, Math.round(v.y / CARD.snap) * CARD.snap);
           if (b.position.x !== x || b.position.y !== y) mutate(() => { b.position = { x, y }; }); ctx.ui.invalidate(); return; }
         case "selectBlock": S.selection = { kind: "block", id: v?.key }; ctx.ui.invalidate(); await loadProviderChoices(ctx, v?.key); return;
@@ -392,6 +422,20 @@ const mod: AppModule = {
           const session = S.browsers.find(s => s.id === value);
           mutate(() => { b.browser = session ? { sessionId: session.id, name: session.name } : undefined; });
           ctx.ui.invalidate();
+          return;
+        }
+        case "triggerField": case "triggerBool": {
+          const [, id, f] = key.split(":"); const b = block(id); if (!b) return;
+          const numeric = ["port", "statusCode", "maxEvents"].includes(f);
+          mutate(() => {
+            const t: Record<string, any> = { ...(b.trigger || {}) };
+            const raw = a === "triggerBool" ? v === true || value === "true" : value;
+            if (numeric) { const n = Number(raw); if (String(raw).trim() === "" || !Number.isFinite(n)) delete t[f]; else t[f] = Math.round(n); }
+            else if (raw === "" || raw === undefined) delete t[f];
+            else t[f] = raw;
+            b.trigger = t;
+          }, `${id}:trigger:${f}`);
+          if (a === "triggerBool" || ["protocol", "mode", "method", "framing"].includes(f)) ctx.ui.invalidate();
           return;
         }
         case "mcpServer": { const id = key.split(":")[1]; const b = block(id); if (!b) return; mutate(() => { b.mcp = { serverId: value }; }); ctx.ui.invalidate(); return; }

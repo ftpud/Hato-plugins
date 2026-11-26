@@ -256,6 +256,14 @@ const mod: AppModule = {
           const run = await startWorkflow(ctx, d, a.id, a.input, a.start_block_id);
           return { ...run, workspaceId: d.id, projectId: d.projectId };
         } },
+      { name: "send_text", title: "Send text to a workflow run", description: "Type text into a Text Input block of a running workflow; it passes to that block's connections. Only use when the user asks to send it.",
+        inputSchema: object({ run_id: { type: "string" }, block_id: { type: "string" }, text: { type: "string" } }, ["run_id", "block_id", "text"]),
+        handler: async (a, s) => {
+          const d = await scoped(s);
+          const r = await runner(ctx, d, "run", { id: String(a.run_id) });
+          if (r.projectId !== d.projectId) throw new Error("Run belongs to another project");
+          return runner(ctx, d, "sendText", { runId: String(a.run_id), blockId: String(a.block_id), text: String(a.text ?? "") });
+        } },
       { name: "run_status", title: "Workflow run status", description: "Read a workflow run's status and block results (or list recent runs when run_id is omitted).", inputSchema: object({ run_id: { type: "string" }, workflow_id: { type: "string" } }), annotations: { readOnlyHint: true },
         handler: async (a, s) => {
           const d = await scoped(s);
@@ -355,6 +363,7 @@ const mod: AppModule = {
     async cancel(ctx, a) { return runner(ctx, await resolve(ctx, a.workspaceId), "cancel", { id: a.runId }); },
     async answer(ctx, a) { return runner(ctx, await resolve(ctx, a.workspaceId), "answer", { runId: a.runId, blockId: a.blockId, pauseId: a.pauseId, answer: a.answer }); },
     async chat(ctx, a) { return runner(ctx, await resolve(ctx, a.workspaceId), "chat", { runId: a.runId, blockId: a.blockId, text: a.text }); },
+    async sendText(ctx, a) { return runner(ctx, await resolve(ctx, a.workspaceId), "sendText", { runId: a.runId, blockId: a.blockId, text: a.text }); },
     async removeRun(ctx, a) {
       const d = await resolve(ctx, a.workspaceId);
       const r = await runner(ctx, d, "removeRun", { id: a.runId });

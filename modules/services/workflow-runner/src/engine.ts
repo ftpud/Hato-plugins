@@ -8,10 +8,11 @@ import { acpServer, transportOf } from "@hato/sdk/mcp-servers";
 import type { AgentProfile } from "@hato/sdk/persistent-agents";
 import {
   type WorkflowBlock, type WorkflowBlockState, type WorkflowDefinition, type WorkflowEdge, type WorkflowRun, type WorkflowRunEnv,
-  capabilityMcpServer, edgeType, isAgentBlock, isCapabilityBlock, isInternalMcp, isStartBlock, preview, renderPrompt,
+  capabilityMcpServer, edgeType, isAgentBlock, isCapabilityBlock, isInternalMcp, isStartBlock, isTriggerBlock, isEventSource, preview, renderPrompt,
 } from "@hato/sdk/workflows";
 import { appAction, runScript } from "./procs";
 import { issueEndpoint, revokeWhere } from "./mcp";
+import { armFileTrigger, armHttpTrigger, armSocketTrigger, applyTriggerPatch, renderTriggerOutput, type ArmedTrigger } from "./triggers";
 
 export interface Exec {
   run: WorkflowRun; env: WorkflowRunEnv; def: WorkflowDefinition;
@@ -24,6 +25,12 @@ export interface Exec {
   timers: Map<string, ReturnType<typeof setTimeout>>;
   /** One-shot delay overrides (ms) for the next arming of a Timer, set by an agent's tool call. */
   delays: Map<string, number>;
+  triggers: Map<string, ArmedTrigger>;
+  triggerWaiters: Map<string, Set<(output: string) => void>>;
+  /** FIFO inputs per target block waiting on queue connections while the target is busy. */
+  queues: Map<string, { edgeId: string; input: string; ancestors: string[] }[]>;
+  /** Text Input blocks holding the run open while they wait for typed text. */
+  inputs: Set<string>;
   answers: Map<string, { pauseId: string; resolve: (v: string) => void; reject: (e: Error) => void }>;
   background: Set<Promise<unknown>>; loops: Map<string, number>; steps: number;
   joins: Map<string, { resolved: Set<string>; active: Set<string>; outputs: Map<string, string>; fired: boolean }>;
@@ -51,7 +58,7 @@ export function touch(x: Exec) {
   publishMeetingStatusChanges(x);
   if (x.run.status === "running" || x.run.status === "waiting") {
     const active = x.run.blocks.some(s => s.status === "running");
-    const paused = x.run.blocks.some(s => ["awaiting_user_input", "awaiting_permission", "waiting_timer"].includes(s.status));
+    const paused = x.run.blocks.some(s => ["awaiting_user_input", "awaiting_permission", "waiting_timer", "waiting_trigger", "waiting_input"].includes(s.status));
     x.run.status = active ? "running" : paused ? "waiting" : "running";
   }
   persist(x.run);
@@ -116,7 +123,8 @@ function assertActive(x: Exec) { if (x.cancelled) throw new Error("Workflow run 
 
 export function newExec(run: WorkflowRun, env: WorkflowRunEnv): Exec {
   const x: Exec = {
-    run, env, def: run.definition, mcpCalls: new Map(), outputs: new Map(), busy: new Set(), timers: new Map(), delays: new Map(), answers: new Map(), background: new Set(),
+    run, env, def: run.definition, mcpCalls: new Map(), outputs: new Map(), busy: new Set(), timers: new Map(), delays: new Map(),
+    triggers: new Map(), triggerWaiters: new Map(), queues: new Map(), inputs: new Set(), answers: new Map(), background: new Set(),
     mcpUpdateErrors: new Map(), queuedPrompts: new Map(), providerTurns: new Map(), pendingProviderEvents: new Map(),
     loops: new Map(), steps: 0, joins: new Map(), fetched: new Map(), meetingWaiters: new Map(), participantStatuses: new Map(run.blocks.map(s => [s.blockId, s.status])), procs: new Set(), cancelled: false, driving: false,
   };
@@ -128,6 +136,7 @@ export function newExec(run: WorkflowRun, env: WorkflowRunEnv): Exec {
 // ---------------------------------------------------------------- graph helpers
 
 const flowEdge = (e: WorkflowEdge) => edgeType(e) !== "use";
+const joinEdge = (e: WorkflowEdge) => edgeType(e) !== "use" && edgeType(e) !== "queue";
 function reaches(x: Exec, from: string, to: string) {
   const seen = new Set<string>(), stack = [from];
   while (stack.length) {
@@ -142,7 +151,7 @@ function reaches(x: Exec, from: string, to: string) {
 /** Connections that close a cycle are loop returns, not join inputs. */
 const forwardEdge = (x: Exec, e: WorkflowEdge) => !e.loop && flowEdge(e) && !reaches(x, e.to, e.from);
 /** Whether the run's own flow can reach a block. Blocks that only run when an agent calls them
- *  (e.g. a Timer used as a tool) fire as independent events and are never join inputs. */
+ *  (e.g. a Timer used as a tool) and armed triggers fire as independent events and are never join inputs. */
 const flowDriven = (x: Exec, id: string) => defaultRoots(x).some(r => r === id || reaches(x, r, id));
 /** Blocks a caller may use: use connections, and every outgoing connection of a Chatbox. */
 export function toolTargets(x: Exec, callerId: string): WorkflowBlock[] {
@@ -158,8 +167,8 @@ function joinInput(x: Exec, target: string, active: WorkflowEdge[], outputs: Map
 function resolveEdge(x: Exec, e: WorkflowEdge, active: boolean, output: string, path: string[], visited = new Set<string>()): Promise<unknown>[] {
   if (active) transfer(x, e.id, "flow", output);
   const target = e.to;
-  const incoming = x.def.edges.filter(i => i.to === target && forwardEdge(x, i) && flowDriven(x, i.from));
-  const outgoing = () => x.def.edges.filter(o => o.from === target && forwardEdge(x, o));
+  const incoming = x.def.edges.filter(i => i.to === target && joinEdge(i) && forwardEdge(x, i) && flowDriven(x, i.from));
+  const outgoing = () => x.def.edges.filter(o => o.from === target && joinEdge(o) && forwardEdge(x, o));
   if (incoming.length < 2) {
     if (active) return [invoke(x, target, output, path)];
     if (visited.has(target)) return [];
@@ -212,6 +221,12 @@ export async function invoke(x: Exec, id: string, input: string, ancestors: stri
       case "terminal_control": case "task_controls": case "mcp": case "browser": output = `${b.label} adds tools to connected agents.`; break;
       case "script": output = await script(x, b, s, input); break;
       case "run_app": output = JSON.stringify(await appAction(ctx, x.env.root, b.app!.name, b.command || "", b.app?.action || "start", b.app?.lines || 100)); break;
+      case "text_input": output = b.prompt.trim() ? rendered() : input; break;
+      case "http_trigger": case "socket_trigger": case "file_trigger": {
+        // Reached by a connection or tool call: (re)arm the trigger and return without followers.
+        const armed = await armTrigger(x, b);
+        return JSON.stringify({ armed: true, endpoint: armed.endpoint });
+      }
       case "timer": {
         armTimer(x, b, s, input);
         x.busy.delete(id);
@@ -260,6 +275,54 @@ function releaseBlock(x: Exec, id: string) {
   if (queued?.length && !x.cancelled && x.def.blocks.some(b => b.id === id)) {
     track(x, invoke(x, id, queued.join("\n\n"), [], true));
   }
+  drainQueue(x, id);
+}
+
+// ---------------------------------------------------------------- queue connections
+
+const DEFAULT_QUEUE_LIMIT = 100;
+const queueLimit = (e: WorkflowEdge) => Math.min(Math.max(e.queueLimit ?? DEFAULT_QUEUE_LIMIT, 1), 10_000);
+const waitingOn = (x: Exec, e: WorkflowEdge) => (x.queues.get(e.to) || []).filter(i => i.edgeId === e.id).length;
+/** Whether every queue connection leaving `from` can take one more item right now. */
+export function queuesHaveRoom(x: Exec, from: string) {
+  return x.def.edges.every(e => e.from !== from || edgeType(e) !== "queue" || waitingOn(x, e) < queueLimit(e));
+}
+function setDepth(x: Exec, id: string) {
+  const s = x.run.blocks.find(s => s.blockId === id); if (!s) return;
+  const n = x.queues.get(id)?.length || 0;
+  if (n) s.queueDepth = n; else delete s.queueDepth;
+}
+
+/** A queue connection: run the target now when it is free and nothing is waiting, else append to
+ *  its FIFO. Returns the started run, true when queued, or false when the queue is full. */
+function enqueue(x: Exec, e: WorkflowEdge, input: string, ancestors: string[]): Promise<unknown> | boolean {
+  const q = x.queues.get(e.to) || [];
+  if (!x.busy.has(e.to) && !q.length) { transfer(x, e.id, "flow", input); return invoke(x, e.to, input, ancestors); }
+  const from = block(x, e.from), to = block(x, e.to);
+  if (waitingOn(x, e) >= queueLimit(e)) {
+    log(stateOf(x, e.from), "error", `Queue to '${to.label}' is full (${queueLimit(e)} waiting); dropped an item`);
+    touch(x);
+    return false;
+  }
+  q.push({ edgeId: e.id, input, ancestors });
+  x.queues.set(e.to, q);
+  setDepth(x, e.to);
+  log(stateOf(x, e.to), "lifecycle", `Queued input from '${from.label}' (${q.length} waiting)`);
+  touch(x);
+  return true;
+}
+
+/** Feed the next waiting item to a block that has become free. */
+function drainQueue(x: Exec, id: string) {
+  if (x.cancelled || x.busy.has(id)) return;
+  const q = x.queues.get(id), item = q?.shift();
+  if (!q || !item) return;
+  if (!q.length) x.queues.delete(id);
+  setDepth(x, id);
+  if (!x.def.blocks.some(b => b.id === id) || !x.def.edges.some(e => e.id === item.edgeId)) { drainQueue(x, id); return; }
+  transfer(x, item.edgeId, "flow", item.input);
+  // Failures are recorded on the block and the run by invoke itself.
+  track(x, invoke(x, id, item.input, item.ancestors).catch(() => {}));
 }
 
 export type ProviderTurnEvent = {
@@ -318,6 +381,10 @@ export function recordProviderTurn(x: Exec, event: ProviderTurnEvent) {
 async function followers(x: Exec, b: WorkflowBlock, s: WorkflowBlockState, output: string, ancestors: string[]) {
   const id = b.id, out = x.def.edges.filter(e => e.from === id && flowEdge(e));
   const pending: Promise<unknown>[] = [];
+  for (const e of out.filter(e => edgeType(e) === "queue")) {
+    const started = enqueue(x, e, output, [...ancestors, id]);
+    if (started instanceof Promise) pending.push(started);
+  }
   for (const e of out.filter(e => edgeType(e) === "path" && e.label !== s.selectedRoute && forwardEdge(x, e)))
     pending.push(...resolveEdge(x, e, false, "", [...ancestors, id]));
   for (const e of out.filter(e => edgeType(e) === "follow" || (edgeType(e) === "path" && e.label === s.selectedRoute))) {
@@ -421,6 +488,190 @@ export function timerAction(x: Exec, id: string, action: "status" | "cancel") {
   return { status: armed ? "armed" : s.status, ...(armed ? { firesAt: s.waitingUntil } : {}) };
 }
 
+// ---------------------------------------------------------------- text input
+
+/** Make Text Input blocks available: those with keepOpen (default) hold the run open. */
+export function openTextInputs(x: Exec, blocks = x.def.blocks) {
+  for (const b of blocks.filter(b => b.type === "text_input")) {
+    const s = stateOf(x, b.id);
+    if (b.keepOpen === false) { x.inputs.delete(b.id); if (s.status === "waiting_input") Object.assign(s, { status: "idle" }); continue; }
+    x.inputs.add(b.id);
+    if (s.status !== "running") Object.assign(s, { status: "waiting_input", error: undefined, completedAt: undefined });
+  }
+  touch(x);
+}
+
+/** Text typed into a Text Input block: becomes its output and runs its connections. */
+export function sendText(x: Exec, blockId: string, text: string) {
+  const b = block(x, blockId);
+  if (b.type !== "text_input") throw new Error("Only Text Input blocks accept typed text");
+  if (x.cancelled) throw new Error("This run was cancelled; start a new run to send text");
+  const value = String(text).slice(0, 200_000);
+  if (!value.trim()) throw new Error("Text is empty");
+  if (x.run.status !== "running" && x.run.status !== "waiting") { x.run.status = "running"; x.run.completedAt = undefined; x.run.error = undefined; x.flowFailed = undefined; }
+  const s = stateOf(x, blockId);
+  let output = value;
+  try { if (b.prompt.trim()) output = renderPrompt(b.prompt, value, x.outputs); } catch (e) { log(s, "error", `Template: ${errMsg(e)}`); }
+  x.steps = 0;
+  s.runs++; s.input = preview(value, 20_000);
+  s.output = output.slice(-outputLimit(x)); x.outputs.set(blockId, output);
+  log(s, "prompt", value);
+  Object.assign(s, { status: b.keepOpen === false ? "succeeded" : "waiting_input", completedAt: now(), error: undefined });
+  touch(x);
+  track(x, followers(x, b, s, output, []).catch(e => { x.flowFailed ??= `${b.label}: ${errMsg(e)}`; }));
+  return { accepted: true };
+}
+
+// ---------------------------------------------------------------- triggers
+
+const TRIGGER_ACTIONS = ["status", "configure", "arm", "start", "disarm", "stop", "cancel", "wait", "fetch"];
+
+/** Bind a trigger block (HTTP listener, socket, file watch or pipe reader). Re-arming replaces it.
+ *  Throws when the trigger cannot be armed (port in use, missing file, …). */
+export async function armTrigger(x: Exec, b: WorkflowBlock) {
+  assertActive(x);
+  await disarmTrigger(x, b.id);
+  let fired = 0;
+  const arm = b.type === "http_trigger" ? armHttpTrigger : b.type === "socket_trigger" ? armSocketTrigger : armFileTrigger;
+  const armed = await arm(ctx, x, b, (raw, templateInput) => {
+    const accepted = fireTrigger(x, b.id, raw, templateInput, fired + 1);
+    if (accepted) fired++;
+    return accepted;
+  });
+  if (x.cancelled) { await armed.disarm().catch(() => {}); throw new Error("Workflow run was cancelled"); }
+  x.triggers.set(b.id, armed);
+  const s = stateOf(x, b.id);
+  Object.assign(s, { status: "waiting_trigger", triggerEndpoint: armed.endpoint, error: undefined, completedAt: undefined, pauseId: crypto.randomUUID() });
+  log(s, "lifecycle", `Trigger armed on ${armed.endpoint}`);
+  touch(x);
+  return armed;
+}
+
+/** Release a trigger's listener/watch. A waiting trigger becomes `status` (default cancelled). */
+export async function disarmTrigger(x: Exec, id: string, status: "cancelled" | "succeeded" = "cancelled") {
+  const armed = x.triggers.get(id);
+  if (!armed) return false;
+  x.triggers.delete(id);
+  await armed.disarm().catch(e => ctx.log.warn("workflow trigger disarm", errMsg(e)));
+  const s = x.run.blocks.find(s => s.blockId === id);
+  if (s && s.status === "waiting_trigger") Object.assign(s, { status, completedAt: now(), triggerEndpoint: undefined, pauseId: undefined });
+  for (const wake of [...(x.triggerWaiters.get(id) || [])]) wake("");
+  touch(x);
+  return true;
+}
+
+/** Release every listener, socket helper, pipe reader and file watch of all runs, and clear
+ *  timers. Called when the runtime is deactivated (reload, runtime replacement, shutdown) so
+ *  ports and processes are not left bound after this generation is gone. Run records are not
+ *  changed: the next runtime marks open runs as interrupted. Bounded so deactivation cannot hang. */
+export async function releaseAllTriggers(timeoutMs = 3000) {
+  const pending: Promise<unknown>[] = [];
+  for (const x of execs.values()) {
+    for (const t of x.timers.values()) clearTimeout(t);
+    x.timers.clear();
+    for (const [id, armed] of [...x.triggers]) {
+      x.triggers.delete(id);
+      pending.push(armed.disarm().catch(e => ctx?.log.warn("workflow trigger release", errMsg(e))));
+    }
+  }
+  if (!pending.length) return 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([Promise.allSettled(pending), new Promise(r => { timer = setTimeout(r, timeoutMs); })]).finally(() => clearTimeout(timer));
+  return pending.length;
+}
+
+/** Arm every trigger block when a run starts. On the first failure, every armed trigger is
+ *  released, the failing block is marked failed and the run's failure message is returned. */
+export async function armTriggers(x: Exec): Promise<string | undefined> {
+  for (const b of x.def.blocks.filter(isTriggerBlock)) {
+    try { await armTrigger(x, b); }
+    catch (e) {
+      const message = `Cannot arm trigger '${b.label}': ${errMsg(e)}`;
+      const s = stateOf(x, b.id);
+      Object.assign(s, { status: "failed", error: message, completedAt: now(), triggerEndpoint: undefined, pauseId: undefined });
+      log(s, "error", message);
+      for (const id of [...x.triggers.keys()]) await disarmTrigger(x, id);
+      x.flowFailed ??= message;
+      touch(x);
+      return message;
+    }
+  }
+  return undefined;
+}
+
+/** Deliver one trigger event. Returns false when it was rejected (run inactive or a queue full). */
+function fireTrigger(x: Exec, id: string, raw: string, templateInput: string, count: number): boolean {
+  const b = x.def.blocks.find(b => b.id === id);
+  if (x.cancelled || !b || !x.triggers.has(id)) return false;
+  const s = stateOf(x, id);
+  if (!queuesHaveRoom(x, id)) { log(s, "error", "Event rejected: a queue connection is full"); touch(x); return false; }
+  let output = raw;
+  try { output = renderTriggerOutput(x, b, raw, templateInput); } catch (e) { log(s, "error", `Trigger template: ${errMsg(e)}`); }
+  x.steps = 0;
+  s.runs++; s.input = preview(raw, 20_000);
+  s.output = output.slice(-outputLimit(x)); x.outputs.set(id, output);
+  log(s, "response", output);
+  const limit = b.trigger?.continuous ? Infinity : Math.max(1, b.trigger?.maxEvents ?? 1);
+  for (const wake of [...(x.triggerWaiters.get(id) || [])]) wake(output);
+  if (count >= limit) {
+    const armed = x.triggers.get(id)!;
+    x.triggers.delete(id);
+    Object.assign(s, { status: "succeeded", completedAt: now(), triggerEndpoint: undefined, pauseId: undefined });
+    log(s, "lifecycle", `Trigger fired (${count}); disarmed`);
+    track(x, armed.disarm());
+  } else {
+    s.completedAt = now();
+    log(s, "lifecycle", `Trigger fired (${count}); still armed`);
+  }
+  touch(x);
+  track(x, followers(x, b, s, output, []).catch(e => { x.flowFailed ??= `${b.label}: ${errMsg(e)}`; }));
+  return true;
+}
+
+/** workflow_use_block on a trigger: status, configure, arm/start, disarm/stop/cancel, wait. */
+export async function useTrigger(x: Exec, id: string, a: any) {
+  const b = block(x, id), action = typeof a.action === "string" && a.action ? a.action : "status";
+  if (!TRIGGER_ACTIONS.includes(action)) throw new Error(`Trigger '${b.label}' takes action ${TRIGGER_ACTIONS.join(", ")}`);
+  const status = () => {
+    const s = stateOf(x, id), armed = x.triggers.get(id);
+    return { trigger: { type: b.type, armed: !!armed, status: s.status, ...(armed ? { endpoint: armed.endpoint } : {}),
+      config: { ...(b.trigger || {}), ...(b.trigger?.secret ? { secret: "(set)" } : {}) }, events: s.runs, ...(s.error ? { error: s.error } : {}),
+      ...(s.output !== undefined ? { lastEvent: preview(s.output, 4000) } : {}) } };
+  };
+  if (action === "status") return status();
+  if (action === "disarm" || action === "stop" || action === "cancel") {
+    const was = await disarmTrigger(x, id);
+    log(stateOf(x, id), "lifecycle", was ? "Trigger disarmed by an agent" : "Disarm requested; trigger was not armed");
+    return status();
+  }
+  if (action === "configure" || action === "arm" || action === "start") {
+    const patch = { ...a }; delete patch.action; delete patch.block_id; delete patch.input; delete patch.timeout_seconds;
+    const wasArmed = x.triggers.has(id);
+    if (Object.keys(patch).length) {
+      applyTriggerPatch(b, patch);
+      log(stateOf(x, id), "lifecycle", `Trigger reconfigured by an agent`);
+      touch(x);
+    }
+    if (action !== "configure" || wasArmed) await armTrigger(x, b);
+    return status();
+  }
+  if (action === "wait") {
+    const timeout = Math.min(Math.max(Number(a.timeout_seconds) || 300, 1), 86_400) * 1000;
+    if (!x.triggers.has(id)) return { ...status(), waited: "not_armed" };
+    const output = await new Promise<string | null>(resolve => {
+      const set = x.triggerWaiters.get(id) || new Set<(o: string) => void>();
+      x.triggerWaiters.set(id, set);
+      const done = (v: string | null) => { set.delete(wake); if (!set.size) x.triggerWaiters.delete(id); clearTimeout(t); resolve(v); };
+      const wake = (o: string) => done(o);
+      const t = setTimeout(() => done(null), timeout);
+      set.add(wake);
+    });
+    assertActive(x);
+    return output === null ? { ...status(), waited: "timed_out" } : { ...status(), waited: "fired", event: preview(output, 20_000) };
+  }
+  return status();
+}
+
 async function ask(x: Exec, b: WorkflowBlock, s: WorkflowBlockState, question: string): Promise<string> {
   const pauseId = crypto.randomUUID();
   Object.assign(s, { status: "awaiting_user_input", question, pauseId });
@@ -473,6 +724,7 @@ export function toolCatalogue(x: Exec, b: WorkflowBlock, startupFailures?: Recor
         : { usage: `Use the Hato desktop browser commands with session "${t.browser?.sessionId}"${t.browser?.name ? ` (${t.browser.name})` : ""}: browser_navigate, browser_text, browser_elements, browser_click, browser_type, browser_key, browser_scroll, browser_screenshot (quality low to look around), browser_network.` }) } : {}),
       ...(t.type === "run_app" ? { actions: t.app?.actions?.length ? t.app.actions : ["start", "status", "kill", "tail"] } : {}),
       ...(t.type === "terminal_control" ? { actions: ["list", "read", "write"] } : {}),
+      ...(isTriggerBlock(t) ? { actions: TRIGGER_ACTIONS, ...(x.triggers.get(t.id) ? { endpoint: x.triggers.get(t.id)!.endpoint } : {}) } : {}),
       ...(t.type === "timer" ? { seconds: t.seconds } : {}),
     };
   });
@@ -493,7 +745,7 @@ function instructions(x: Exec, b: WorkflowBlock) {
     tools.length ? `Connected workflow blocks and capabilities: ${JSON.stringify(tools)}.` : "No workflow blocks are connected to you as tools.",
     "Call workflow_connections to discover your connected blocks and their invocation methods before deciding which tools to use. Check the connected capabilities before claiming you lack access. Blocks with invocation workflow_use_block accept block_id and input; provider_mcp_tools means use that MCP server's advertised tools directly.",
     caps.includes("mcp") ? "Use workflow_connections to check which MCP servers are attached, then inspect their advertised tools. If your provider loads tools lazily, use its tool discovery/search facility. Report any pending reason or discovery error for a server you need." : "",
-    tools.length ? "For connected AI Agents and Chatboxes: omit action to run and wait, start launches in the background, status checks state, tail reads recent messages (lines 1–50) and steer sends input to a running session. A timed_out result means the block keeps working; check it with status or workflow_block_messages. Run App blocks take action start, status, kill or tail. Meetings automatically publish participant status changes (started activity, idle, permission wait, error or stop) as room messages. Use diff or wait to receive them without status polling. Publishing does not consume your unread cursor or invoke other agents. Meetings take publish (message), tail, diff, wait, status and shake (peer_block_id and an explicit message, required). Skill blocks return instructions to apply in your own session. Timers arm and return at once; pass seconds (delay) or at (ISO 8601 time) to choose when they fire, else the block's seconds apply. Re-arming replaces the pending timer; action status shows when it fires and cancel disarms it. When a timer fires, its follow connections receive the input you gave them, steering agents that are busy. User Prompt and Yes/No Prompt blocks wait for the user's answer. action \"fetch\" returns output you have not seen yet. Use workflow_block_output to page through long outputs. Keep requests and reports concise." : "",
+    tools.length ? "For connected AI Agents and Chatboxes: omit action to run and wait, start launches in the background, status checks state, tail reads recent messages (lines 1–50) and steer sends input to a running session. A timed_out result means the block keeps working; check it with status or workflow_block_messages. Run App blocks take action start, status, kill or tail. Meetings automatically publish participant status changes (started activity, idle, permission wait, error or stop) as room messages. Use diff or wait to receive them without status polling. Publishing does not consume your unread cursor or invoke other agents. Meetings take publish (message), tail, diff, wait, status and shake (peer_block_id and an explicit message, required). Skill blocks return instructions to apply in your own session. Trigger blocks (HTTP, socket, file/pipe) are armed when the run starts and start their followers when an event arrives; take action status, configure (port, path, method, status_code, response_body, secret, protocol, framing, mode, create_if_missing, continuous, max_events; re-arms if armed), arm, disarm, wait (timeout_seconds) or fetch. Timers arm and return at once; pass seconds (delay) or at (ISO 8601 time) to choose when they fire, else the block's seconds apply. Re-arming replaces the pending timer; action status shows when it fires and cancel disarms it. When a timer fires, its follow connections receive the input you gave them, steering agents that are busy. User Prompt and Yes/No Prompt blocks wait for the user's answer. action \"fetch\" returns output you have not seen yet. Use workflow_block_output to page through long outputs. Keep requests and reports concise." : "",
     caps.includes("terminal_control") ? "Terminal Control: always call workflow_use_block with the connected Terminal Control block_id and action list, read or write. read/write take key; read accepts cursor; write takes text. These calls are logged on the block. Do not use direct workspace terminals_* tools. Reuse existing terminals; do not start agents in terminals." : "",
     caps.includes("browser") ? "Browser: drive the connected browser session only through the browser commands with its session id. Look before acting (browser_screenshot quality low, browser_text or browser_elements), click and type by element ref, and verify the result. The user watches the session live and may also interact with it." : "",
     caps.includes("task_controls") ? "Task controls: use the workspace tasks_list, tasks_create, tasks_start_agent and tasks_reconcile tools (they need the Hato desktop open)." : "",
@@ -675,7 +927,7 @@ export async function messages(x: Exec, id: string, count: number) {
 const STATUS_DESCRIPTIONS: Record<string, string> = {
   running: "started activity", succeeded: "is idle", failed: "stopped with an error",
   cancelled: "was stopped", awaiting_permission: "is waiting for permission",
-  awaiting_user_input: "is waiting for input", waiting_timer: "is waiting for a timer", queued: "is queued",
+  awaiting_user_input: "is waiting for input", waiting_input: "is ready for text", waiting_timer: "is waiting for a timer", waiting_trigger: "is waiting for a trigger", queued: "is queued",
 };
 function notifyMeeting(x: Exec, roomId: string) {
   for (const wake of [...(x.meetingWaiters.get(roomId) || [])]) wake();
@@ -778,7 +1030,7 @@ export async function drive(x: Exec, entries?: string[]) {
       catch (e) { if (x.cancelled) break; x.flowFailed ??= errMsg(e); break; }
     }
     // Timers and background tool work keep the run open.
-    while (!x.cancelled && (x.timers.size || x.background.size)) {
+    while (!x.cancelled && (x.timers.size || x.triggers.size || x.inputs.size || x.background.size)) {
       if (x.background.size) await Promise.race([Promise.allSettled([...x.background]), sleep(500)]);
       else await sleep(250);
     }
@@ -786,10 +1038,10 @@ export async function drive(x: Exec, entries?: string[]) {
 }
 
 export function defaultRoots(x: Exec) {
-  if (x.run.startBlockId) return [x.run.startBlockId];
+  if (x.run.startBlockId) return isEventSource(block(x, x.run.startBlockId)) ? [] : [x.run.startBlockId];
   const starts = x.def.blocks.filter(isStartBlock);
   if (starts.length) return starts.map(b => b.id);
-  return x.def.blocks.filter(b => !x.def.edges.some(e => e.to === b.id) && !isCapabilityBlock(b) && !(b.type === "chatbox" && !x.run.input.trim()) && !["meeting", "skill"].includes(b.type)).map(b => b.id);
+  return x.def.blocks.filter(b => !x.def.edges.some(e => e.to === b.id) && !isCapabilityBlock(b) && !(b.type === "chatbox" && !x.run.input.trim()) && !["meeting", "skill"].includes(b.type) && !isEventSource(b)).map(b => b.id);
 }
 
 /** Adopt a saved revision of the run's workflow (hot update). The graph, prompts, settings and
@@ -800,15 +1052,38 @@ export function adoptDefinition(x: Exec, def: WorkflowDefinition) {
   let disarmed = false;
   for (const [id, t] of [...x.timers]) if (!ids.has(id)) { clearTimeout(t); x.timers.delete(id); disarmed = true; }
   for (const id of [...x.joins.keys()]) if (!ids.has(id)) x.joins.delete(id);
+  // Triggers of removed blocks are released; a changed trigger configuration re-arms its listener.
+  const rearm: WorkflowBlock[] = [];
+  for (const id of [...x.triggers.keys()]) {
+    const next = def.blocks.find(b => b.id === id), prev = x.def.blocks.find(b => b.id === id);
+    if (!next || !isTriggerBlock(next)) { void disarmTrigger(x, id); disarmed = true; }
+    else if (JSON.stringify(next.trigger || {}) !== JSON.stringify(prev?.trigger || {}) || next.type !== prev?.type) rearm.push(next);
+  }
+  // Waiting items of removed blocks or connections (or connections no longer queues) are dropped.
+  const queueEdges = new Set(def.edges.filter(e => edgeType(e) === "queue").map(e => e.id));
+  for (const [id, q] of [...x.queues]) {
+    const kept = ids.has(id) ? q.filter(i => queueEdges.has(i.edgeId)) : [];
+    if (kept.length) x.queues.set(id, kept); else x.queues.delete(id);
+    setDepth(x, id);
+  }
+  for (const id of [...x.inputs]) if (!def.blocks.some(b => b.id === id && b.type === "text_input")) { x.inputs.delete(id); disarmed = true; }
   x.def = def; x.run.definition = def; x.run.workflowName = def.name;
   x.run.blocks = x.run.blocks.filter(s => ids.has(s.blockId) || x.busy.has(s.blockId) || x.answers.has(s.blockId));
   for (const b of def.blocks) stateOf(x, b.id);
+  // Text Inputs added or changed while the run is active are available at once.
+  if (!x.cancelled && (x.run.status === "running" || x.run.status === "waiting")) openTextInputs(x);
+  for (const b of rearm) track(x, armTrigger(x, b).catch(e => {
+    const s = stateOf(x, b.id), message = `Cannot re-arm trigger '${b.label}': ${errMsg(e)}`;
+    Object.assign(s, { status: "failed", error: message, completedAt: now(), triggerEndpoint: undefined });
+    log(s, "error", message); touch(x);
+  }));
   if (disarmed) settle(x); else touch(x);
 }
 
 /** Close the run once nothing is active. A Chatbox remains available for later user turns. */
 export function settle(x: Exec) {
-  if (x.driving || x.busy.size || x.timers.size || x.background.size || x.answers.size) { touch(x); return; }
+  for (const id of [...x.queues.keys()]) drainQueue(x, id);
+  if (x.driving || x.busy.size || x.timers.size || x.triggers.size || x.inputs.size || x.background.size || x.answers.size) { touch(x); return; }
   if (x.deadline) clearTimeout(x.deadline);
   if (x.run.status === "running" || x.run.status === "waiting") {
     x.run.status = x.cancelled ? "cancelled" : x.flowFailed ? "failed" : "succeeded";
@@ -823,13 +1098,18 @@ export async function cancel(x: Exec, reason = "Cancelled by the user") {
   x.cancelled = true;
   for (const t of x.timers.values()) clearTimeout(t);
   x.timers.clear();
+  for (const id of [...x.triggers.keys()]) await disarmTrigger(x, id);
+  x.queues.clear();
+  x.inputs.clear();
+  for (const s of x.run.blocks) delete s.queueDepth;
+  for (const set of [...x.triggerWaiters.values()]) for (const wake of [...set]) wake("");
   for (const p of x.answers.values()) p.reject(new Error("Workflow run was cancelled"));
   x.answers.clear();
   for (const listeners of [...x.meetingWaiters.values()]) for (const wake of [...listeners]) wake();
   for (const h of x.procs) await ctx.host.process.terminate(h, "SIGKILL").catch(() => {});
   for (const s of x.run.blocks) {
     if (s.sessionId && (s.status === "running" || s.status === "awaiting_permission")) await agentCall("cancel", { id: s.sessionId }).catch(() => {});
-    if (["running", "waiting_timer", "awaiting_user_input", "awaiting_permission", "queued"].includes(s.status)) { s.status = "cancelled"; s.completedAt = now(); }
+    if (["running", "waiting_timer", "waiting_trigger", "waiting_input", "awaiting_user_input", "awaiting_permission", "queued"].includes(s.status)) { s.status = "cancelled"; s.completedAt = now(); }
   }
   x.run.status = "cancelled"; x.run.error = reason; x.run.completedAt = now();
   touch(x);

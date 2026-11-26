@@ -6,6 +6,7 @@ import { daemonTargetFor, errMsg, workspaceGrant, type WorkspaceDescriptor } fro
 import { workspaceSkills } from "../../files/src/skills";
 import { agentActivity, agentSettings, autoAgentName, isAutoAgentName, relativeAgentPath, type AgentMcp, type AgentSession, type AgentSpec, type WorkingAgent } from "@hato/sdk/persistent-agents";
 import { imageAttachments } from "@hato/sdk/images";
+import type { WorkflowActiveRun } from "@hato/sdk/workflows";
 import { epochOf, promptTurns, type PromptEntry } from "@hato/sdk/prompt-history";
 import { exportMcpTools } from "@hato/sdk/mcp";
 import { acpServer, transportOf, validateMcp } from "@hato/sdk/mcp-servers";
@@ -286,6 +287,7 @@ async function performTask(ctx:ModuleContext,r:{sessionId:string;workspaceId:str
 // Poll daemons the desktop already talks to for task requests and working sessions.
 let daemonPoll:ReturnType<typeof setInterval>|null=null,polling=false,busySignature="";
 let workingSignature = "";
+let workflowsSignature = "";
 const historySignatures = new Map<string, Map<string, string>>();
 const WORKING_LIMIT = 50;
 const WORKING: ReadonlySet<AgentSession["status"]> = new Set(["starting", "busy", "waiting"]);
@@ -309,8 +311,14 @@ async function pollDaemons(ctx:ModuleContext) {
     const busy:Record<string,number>={};
     const working: WorkingAgent[] = [];
     const allChildren = new Map<string, AcpSubagent[]>();
+    const workflows: WorkflowActiveRun[] = [];
     for(const [machineId,pending] of [...prepared]) {
       let t:DaemonTarget;try{t=await pending;}catch{continue;}
+      // Open workflow runs (also those with no agent working) for the activity rail.
+      try {
+        const runs: WorkflowActiveRun[] = await ctx.host.daemon.request(t,"modules.call",{target:"workflow-runner",method:"active",args:{},timeoutMs:10000});
+        if (Array.isArray(runs)) workflows.push(...runs);
+      } catch { /* runner not installed, older runtime or daemon unreachable */ }
       try {
         const sessions: AgentSession[] = await ctx.host.daemon.request(t,"modules.call",{target:"agent-runner",method:"list",args:{},timeoutMs:10000});
         const byWorkspace = new Map<string, string[]>();
@@ -359,6 +367,8 @@ async function pollDaemons(ctx:ModuleContext) {
     const sig=JSON.stringify(Object.entries(busy).sort());
     if(sig!==busySignature){busySignature=sig;ctx.state.set("persistent-agents.busy",busy);}
     publishWorking(ctx, working, id => allChildren.get(id));
+    const workflowSig = JSON.stringify(workflows);
+    if (workflowSig !== workflowsSignature) { workflowsSignature = workflowSig; ctx.state.set("persistent-agents.workflows", workflows.slice(0, 50)); }
   } finally {polling=false;}
 }
 /** After a Library edit, give running agents on connected machines the new text of the entries they
