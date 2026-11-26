@@ -1,4 +1,5 @@
 import { providerMcpLaunch } from "@hato/sdk/provider-mcp";
+import { updateSubagents, knownSubagent, disconnectSubagents, hasWorkingSubagents, openCodeChildUpdate, OPENCODE_CHILD_UPDATE, OPENCODE_CHILD_OPT_IN, type AcpSubagents } from "@hato/sdk/acp-subagents";
 import { authMethods, sessionPage, terminalAuthEnvironment, acpSystemPrompt } from "@hato/sdk/acp-protocol";
 // acp: Agent Client Protocol (agentclientprotocol.com) client implemented in TS over generic
 // process stdio streams. The agent process runs ON the workspace's machine with cwd = the exact
@@ -35,6 +36,7 @@ async function environmentPolicy(ctx: ModuleContext, profile: any) {
  * generic ACP fs/terminal methods stay disabled. Terminal authentication stays disabled until arbitrary-argv PTY launch is supported.
  * Form elicitation is supported by the desktop UI. */
 const CLIENT_CAPABILITIES = {
+  subagents: {},
   fs: { readTextFile: false, writeTextFile: false },
   terminal: false,
   elicitation: { form: {} },
@@ -71,7 +73,7 @@ function requireAdditionalDirectories(c: Conn, dirs: string[]) {
 }
 
 function sessionMatches(c: Conn, params: any): boolean {
-  return !params?.sessionId || params.sessionId === c.sessionId || (c.loadingHistory === true && params.sessionId === c.loadingSessionId);
+  return !params?.sessionId || params.sessionId === c.sessionId || knownSubagent(c.childSessions, params.sessionId) || (c.loadingHistory === true && params.sessionId === c.loadingSessionId);
 }
 
 function promptBlocks(a: any, c: Conn): any[] {
@@ -154,7 +156,7 @@ interface Conn {
   usage: ReportedUsage | null;
   turnUsage: any | null;
   sessionInfo: any | null;
-  childSessions: Record<string, any>;
+  childSessions: AcpSubagents;
   compaction: any | null;
   status: "starting" | "ready" | "busy" | "exited" | "error";
   error: string | null;
@@ -421,7 +423,7 @@ async function startConnection(ctx: ModuleContext, a: any) {
   try {
     const init: any = await sessionRequest(ctx, c, "initialize", {
       protocolVersion: PROTOCOL_VERSION,
-      clientCapabilities: { ...CLIENT_CAPABILITIES, ...(ctx.host.env.info().hostFeatures?.includes("pty.spawn") ? { auth: { terminal: true }, _meta: { "terminal-auth": true } } : {}) },
+      clientCapabilities: { ...CLIENT_CAPABILITIES, _meta: { ...OPENCODE_CHILD_OPT_IN }, ...(ctx.host.env.info().hostFeatures?.includes("pty.spawn") ? { auth: { terminal: true }, _meta: { ...OPENCODE_CHILD_OPT_IN, "terminal-auth": true } } : {}) },
       clientInfo: { name: "hato", title: "Hato", version: "0.1.0" },
     }, 60000);
     c.agentInfo = init.agentInfo || null;
@@ -524,6 +526,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
 }
 
 async function withReplay<T>(ctx: ModuleContext, c: Conn, sessionId: string, request: () => Promise<T>) {
+  c.childSessions = disconnectSubagents(c.childSessions);
   c.loadingHistory = true;
   c.loadingSessionId = sessionId;
   let success = false;
@@ -567,8 +570,14 @@ async function cancelInternal(ctx: ModuleContext, c: Conn) {
 async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
   c.peer = new JsonRpcPeer((line) => ctx.host.process.write(c.proc, line + "\n"), nextId);
   c.peer.restore(partial);
-  c.peer.onNotification = (method, params) => {
+  c.peer.onNotification = function onNotification(method, params) {
     if (method === "$/cancel_request") { void cancelInternal(ctx, c); return; }
+    // OpenCode child lifecycle/traffic (ACP extension methods may arrive with a leading "_").
+    if (method === OPENCODE_CHILD_UPDATE || method === `_${OPENCODE_CHILD_UPDATE}`) {
+      const update = params?.rootSessionId === (c.loadingSessionId || c.sessionId) ? openCodeChildUpdate(params) : null;
+      if (update) onNotification("session/update", update);
+      return;
+    }
     if (method === "elicitation/complete") {
       ctx.events.emit("acp.elicitationComplete", { conversationId: c.conversationId, ...params });
       return;
@@ -576,6 +585,12 @@ async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
     if (method === "session/update" && params && params.update) {
       if (!sessionMatches(c, params)) { ctx.log.warn(`ignored ACP update for foreign session ${String(params.sessionId)}`); return; }
       const u = params.update;
+      const childUpdate = knownSubagent(c.childSessions, params.sessionId);
+      if (updateSubagents(c.childSessions, c.loadingSessionId || c.sessionId, params, c.loadingHistory === true)) {
+        emitStatus(ctx, c);
+      }
+      // Child traffic must never overwrite the parent's configuration, usage or transcript.
+      if (childUpdate || u.sessionUpdate === "subagent_update" || u.sessionUpdate === "_hato_child_status") return;
       if (u.sessionUpdate === "config_option_update" && Array.isArray(u.configOptions)) { c.configOptions = u.configOptions; emitStatus(ctx, c); }
       else if (u.sessionUpdate === "current_mode_update" && c.modes) { c.modes = { ...c.modes, currentModeId: u.currentModeId }; emitStatus(ctx, c); }
       else if (u.sessionUpdate === "usage_update") {
@@ -598,8 +613,6 @@ async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
         c.compaction = u;
         emitStatus(ctx, c);
       }
-      const child = u._meta?.["opencode/child-session"] || params._meta?.["opencode/child-session"];
-      if (child?.id) { c.childSessions = { ...c.childSessions, [child.id]: child }; emitStatus(ctx, c); }
       ctx.events.emit("acp.update", { conversationId: c.conversationId, sessionId: params.sessionId, update: u, replayed: c.loadingHistory === true });
       return;
     }
@@ -640,6 +653,7 @@ async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
   await ctx.host.streams.listen(c.proc, { channel: "stdout" }, (chunk) => c.peer.feed(chunk), (err) => {
     const wasBusy = c.status === "busy";
     c.status = "exited";
+    c.childSessions = disconnectSubagents(c.childSessions);
     if (c.activeTurn?.timer) clearTimeout(c.activeTurn.timer);
     c.activeTurn = null;
     for (const resolve of c.pendingPermissions.values()) resolve({ outcome: { outcome: "cancelled" } });
@@ -668,7 +682,7 @@ function updateAdditionalDirectories(c: Conn, value: any) {
 }
 
 function requireIdleSession(c: Conn) {
-  if (c.status === "busy" || c.status === "starting" || c.activeTurn || c.loadingHistory || c.authProcess) {
+  if (c.status === "busy" || c.status === "starting" || hasWorkingSubagents(c.childSessions) || c.activeTurn || c.loadingHistory || c.authProcess) {
     throw new Error("Wait for the active agent turn, session load, or authentication to finish before changing provider sessions");
   }
 }
@@ -683,6 +697,15 @@ function validateSessionResult(res: any, expected?: string) {
 function applySessionResult(ctx: ModuleContext, c: Conn, res: any, sessionId?: string) {
   validateSessionResult(res, sessionId);
   c.sessionId = requireSessionId(sessionId || res.sessionId);
+  const children: AcpSubagents = {};
+  const include = (parentId: string) => {
+    for (const child of Object.values(c.childSessions)) if (child.parentId === parentId && !knownSubagent(children, child.id)) {
+      Object.defineProperty(children, child.id, { value: child, enumerable: true, writable: true, configurable: true });
+      include(child.id);
+    }
+  };
+  include(c.sessionId);
+  c.childSessions = children;
   c.sessionClosed = false;
   c.configOptions = res && Array.isArray(res.configOptions) ? res.configOptions : null;
   c.modes = res && res.modes ? res.modes : null;
@@ -692,7 +715,6 @@ function applySessionResult(ctx: ModuleContext, c: Conn, res: any, sessionId?: s
   c.turnUsage = null;
   c.sessionInfo = null;
   c.compaction = null;
-  c.childSessions = {};
   emitStatus(ctx, c);
 }
 
@@ -725,7 +747,7 @@ const mod: AppModule = {
     if (startups.size || operations.size) return { ok: false, reason: "An ACP operation is running" };
     if (probes.size) return { ok: false, reason: "a usage-limit probe is running" };
     for (const c of conns.values()) {
-      if (c.status === "busy" || c.status === "starting" || c.authProcess || c.pendingPermissions.size || c.pendingElicitations.size || (c.peer && c.peer.pendingCount > 0)) return { ok: false, reason: `ACP session ${c.conversationId} is busy` };
+      if (c.status === "busy" || c.status === "starting" || hasWorkingSubagents(c.childSessions) || c.authProcess || c.pendingPermissions.size || c.pendingElicitations.size || (c.peer && c.peer.pendingCount > 0)) return { ok: false, reason: `ACP session ${c.conversationId} is busy` };
     }
     return { ok: true };
   },
@@ -1000,6 +1022,7 @@ const mod: AppModule = {
       await ctx.host.process.closeStdin(c.proc).catch(() => {});
       await ctx.host.process.terminate(c.proc).catch(() => {});
       c.status = "exited";
+      c.childSessions = disconnectSubagents(c.childSessions);
       emitStatus(ctx, c);
       conns.delete(a.conversationId);
       await ctx.modules.call("internal-mcp", "revoke", { conversationId: a.conversationId }).catch(() => {});

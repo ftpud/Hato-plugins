@@ -1,4 +1,5 @@
 import { providerProfiles } from "@hato/sdk/agent-providers";
+import { hasWorkingSubagents, subagentList, trackFinishedSubagents, type AcpSubagent, type FinishedSubagents } from "@hato/sdk/acp-subagents";
 import type { AppModule, ModuleContext, DaemonTarget } from "@hato/sdk/types";
 import { daemonTargetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { workspaceSkills } from "../../files/src/skills";
@@ -286,7 +287,13 @@ let workingSignature = "";
 const WORKING_LIMIT = 50;
 const WORKING: ReadonlySet<AgentSession["status"]> = new Set(["starting", "busy", "waiting"]);
 
-function publishWorking(ctx: ModuleContext, working: WorkingAgent[]) {
+let workingIds: ReadonlySet<string> = new Set();
+const finishedChildren = new Map<string, FinishedSubagents>();
+function publishWorking(ctx: ModuleContext, working: WorkingAgent[], childrenOf: (id: string) => AcpSubagent[] | undefined = () => undefined) {
+  // Final child states first: polling can miss subagents finishing just before their parent.
+  const now = new Set(working.map(w => w.id));
+  if (trackFinishedSubagents(finishedChildren, workingIds, now, childrenOf)) ctx.state.set("persistent-agents.finished", [...finishedChildren.values()]);
+  workingIds = now;
   const entries = working.sort((a, b) => a.id.localeCompare(b.id)).slice(0, WORKING_LIMIT);
   const sig = JSON.stringify(entries);
   if (sig === workingSignature) return;
@@ -298,12 +305,14 @@ async function pollDaemons(ctx:ModuleContext) {
   try {
     const busy:Record<string,number>={};
     const working: WorkingAgent[] = [];
+    const allChildren = new Map<string, AcpSubagent[]>();
     for(const [machineId,pending] of [...prepared]) {
       let t:DaemonTarget;try{t=await pending;}catch{continue;}
       try {
         const sessions: AgentSession[] = await ctx.host.daemon.request(t,"modules.call",{target:"agent-runner",method:"list",args:{},timeoutMs:10000});
         for (const s of sessions || []) {
-          if (s.machineId !== machineId || !WORKING.has(s.status)) continue;
+          if (s.machineId === machineId && s.childSessions) allChildren.set(s.id, subagentList(s.childSessions));
+          if (s.machineId !== machineId || (!WORKING.has(s.status) && !hasWorkingSubagents(s.childSessions))) continue;
           busy[s.workspaceId] = (busy[s.workspaceId] || 0) + 1;
           const { workflowId, runId, blockId } = s.workflow ?? {};
           const workflow = s.workflow ? {
@@ -312,7 +321,8 @@ async function pollDaemons(ctx:ModuleContext) {
             ...(typeof blockId === "string" ? { blockId } : {}),
           } : null;
           const progress = s.progress && Number.isFinite(s.progress.percent) ? { percent: s.progress.percent, ...(Number.isFinite(s.progress.at) ? { at: s.progress.at } : {}), ...(s.progress.note ? { note: s.progress.note } : {}) } : null;
-          working.push({ id: s.id, name: s.name, workspaceId: s.workspaceId, status: s.status as WorkingAgent["status"], workflow, progress });
+          const children = subagentList(s.childSessions);
+          working.push({ id: s.id, name: s.name, workspaceId: s.workspaceId, status: WORKING.has(s.status) ? s.status as WorkingAgent["status"] : "busy", workflow, progress, ...(children.length ? { children } : {}) });
         }
       }catch{ /* daemon unreachable: report nothing for it */ }
       let requests:any[];
@@ -329,7 +339,7 @@ async function pollDaemons(ctx:ModuleContext) {
     }
     const sig=JSON.stringify(Object.entries(busy).sort());
     if(sig!==busySignature){busySignature=sig;ctx.state.set("persistent-agents.busy",busy);}
-    publishWorking(ctx, working);
+    publishWorking(ctx, working, id => allChildren.get(id));
   } finally {polling=false;}
 }
 /** After a Library edit, give running agents on connected machines the new text of the entries they

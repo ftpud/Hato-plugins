@@ -2,6 +2,7 @@
 // cached history, and the requested approval policy. Policy here only decides *agent* permission
 // requests; module patch/build/activate approvals are enforced by the kernel regardless.
 import { exportMcpTools } from "@hato/sdk/mcp";
+import { hasWorkingSubagents, subagentList, trackFinishedSubagents, type FinishedSubagents } from "@hato/sdk/acp-subagents";
 import { chatHandoff } from "@hato/sdk/chat-handoff";
 import { acpServer, transportOf } from "@hato/sdk/mcp-servers";
 import { lastProgressMarker, PROGRESS_MARKER_INSTRUCTION, type AgentMcp, type AgentProgress } from "@hato/sdk/persistent-agents";
@@ -54,17 +55,20 @@ const LOW_RISK_KINDS = new Set(["read", "search", "think", "fetch"]);
 let notify: () => void = () => {};
 let busySignature = "";
 let workingSignature = "";
+let workingIds: ReadonlySet<string> = new Set();
+const finishedChildren = new Map<string, FinishedSubagents>();
 let historyMcp: ReturnType<typeof exportMcpTools>;
 /** Publish the count and display projection of the same active turns. */
 function publishActivity(ctx: ModuleContext) {
   const busy: Record<string, number> = {};
   const working: WorkingConversation[] = [];
   for (const c of convs.values()) {
-    if (!(c.busy || c.submitting || c.steering.length)) continue;
+    if (!(c.busy || c.submitting || c.steering.length || hasWorkingSubagents(c.live?.childSessions))) continue;
     const { id, title, workspaceId } = c.row;
     busy[workspaceId] = (busy[workspaceId] || 0) + 1;
     const status = c.live?.status === "starting" || c.row.status === "connecting" ? "starting" : "busy";
-    working.push({ id, title, workspaceId, status });
+    const children = subagentList(c.live?.childSessions);
+    working.push({ id, title, workspaceId, status, ...(children.length ? { children } : {}) });
   }
   const sig = JSON.stringify(Object.entries(busy).sort());
   if (sig !== busySignature) {
@@ -72,6 +76,11 @@ function publishActivity(ctx: ModuleContext) {
     ctx.state.set("ai-sessions.busy", busy);
   }
   const entries = working.sort((a, b) => a.id.localeCompare(b.id)).slice(0, WORKING_LIMIT);
+  // Final child states first, so the rail never finishes a chat with stale "running" children.
+  const now = new Set(working.map(w => w.id));
+  if (trackFinishedSubagents(finishedChildren, workingIds, now, id => subagentList(convs.get(id)?.live?.childSessions)))
+    ctx.state.set("ai-sessions.finished", [...finishedChildren.values()]);
+  workingIds = now;
   const workingSig = JSON.stringify(entries);
   if (workingSig !== workingSignature) {
     workingSignature = workingSig;

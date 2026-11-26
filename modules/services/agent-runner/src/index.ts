@@ -1,5 +1,6 @@
 import { chatHandoff } from "@hato/sdk/chat-handoff";
 import { acpSystemPrompt } from "@hato/sdk/acp-protocol";
+import { updateSubagents, knownSubagent, disconnectSubagents, openCodeChildUpdate, OPENCODE_CHILD_UPDATE, OPENCODE_CHILD_OPT_IN } from "@hato/sdk/acp-subagents";
 import { providerMcpLaunch } from "@hato/sdk/provider-mcp";
 // Standalone ACP controller. No dependency on desktop workspace/chat services. This plugin runs
 // in hatod, so protocol requests, permissions and history survive desktop disconnection.
@@ -255,11 +256,11 @@ async function stop(ctx:ModuleContext,id:string) {
   await ctx.modules.call("internal-remote-mcp","revoke",{sessionId:s.id}).catch(()=>{});
   await ctx.host.db.exec(db,"UPDATE sessions SET queue_json='[]' WHERE id=?",[id]);
   await ctx.host.db.exec(db,"UPDATE permissions SET resolved=1 WHERE session_id=?",[id]);
-  s.status="stopped"; await persist(ctx,s); return s;
+  s.status="stopped"; s.childSessions=disconnectSubagents(s.childSessions); await persist(ctx,s); return s;
 }
 async function start(ctx:ModuleContext,s:AgentSession,preserveConversation=false) {
   if(live.has(s.id))return live.get(s.id)!;
-  s.status="starting";s.error=null;await persist(ctx,s);
+  s.status="starting";s.error=null;s.childSessions=disconnectSubagents(s.childSessions);await persist(ctx,s);
   let c:Live|undefined;
   try {
     await readInstructions(ctx,s); // fail fast on missing or oversized instructions
@@ -293,10 +294,23 @@ async function start(ctx:ModuleContext,s:AgentSession,preserveConversation=false
     const connection=c;
     c.peer=new JsonRpcPeer(line=>ctx.host.process.write(connection.process,line+"\n"));
     live.set(s.id,c);
-    const trackProviderTurns=s.workflow && s.profile.provider==="claude" && s.trackAutonomousClaudeTurns!==false;
-    const onNotification=(method:string,params:any)=>{
-      if(connection.stopping || method!=="session/update" || params?.sessionId!==s.sessionId)return;
+    // Claude wakeups (finished background tasks) run turns nobody prompted; track them as busy so
+    // chats and workflows show the work. Workflows can opt out via their setting.
+    const trackProviderTurns=s.profile.provider==="claude" && s.trackAutonomousClaudeTurns!==false;
+    const onNotification=(method:string,params:any):void=>{
+      // OpenCode child lifecycle/traffic: replayed as ordinary tagged root updates.
+      if(!connection.stopping && (method===OPENCODE_CHILD_UPDATE || method===`_${OPENCODE_CHILD_UPDATE}`)) {
+        const next=params?.rootSessionId===s.sessionId?openCodeChildUpdate(params):null;
+        if(next)onNotification("session/update",next);
+        return;
+      }
+      if(connection.stopping || method!=="session/update")return;
+      const children=s.childSessions??={};
+      if(params?.sessionId!==s.sessionId && !knownSubagent(children,params?.sessionId))return;
       const u=params.update||{};
+      const childUpdate=knownSubagent(children,params?.sessionId);
+      if(updateSubagents(children,s.sessionId,params,connection.loadingHistory===true))void persist(ctx,s);
+      if(childUpdate || u.sessionUpdate==="subagent_update" || u.sessionUpdate==="_hato_child_status")return;
       if(connection.loadingHistory&&["user_message_chunk","agent_message_chunk","agent_thought_chunk","tool_call","tool_call_update","plan"].includes(u.sessionUpdate))return;
       if(!trackProviderTurns && (u.sessionUpdate==="async_task_spawned" || u.sessionUpdate==="async_task_state_update"))return;
       if(s.status==="starting" && ["user_message_chunk","agent_message_chunk","agent_thought_chunk","tool_call","tool_call_update","plan","async_task_spawned","async_task_state_update"].includes(u.sessionUpdate)) {
@@ -311,7 +325,7 @@ async function start(ctx:ModuleContext,s:AgentSession,preserveConversation=false
     }:onNotification;
     c.peer.onRequest=async(method,params)=>{
       if(method!=="session/request_permission")throw rpcError(-32601,"Unsupported agent request");
-      if(params.sessionId!==s.sessionId)throw rpcError(-32602,"Wrong session");
+      if(params.sessionId!==s.sessionId && !knownSubagent(s.childSessions||{},params.sessionId))throw rpcError(-32602,"Wrong session");
       const tool=params.toolCall||{},options:any[]=params.options||[];
       const allowOnce=options.find(o=>o.kind==="allow_once")||options.find(o=>String(o.kind).startsWith("allow"));
       const policy=agentPolicy(s);
@@ -330,6 +344,7 @@ async function start(ctx:ModuleContext,s:AgentSession,preserveConversation=false
       const reason=error?errMsg(error):`Agent exited${connection.stderr?": "+connection.stderr.slice(-600):""}`;
       finishProviderTurn(ctx,connection,"failed",reason);
       s.status="interrupted";s.error=reason;
+      s.childSessions=disconnectSubagents(s.childSessions);
       connection.peer.failAll(s.error);live.delete(s.id);
       for(const p of connection.permissions.values())p.resolve({outcome:{outcome:"cancelled"}});
       void persist(ctx,s);
@@ -338,7 +353,7 @@ async function start(ctx:ModuleContext,s:AgentSession,preserveConversation=false
     // Claude ACP reports wakeups and background follow-up turns via its AIR async-task extension.
     const asyncTasks=trackProviderTurns
       ? {_meta:{jetbrains:{air:{version:1,capabilities:["asyncTasks"]}}}} : {};
-    const init=await request(c,"initialize",{protocolVersion:1,clientCapabilities:{fs:{readTextFile:false,writeTextFile:false},terminal:false,session:{configOptions:{boolean:{}}},...asyncTasks},clientInfo:{name:"hato-agents",version:"0.1.0"}});
+    const init=await request(c,"initialize",{protocolVersion:1,clientCapabilities:{subagents:{},fs:{readTextFile:false,writeTextFile:false},terminal:false,session:{configOptions:{boolean:{}}},...asyncTasks,_meta:{...OPENCODE_CHILD_OPT_IN,...(asyncTasks as any)?._meta}},clientInfo:{name:"hato-agents",version:"0.1.0"}});
     if(init.protocolVersion!==1)throw new Error("Unsupported ACP version");
     c.steering=init._meta?.steering?.supported===true;
     c.loadSession=init.agentCapabilities?.loadSession===true;
@@ -389,6 +404,7 @@ async function start(ctx:ModuleContext,s:AgentSession,preserveConversation=false
       }
     }
     if(!s.sessionId) {
+      s.childSessions={};
       result=await request(c,"session/new",lifecycle);
       if(typeof result.sessionId!=="string"||!result.sessionId)throw new Error("Provider did not return a session id");
       s.sessionId=result.sessionId;
@@ -479,6 +495,7 @@ const mod:AppModule={
     if(!columns.some(c=>c.name==="provider_session_id"))await ctx.host.db.exec(db,"ALTER TABLE messages ADD COLUMN provider_session_id TEXT");
     for(const row of await ctx.host.db.query<any>(db,"SELECT data FROM sessions")) {
       const s:AgentSession=JSON.parse(row.data);
+      s.childSessions=disconnectSubagents(s.childSessions);
       if(["starting","ready","busy","waiting"].includes(s.status)) {s.status="interrupted";s.error="Runtime restarted; reconnect to resume. An interrupted turn is never replayed automatically.";await persist(ctx,s);}
       sessions.set(s.id,s);
     }

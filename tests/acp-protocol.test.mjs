@@ -186,8 +186,10 @@ test('ACP advertises the full OpenCode-facing client surface and forwards additi
   assert.deepEqual(state.additionalDirectories, ['/extra']);
   const init = seen.find((message) => message.method === 'initialize');
   assert.deepEqual(init.params.clientCapabilities, {
+    subagents: {},
     fs: { readTextFile: false, writeTextFile: false }, terminal: false,
     elicitation: { form: {} }, session: { configOptions: { boolean: {} } },
+    _meta: { 'opencode/child-session-updates': true },
   });
   const created = seen.find((message) => message.method === 'session/new').params;
   assert.deepEqual(created.additionalDirectories, ['/extra']);
