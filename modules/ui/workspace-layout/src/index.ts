@@ -161,6 +161,7 @@ let railExpanded: Record<string, boolean> = {};
 async function saveRailExpanded(ctx: ModuleContext, m: string, value: boolean) {
   railExpanded = { ...railExpanded, [m]: value };
   ctx.state.set("workspace-layout.railExpanded", railExpanded);
+  ctx.ui.invalidate(); // window-button visibility follows the left rail (theme chrome)
   try { await ctx.modules.call("persistence", "settings.set", { key: "rail-expanded.v1", value: railExpanded }); } catch (e) { ctx.log.warn("save rail expansion", errMsg(e)); }
 }
 async function openFromRail(ctx: ModuleContext, target: string) {
@@ -791,7 +792,7 @@ const mod: AppModule = {
     const palette = appearanceTheme === "anime" ? animePalette(panelOpacity) : emberPalette;
     const kids: UiNode[] = [{ type: "theme", key: "color-scheme", applicationIcon,
       motion: { mode: animations, activityFps, experimentalDockReveal: panelMotion(), menu: anchoredMotion, tooltip: tooltipMotion, interaction: interactionMotion },
-      chrome: { toasts: { transition: toastMotion }, window: { titlebar: "hidden", trafficLights: haloTrafficLights } }, controls: { listRowHeight: listRowHeight(tableStyle), stripedRows: tableStyle.stripes, rowDividers: tableStyle.dividers }, palette, terminal: appearanceTheme === "anime" ? { light: animeTerminal, dark: animeTerminal } : emberTerminal, typography: typography(fontFamily, fontSize, fontWeight), ...(mode === "system" ? {} : { mode }),
+      chrome: { toasts: { transition: toastMotion }, window: { titlebar: "hidden", trafficLights: { ...haloTrafficLights, ...(layout.showLeftSidebar && railExpanded["left-sidebar"] !== true ? { hidden: "hover" as const } : {}) } } }, controls: { listRowHeight: listRowHeight(tableStyle), stripedRows: tableStyle.stripes, rowDividers: tableStyle.dividers }, palette, terminal: appearanceTheme === "anime" ? { light: animeTerminal, dark: animeTerminal } : emberTerminal, typography: typography(fontFamily, fontSize, fontWeight), ...(mode === "system" ? {} : { mode }),
       syntax: editorTheme(allSchemes().find(s => s.id === syntaxScheme), palette) }];
     // One shell: no top or bottom bars. Their contents live in the Halo rails (sdk/halo-rail.ts),
     // which open Layout, Modules and Settings through this module's methods.

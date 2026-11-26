@@ -1,3 +1,4 @@
+import { captureEnabled, capturedChanges, capturedTranscript } from "@hato/sdk/change-capture";
 // ai-sessions: conversations per workspace, transcript projection of ACP updates, persistence of
 // cached history, and the requested approval policy. Policy here only decides *agent* permission
 // requests; module patch/build/activate approvals are enforced by the kernel regardless.
@@ -9,11 +10,14 @@ import { lastProgressMarker, PROGRESS_MARKER_INSTRUCTION, type AgentMcp, type Ag
 import { reasoningMarkdown } from "@hato/sdk/reasoning";
 import { imageAttachments, transcriptContent } from "@hato/sdk/images";
 import { messageWindow } from "@hato/sdk/chat-window";
+import { acpDiffs as diffsOf } from "@hato/sdk/chat-diffs";
+import { epochOf, promptTurns, type PromptEntry } from "@hato/sdk/prompt-history";
+import { exportSettings } from "@hato/sdk/settings";
 import type { AppModule, ChatMessage, ModuleContext, ImageAttachment, WorkingConversation } from "@hato/sdk/types";
 import { debounce, errMsg } from "@hato/sdk/runtime";
 
 type Policy = "ask" | "auto-low" | "autopilot";
-interface Msg { sequence?: number; id: string; kind: string; payload: any }
+interface Msg { createdAt?: string; sequence?: number; id: string; kind: string; payload: any }
 interface Conv {
   row: any;
   messages: Msg[];
@@ -53,6 +57,12 @@ const HISTORY_PAGE = 80;
 const WORKING_LIMIT = 50;
 const LOW_RISK_KINDS = new Set(["read", "search", "think", "fetch"]);
 let notify: () => void = () => {};
+/** Chat preferences (Settings → AI & tools → Chat), persisted at CHAT_PREFS_KEY. */
+const CHAT_PREFS_KEY = "ai-sessions.chat.v1";
+let sessionContext: ModuleContext | null = null;
+let captureOn = true;
+let chatPrefs = { inlineDiffs: true };
+
 let busySignature = "";
 let workingSignature = "";
 let workingIds: ReadonlySet<string> = new Set();
@@ -124,7 +134,9 @@ async function loadConversation(ctx: ModuleContext, id: string): Promise<Conv> {
 }
 
 function add(c: Conv, kind: string, payload: any): Msg {
-  const m = { id: crypto.randomUUID(), kind, payload };
+  const m = { id: crypto.randomUUID(), kind, payload: { ...payload, recordedAt: Date.now() } };
+  if (kind === "user") sessionContext?.events.emit("ai-sessions.capturePrompt", { workspaceId: c.row.workspaceId,
+    sessionId: c.row.id, source: "chat", prompt: String(payload.text || ""), key: m.id });
   c.messages.push(m);
   c.dirty.add(m.id);
   return m;
@@ -302,7 +314,8 @@ function project(c: Conv, u: any) {
     case "tool_call": {
       if (u.toolCallId && c.tools.has(providerMessageKey(u.toolCallId, u.providerSessionId))) { project(c, { ...u, sessionUpdate: "tool_call_update" }); break; }
       closeCurrent(c, false);
-      const m = add(c, "tool", { toolCallId: u.toolCallId, title: u.title || u.kind || "tool", kind: u.kind, status: u.status || "pending", text: textOf(u.content) });
+      const diffs = diffsOf(u.content);
+      const m = add(c, "tool", { toolCallId: u.toolCallId, title: u.title || u.kind || "tool", kind: u.kind, status: u.status || "pending", text: textOf(u.content), ...(diffs.length ? { diffs } : {}) });
       tagProviderMessage(c, m, u);
       if (u.toolCallId) c.tools.set(providerMessageKey(u.toolCallId, u.providerSessionId), m.id);
       break;
@@ -315,6 +328,8 @@ function project(c: Conv, u: any) {
       if (u.title) m.payload.title = u.title;
       const t = textOf(u.content);
       if (t) m.payload.text = t.slice(0, 4000);
+      const diffs = diffsOf(u.content);
+      if (diffs.length) m.payload.diffs = diffs;
       c.dirty.add(m.id);
       break;
     }
@@ -331,13 +346,17 @@ function project(c: Conv, u: any) {
 }
 
 function toChat(m: Msg): ChatMessage {
+  return { ...chatContent(m), at: m.payload?.recordedAt ?? m.createdAt };
+}
+function chatContent(m: Msg): ChatMessage {
   const p = m.payload || {};
   const display = transcriptContent(String(p.text || ""), p.images || []);
   switch (m.kind) {
     case "user": return { key: m.id, role: "user", text: display.text, images: display.images };
     case "assistant": return { key: m.id, role: "assistant", text: display.text, images: display.images };
     case "thought": return { key: m.id, role: "thought", text: reasoningMarkdown(display.text) };
-    case "tool": return { key: m.id, role: "tool", title: p.title, status: p.status, text: display.text.slice(0, 1500) };
+    case "tool": return { key: m.id, role: "tool", title: p.title, status: p.status, text: display.text.slice(0, 1500),
+      ...(captureOn && chatPrefs.inlineDiffs && Array.isArray(p.diffs) && p.diffs.length ? { diffs: p.diffs } : {}) };
     case "plan": return { key: m.id, role: "plan", text: display.text };
     case "error": return { key: m.id, role: "error", text: display.text };
     default: return { key: m.id, role: "system", text: display.text };
@@ -479,7 +498,25 @@ const mod: AppModule = {
         return { messages, beforeSequence: messages[0]?.sequence ?? rows.slice(-20)[0]?.sequence ?? null, hasOlder: rows.length > 20 || budget <= 0 };
       },
     }]);
+    sessionContext = ctx;
+    captureOn = captureEnabled(ctx);
+    ctx.state.watch("files.changesEnabled", () => { captureOn = captureEnabled(ctx); notify(); });
+    ctx.events.on("files.changeCaptured", () => notify());
     notify = debounce(() => { publishActivity(ctx); ctx.events.emit("ai-sessions.changed", {}); }, 60);
+    try { const saved = await ctx.modules.call("persistence", "settings.get", { key: CHAT_PREFS_KEY }); if (typeof saved?.inlineDiffs === "boolean") chatPrefs = { ...chatPrefs, inlineDiffs: saved.inlineDiffs }; }
+    catch (e) { ctx.log.warn("load chat preferences", errMsg(e)); }
+    // Background agents' transcripts come from the agent runner; the chat panel applies this there.
+    ctx.state.set("ai-sessions.chatPrefs", chatPrefs);
+    exportSettings(ctx, () => [{ key: "chat", title: "Chat", group: "AI & tools", fields: [
+      { key: "inlineDiffs", type: "toggle", label: "Show inline diffs", value: chatPrefs.inlineDiffs,
+        description: "When an agent edits files, show the changed lines inside its tool card in the chat." },
+    ] }], async (_section, key, value) => {
+      if (key !== "inlineDiffs" || typeof value !== "boolean") return;
+      chatPrefs = { ...chatPrefs, inlineDiffs: value };
+      ctx.state.set("ai-sessions.chatPrefs", chatPrefs);
+      await ctx.modules.call("persistence", "settings.set", { key: CHAT_PREFS_KEY, value: chatPrefs });
+      notify();
+    }, { invalidate: false });
     ctx.events.on("persistent-agents.mcpsChanged", () => notify());
     publishActivity(ctx);
     flushSoon = debounce(() => { void flush(ctx).catch(e => ctx.log.warn("persist messages",errMsg(e))); }, 1200);
@@ -510,6 +547,7 @@ const mod: AppModule = {
       if (p.error) add(c, "error", { text: `Turn failed: ${p.error}` });
       else if (p.stopReason && p.stopReason !== "end_turn") add(c, "system", { text: `Turn ended: ${p.stopReason}` });
       await flush(ctx);
+      ctx.events.emit("ai-sessions.captureEnded", { workspaceId: c.row.workspaceId, sessionId: c.row.id });
       if (c.steering.length) {
         const pending = c.steering.splice(0);
         const text = pending.map((p) => p.text).filter(Boolean).join("\n\n");
@@ -624,11 +662,33 @@ const mod: AppModule = {
         const windowed = Number.isSafeInteger(a.messageLimit) && a.messageLimit > 0;
         const window = messageWindow(c.messages, windowed ? Math.min(a.messageLimit, 200) : c.messages.length,
           !a.windowConversationId || a.windowConversationId === activeId ? a.beforeMessageId : undefined);
-        active = { conversation: c.row, messages: window.messages.map(toChat), windowed,
+        active = { conversation: c.row, messages: chatPrefs.inlineDiffs && captureOn
+          ? capturedTranscript(window.messages.map(toChat), capturedChanges(ctx, desc.id), "chat", activeId)
+          : window.messages.map(toChat), windowed,
           hasLoadedOlder: window.hasLoadedOlder, hasNewer: window.hasNewer, hasOlder: c.hasOlder || window.hasLoadedOlder, historyLoading: c.historyLoading, historyError: c.historyError, live: c.live, busy: c.busy, steering: c.steering.length };
       }
       const auth = await ctx.modules.call("acp", "authSettings", {});
       return { mcpServers: [{ id: "internal", name: "Hato", description: "Inspect, build and reload application modules" }, ...(await configuredMcps(ctx)).map(m => ({ id: m.id, name: m.name, description: transportOf(m) === "stdio" ? "Runs on the workspace machine" : "Remote MCP server" }))], auth, workspace: { id: desc.id, name: desc.name, machineId: desc.machineId, root: desc.rootAbsolutePath, location: desc.location }, conversations: list.map((x: any) => ({ id: x.id, title: x.title, status: convs.get(x.id)?.busy ? "busy" : x.status, acpProfileId: x.acpProfileId, updatedAt: x.updatedAt })), activeId, active, profiles };
+    },
+
+    /** Prompts in this workspace's chats with the files each turn edited (prompt-history panel). */
+    async promptHistory(ctx, a) {
+      const messageLimit = Math.max(50, Math.min(Number(a?.messageLimit) || 400, 3000));
+      const desc = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
+      await flush(ctx);
+      const list: any[] = (await ctx.modules.call("persistence", "conversations.list", { workspaceId: desc.id })).slice(0, 40);
+      const names = new Map<string, string>();
+      try { for (const p of await ctx.modules.call("acp", "profiles", { machineId: desc.machineId })) names.set(p.id, p.name || p.id); } catch { /* labels fall back to ids */ }
+      const entries: PromptEntry[] = [];
+      for (const conv of list) {
+        const rows: any[] = await ctx.modules.call("persistence", "messages.list", { conversationId: conv.id, limit: messageLimit });
+        entries.push(...promptTurns(rows.filter(m => m.kind === "user" || m.kind === "tool").map(m => ({
+          key: m.id, role: m.kind, at: epochOf(m.createdAt),
+          text: m.kind === "user" ? transcriptContent(String(m.payload?.text || ""), []).text : undefined,
+          diffs: Array.isArray(m.payload?.diffs) ? m.payload.diffs : undefined,
+        })), { source: "chat", sessionId: conv.id, sessionTitle: conv.title || "Chat", agent: names.get(conv.acpProfileId) || conv.acpProfileId || "Agent" }));
+      }
+      return { entries };
     },
 
     async loadOlder(ctx, a) {

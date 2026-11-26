@@ -146,7 +146,7 @@ const unsaved = (b?: Buffer) => !!b && b.state !== "clean";
 // ---- Virtual documents (see @hato/sdk/virtual-documents) ------------------------------------
 // Tabs whose content belongs to another module (e.g. Library pages). Buffers use the tab id as
 // their path, so autosave, unsaved markers and conflicts work as for workspace files.
-interface Virtual { workspaceId: string; tab: string; title: string; document: string | null; text: string; editable: boolean; error?: string }
+interface Virtual { workspaceId: string; tab: string; title: string; document: string | null; text: string; editable: boolean; error?: string; diff?: boolean }
 const virtuals = new Map<string, Virtual>();
 const virtualKey = (workspaceId: string, tab: string) => `${workspaceId}|${tab}`;
 interface VirtualSave { tab: string; workspaceId: string; text: string; force: boolean; taken: boolean;
@@ -166,8 +166,8 @@ function ownSave(a: any, caller: string | undefined) {
   return pending;
 }
 function showVirtual(v: Virtual) {
-  current = { virtual: true, workspaceId: v.workspaceId, tab: v.tab, relativePath: v.tab, title: v.title,
-    document: v.error ? null : v.document, text: v.text, editable: v.editable,
+  current = { virtual: true, ...(v.diff ? { diff: true } : {}), workspaceId: v.workspaceId, tab: v.tab, relativePath: v.tab, title: v.title,
+    document: v.error ? null : v.document, text: v.text, editable: v.diff ? false : v.editable,
     language: languageForPath(languages, v.tab)?.grammar || (/\.md$/i.test(v.tab) ? "markdown" : "text"), size: new TextEncoder().encode(v.text).length };
   error = v.error ?? null; languageError = null; hunks = []; hunkView = null;
 }
@@ -583,7 +583,7 @@ const mod: AppModule = {
     restoreTabs();
     // Keep an open diff current as the working tree changes.
     ctx.events.on("git-panel.statusChanged", (e: any) => {
-      if (current?.diff && e?.workspaceId === ws?.id && ws?.view?.previewPath === current.tab) void load(ctx, true);
+      if (current?.diff && !current.virtual && e?.workspaceId === ws?.id && ws?.view?.previewPath === current.tab) void load(ctx, true);
     });
     ctx.events.on("git.changed", (e: any) => {
       if (e?.workspaceId !== ws?.id) return;
@@ -631,8 +631,8 @@ const mod: AppModule = {
       else {
         if (old?.document && old.document !== document && buffers.get(old.document)?.state === "clean") buffers.delete(old.document);
         virtuals.set(key, { workspaceId, tab, title: String(a.title || tab.split("/").pop()), document, text: typeof a.text === "string" ? a.text : "",
-          editable: a.editable !== false, error: a.error ? String(a.error) : undefined });
-        if (document && !buffers.has(document)) buffers.set(document, { workspaceId, path: tab, mtime: null, text: null, state: "clean" });
+          editable: a.editable !== false && !a.diff, error: a.error ? String(a.error) : undefined, ...(a.diff ? { diff: true } : {}) });
+        if (document && !a.diff && !buffers.has(document)) buffers.set(document, { workspaceId, path: tab, mtime: null, text: null, state: "clean" });
       }
       if (workspaceId === ws?.id) {
         if (a.reveal !== false && ws.view?.previewPath !== tab) {
@@ -691,7 +691,7 @@ const mod: AppModule = {
     const search = ws?.view?.ui?.viewerSearch;
     const editorSearch = search?.path === current?.relativePath && typeof search?.query === "string" && typeof search?.key === "string" ? { key: search.key, query: search.query } : undefined;
     const markdown = current && !diff && !current.binary && (current.language === "markdown" || /\.(md|markdown)$/i.test(current.relativePath));
-    const title = current ? (diff ? `Changes in ${current.relativePath}` : current.virtual ? current.title : current.relativePath) : ws?.view?.previewPath ? tabTitle(ws.view.previewPath) : "No file selected";
+    const title = current ? (current.virtual ? current.title : diff ? `Changes in ${current.relativePath}` : current.relativePath) : ws?.view?.previewPath ? tabTitle(ws.view.previewPath) : "No file selected";
     const kids: UiNode[] = [
       { type: "row", key: "tabs", gap: 3, wrap: true, children: tabs.map((path): UiNode => {
         const active = ws?.view?.previewPath === path;
@@ -793,7 +793,7 @@ const mod: AppModule = {
         { type: "label", key: "path", text: title, size: "xs", color: "muted", tooltip: title, grow: true },
         ...(diff ? [
           { type: "button", key: "diff-mode", text: diffMode === "split" ? "Unified" : "Side by side", action: "toggleDiffMode", small: true, variant: "ghost", tooltip: "Switch diff layout" } as UiNode,
-          ...(current.kind !== "deleted" ? [{ type: "button", key: "open-file", text: "Open file", action: "openFile", small: true, variant: "ghost", tooltip: `Open ${current.relativePath}` } as UiNode] : []),
+          ...(current.kind !== "deleted" && !current.virtual ? [{ type: "button", key: "open-file", text: "Open file", action: "openFile", small: true, variant: "ghost", tooltip: `Open ${current.relativePath}` } as UiNode] : []),
         ] : []),
         ...(status.text ? [{ type: "label", key: "save-state", text: status.text, size: "xs", color: status.color, tooltip: status.tooltip } as UiNode] : []),
         ...(buf && (buf.state === "error" || (buf.state === "dirty" && !autosave)) ? [{ type: "button", key: "save", text: buf.state === "error" ? "Retry" : "Save", action: "save", small: true, variant: "ghost", tooltip: `Save ${title}` } as UiNode] : []),
@@ -969,7 +969,7 @@ const mod: AppModule = {
         const next = diffMode === "split" ? "unified" : "split";
         await ctx.modules.call("persistence", "settings.set", { key: "viewer.diffMode", value: next });
         diffMode = next; publishSettings();
-      } else if (ev.action === "openFile" && current?.diff) {
+      } else if (ev.action === "openFile" && current?.diff && !current.virtual) {
         await ctx.modules.call("workspace", "view.patch", { workspaceId: ws.id, patch: { previewPath: current.relativePath } });
       } else if (ev.action === "toggleMarkdown") {
         const next = !renderMarkdown;

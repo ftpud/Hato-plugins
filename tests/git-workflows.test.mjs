@@ -44,13 +44,15 @@ test('task baseline retains committed edits, deletions and untracked files',asyn
 test('Task Git Changes uses a full-height grouped list and sends preview and open to Viewer in order', async () => {
  const {default:panel}=await load('../modules/ui/git-task-changes/src/index.ts');
  const calls=[];
- const ctx={state:{get:k=>k==='workspace.selected'?{id:'task:test'}:{'git-task-changes':true},watch(){}},
+ const published={};
+ const ctx={state:{get:k=>k==='workspace.selected'?{id:'task:test'}:{'git-task-changes':true},watch(){},set(k,v){published[k]=v;}},
   events:{on(){}},ui:{invalidate(){}},modules:{call:async(_id,method,args)=>{
    if(method==='taskChanges')return {base:'a'.repeat(40),files:[
     {path:'src/a.ts',kind:'modified'},{path:'gone.ts',kind:'deleted'},{path:'extra.ts',kind:'untracked'}]};
    calls.push([method,args]);
   }}};
  await panel.activate(ctx);
+ assert.equal(published['git-task-changes.panelHidden.git-task-changes'],false,'a task keeps the rail button');
  const children=panel.render().children;
  const tree=children.find(n=>n.type==='tree');
  assert.equal(children.some(n=>n.type==='split'||n.type==='diff'),false);

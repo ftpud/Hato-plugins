@@ -24,7 +24,10 @@ const mod: AppModule = {
     visible = !!(ctx.state.get("workspace-layout.panels") as any)?.["git-task-changes"];
     ctx.state.watch("workspace-layout.panels", (v: any) => { const next = !!v?.["git-task-changes"]; if (next === visible) return; visible = next; if (visible) void refresh(ctx); });
     ws = ctx.state.get("workspace.selected");
-    ctx.state.watch("workspace.selected", (v: any) => { if (v?.id === ws?.id) return; ws = v; epoch++; loading = false; result = null; selected = null; error = ""; void refresh(ctx); ctx.ui.invalidate(); });
+    // Task changes only exist inside a task: outside one the rails drop this panel's button.
+    const publishHidden = () => ctx.state.set("git-task-changes.panelHidden.git-task-changes", !ws?.id?.startsWith("task:"));
+    publishHidden();
+    ctx.state.watch("workspace.selected", (v: any) => { if (v?.id === ws?.id) return; ws = v; publishHidden(); epoch++; loading = false; result = null; selected = null; error = ""; void refresh(ctx); ctx.ui.invalidate(); });
     ctx.events.on("git.changed", (v: any) => { if (v.workspaceId === ws?.id) void refresh(ctx); });
     await refresh(ctx);
   },

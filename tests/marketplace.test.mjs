@@ -147,7 +147,9 @@ test('refreshing an older published catalogue preserves unpublished offers and n
  const fs=await import('node:fs');
  const catalogue=JSON.parse(fs.readFileSync(new URL('../catalogue.json',import.meta.url),'utf8'));
  const remote={...catalogue,packages:catalogue.packages.filter(p=>!p.id.startsWith('language-')&&p.id!=='copilot-acp').map(p=>({...p,version:'0.1.0',dependencies:Object.fromEntries(Object.keys(p.dependencies||{}).map(id=>[id,'^0.1.0']))}))};
- const installed=remote.packages.flatMap(p=>p.modules.map(id=>({id,source:'builtin',enabled:true,active:id,metadata:{version:catalogue.packages.find(local=>local.id===p.id).version}})));
+ const development=JSON.parse(fs.readFileSync(new URL('../plugins.catalogue.json',import.meta.url),'utf8'));
+ const installed=development.packages.filter(p=>remote.packages.some(old=>old.id===p.id))
+  .flatMap(p=>p.modules.map(id=>({id,source:'builtin',enabled:true,active:id,metadata:{version:p.version}})));
  const before=fresh.packageRows(installed,'marketplace').map(p=>p.key);
  let broken=false;
  const ctx={modules:{call:async()=>({})},host:{net:{fetch:async({url})=>({status:broken?503:200,body:JSON.stringify(url.endsWith('commits/main')?{sha:'b'.repeat(40)}:remote)})}}};

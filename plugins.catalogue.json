@@ -48,7 +48,8 @@
         "internal-mcp",
         "internal-local-mcp",
         "mcp-auth",
-        "mcp-panel"
+        "mcp-panel",
+        "prompt-history"
       ]
     },
     {

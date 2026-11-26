@@ -82,8 +82,11 @@ test('shared client batches requests and discards results for a previous workspa
  client.get('new','Same.java');resolveOld({'Same.java':{iconSvg:'stale'}});
  await new Promise(resolve=>setTimeout(resolve,60));
  assert.equal(client.get('new','Same.java').iconSvg,'current');
+ // Invalidation keeps the last known look while revalidating, so rows never flash to defaults.
  events.get('files.presentationChanged')();
- assert.deepEqual(client.get('new','Same.java'),{});
+ assert.equal(client.get('new','Same.java').iconSvg,'current');
+ await new Promise(resolve=>setTimeout(resolve,60));
+ assert.equal(requests.filter(r=>r.workspaceId==='new').length,2);
  client.dispose();
 });
 

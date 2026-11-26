@@ -18,7 +18,7 @@
   "runsOn": "ui",
   "distribution": "marketplace",
   "stateVersion": 1,
-  "description": "Top-bar configuration picker with Run, Debug, Stop and Restart.",
+  "description": "Workspace-rail configuration picker with Run, Debug, Stop and Restart.",
   "contributes": {
     "barItems": [
       {

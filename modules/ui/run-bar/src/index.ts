@@ -1,4 +1,5 @@
-// Run bar: configuration picker + Run / Debug / Stop / Restart and a live status pill, in the top bar.
+// Run bar: configuration picker + Run / Debug / Stop / Restart and a live status pill, docked at the
+// bottom of the Workspace rail. When the rail is collapsed it shrinks to a stacked ▶/↻ over ■/debug.
 // Presentation only; configurations come from `run-configurations`, sessions from `run` (sdk/run.ts).
 import type { AppModule, ModuleContext, UiNode } from "@hato/sdk/types";
 import type { RunCandidate, RunConfig } from "@hato/sdk/run-configurations";
@@ -40,6 +41,8 @@ let selection: Selection = null;
 let recent: string[] = [];
 let open = false, query = "", busy = false, error: string | null = null;
 let epoch = 0, ticker: ReturnType<typeof setInterval> | null = null;
+/** The host rail's width state (`left-sidebar.expanded`); collapsed rails get the compact stack. */
+let railExpanded = true;
 
 const pref = (name: string) => `run-bar.${name}.${workspaceId}`;
 const save = (ctx: ModuleContext, name: string, value: unknown) => ctx.modules.call("persistence", "settings.set", { key: pref(name), value }).catch(() => {});
@@ -175,6 +178,21 @@ function menu(t: ReturnType<typeof target>): UiNode[] {
   return out;
 }
 
+/** Collapsed rail: one slim muted pill (▶/↻ over ■/debug) that reads like the rail's own items.
+ *  Colour only marks live state: a green/amber dot on the pill and a red stop. Tooltips carry names. */
+function compact(t: ReturnType<typeof target>, live: RunSession | undefined, children: UiNode[]): UiNode {
+  const by = (key: string) => children.find(c => (c as any).key === key)!;
+  const status = live ? `\n${live.state === "running" ? `● ${elapsed(live)}` : live.state}` : t ? "" : "\nExpand the rail to add a configuration";
+  const slim = (n: UiNode, color: string): UiNode => ({ ...n, iconSize: 14, iconColor: (n as any).disabled ? "faint" : color, width: 30,
+    tooltip: `${(n as any).tooltip}${status}`, tooltipPlacement: "right", style: { paddingX: 0, height: 26, radius: 7 } } as UiNode);
+  const primary = slim(by(live && live.state !== "stopping" ? "restart" : "run"), "muted");
+  const secondary = live ? slim(by("stop"), "danger") : slim(by("debug"), "muted");
+  const dot: UiNode[] = live ? [{ type: "column", key: "live", children: [], style: { position: "absolute", right: -2, top: -2, width: 7, height: 7, radius: 4,
+    borderWidth: 1.5, borderColor: "panel", background: live.state === "paused" ? "warning" : "success" } } as UiNode] : [];
+  return { type: "column", key: "run-bar", gap: 0, align: "center", style: { position: "relative", padding: 1, radius: 9, borderWidth: 1, borderColor: "border" },
+    children: [primary, secondary, ...dot] } as UiNode;
+}
+
 const mod: AppModule = {
   id: "run-bar", moduleApiVersion: 1,
   async activate(ctx, previous) {
@@ -187,6 +205,8 @@ const mod: AppModule = {
       recent = Array.isArray(rec) ? rec.filter((x: unknown) => typeof x === "string").slice(0, 5) : [];
     };
     workspaceId = (ctx.state.get("workspace.selected") as any)?.id || null;
+    railExpanded = ctx.state.get("left-sidebar.expanded") !== false;
+    ctx.state.watch("left-sidebar.expanded", (v: any) => { railExpanded = v !== false; open = false; ctx.ui.invalidate(); });
     if (previous?.workspaceId === workspaceId) { configs = previous.configs || []; candidates = previous.candidates || []; detected = !!previous.detected; }
     ctx.state.watch("workspace.selected", async (v: any) => {
       const next = v?.id || null;
@@ -232,7 +252,8 @@ const mod: AppModule = {
       const n = sessions.filter(runActive).length;
       if (n) children.push({ type: "button", key: "others", text: `${n} running`, action: "toggle", value: true, variant: "ghost", small: true, tooltip: "Other configurations are running. Open the menu to manage them.", style: { color: "muted", fontSize: 11 } });
     }
-    // Lives in the Workspace rail's RUN section (about 220 px): the picker gets the full width and
+    if (!railExpanded) return compact(t, live, children);
+    // Lives in the Workspace rail's bottom dock (about 220 px): the picker gets the full width and
     // truncates; run/debug/stop and the live status share the line below.
     const [picker, ...controls] = children;
     return { type: "column", key: "run-bar", gap: 2, grow: true, minWidth: 0, children: [

@@ -1,10 +1,12 @@
+import { captureEnabled, capturedChanges, capturedTranscript } from "@hato/sdk/change-capture";
 import { providerProfiles } from "@hato/sdk/agent-providers";
 import { hasWorkingSubagents, subagentList, trackFinishedSubagents, type AcpSubagent, type FinishedSubagents } from "@hato/sdk/acp-subagents";
 import type { AppModule, ModuleContext, DaemonTarget } from "@hato/sdk/types";
-import { daemonTargetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
+import { daemonTargetFor, errMsg, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { workspaceSkills } from "../../files/src/skills";
 import { agentActivity, agentSettings, autoAgentName, isAutoAgentName, relativeAgentPath, type AgentMcp, type AgentSession, type AgentSpec, type WorkingAgent } from "@hato/sdk/persistent-agents";
 import { imageAttachments } from "@hato/sdk/images";
+import { epochOf, promptTurns, type PromptEntry } from "@hato/sdk/prompt-history";
 import { exportMcpTools } from "@hato/sdk/mcp";
 import { acpServer, transportOf, validateMcp } from "@hato/sdk/mcp-servers";
 import { LIBRARY_STATE, isLibraryRef, libraryCatalog, libraryInstructions, libraryItemsFor, libraryRef, libraryRefId, textDigest } from "@hato/sdk/library";
@@ -284,6 +286,7 @@ async function performTask(ctx:ModuleContext,r:{sessionId:string;workspaceId:str
 // Poll daemons the desktop already talks to for task requests and working sessions.
 let daemonPoll:ReturnType<typeof setInterval>|null=null,polling=false,busySignature="";
 let workingSignature = "";
+const historySignatures = new Map<string, Map<string, string>>();
 const WORKING_LIMIT = 50;
 const WORKING: ReadonlySet<AgentSession["status"]> = new Set(["starting", "busy", "waiting"]);
 
@@ -310,7 +313,23 @@ async function pollDaemons(ctx:ModuleContext) {
       let t:DaemonTarget;try{t=await pending;}catch{continue;}
       try {
         const sessions: AgentSession[] = await ctx.host.daemon.request(t,"modules.call",{target:"agent-runner",method:"list",args:{},timeoutMs:10000});
+        const byWorkspace = new Map<string, string[]>();
         for (const s of sessions || []) {
+          if (s.machineId !== machineId) continue;
+          const revisions = byWorkspace.get(s.workspaceId) ?? [];
+          revisions.push(JSON.stringify([s.id, s.revision]));
+          byWorkspace.set(s.workspaceId, revisions);
+        }
+        const previous = historySignatures.get(machineId);
+        const current = new Map([...byWorkspace].map(([id, revisions]) => [id, JSON.stringify(revisions.sort())]));
+        historySignatures.set(machineId, current);
+        for (const workspaceId of new Set([...(previous?.keys() ?? []), ...current.keys()])) {
+          if (previous?.get(workspaceId) !== current.get(workspaceId)) {
+            ctx.events.emit("persistent-agents.changed", { workspaceId });
+          }
+        }
+        for (const s of sessions || []) {
+          if (s.machineId === machineId && !WORKING.has(s.status)) ctx.events.emit("persistent-agents.captureEnded", { workspaceId: s.workspaceId, sessionId: s.id });
           if (s.machineId === machineId && s.childSessions) allChildren.set(s.id, subagentList(s.childSessions));
           if (s.machineId !== machineId || (!WORKING.has(s.status) && !hasWorkingSubagents(s.childSessions))) continue;
           busy[s.workspaceId] = (busy[s.workspaceId] || 0) + 1;
@@ -477,6 +496,22 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     activityCache.delete(a.id);
     return result;
   },
+  /** Prompts sent to this workspace's background agents with the files each turn edited (prompt-history panel).
+   *  Uses the runner's ordinary `view`, so older runtimes still list prompts (without diffs). */
+  async promptHistory(ctx,a) {
+    const workspaceId=String(a.workspaceId),limit=Math.max(50,Math.min(Number(a.messageLimit)||200,200));
+    const rows=(await invoke(ctx,workspaceId,"list")).filter((s:any)=>s.workspaceId===workspaceId)
+      .sort((x:any,y:any)=>String(y.updatedAt).localeCompare(String(x.updatedAt))).slice(0,20);
+    const entries:PromptEntry[]=[];
+    for(const s of rows) {
+      try {
+        const v=await invoke(ctx,workspaceId,"view",{id:s.id,limit});
+        entries.push(...promptTurns((v.messages||[]).map((m:any)=>({key:m.key,role:m.role,text:m.role==="user"?m.text:undefined,diffs:m.diffs,at:epochOf(m.at)})),
+          {source:"agent",sessionId:s.id,sessionTitle:s.name||"Agent",agent:s.profile?.name||s.profile?.id||"Agent"}));
+      } catch(e) { ctx.log.warn("prompt history",errMsg(e)); }
+    }
+    return {entries};
+  },
   async list(ctx,a) {
     const rows=await invoke(ctx,String(a.workspaceId),"list");
     const scoped=rows.filter((s:any)=>s.workspaceId===a.workspaceId);
@@ -523,6 +558,8 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
     if(v.session.workspaceId!==a.workspaceId)throw new Error("Agent belongs to another workspace");
     // A new agent learns its model only after connecting; complete its automatic name then.
     if(isAutoAgentName(v.session)){const name=autoAgentName(v.session);if(name!==v.session.name){await invoke(ctx,String(a.workspaceId),"update",{id:v.session.id,patch:{name,customName:false}}).catch(()=>{});v.session={...v.session,name};}}
+    v.messages = captureEnabled(ctx) ? capturedTranscript(v.messages, capturedChanges(ctx, a.workspaceId), "agent", a.id)
+      : v.messages.map((m: any) => ({ ...m, diffs: undefined }));
     return v;
   },
   async send(ctx,a) {
@@ -532,7 +569,11 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
       return ctx.host.daemon.request(t,"modules.call",{target:"workflow-runner",method:"promptSession",
         args:{...session.workflow,workspaceId:a.workspaceId,id:a.id,text:a.text,images},timeoutMs:180000});
     }
-    return invoke(ctx,a.workspaceId,"send",{id:a.id,text:a.text,steer:!!a.steer,...(images.length?{images}:{})});
+    const result = await invoke(ctx,a.workspaceId,"send",{id:a.id,text:a.text,steer:!!a.steer,...(images.length?{images}:{})});
+    const page = await invoke(ctx,a.workspaceId,"view",{id:a.id,limit:20});
+    const message = [...(page.messages || [])].reverse().find((m: any) => m.role === "user");
+    if (message) ctx.events.emit("persistent-agents.capturePrompt", { workspaceId: a.workspaceId, sessionId: a.id, source: "agent", prompt: a.text, key: message.key });
+    return result;
   },
   /** Replace this machine's agent runtime with the desktop's current build, even while agents run.
    *  Agents that were connected are reconnected afterwards (their provider sessions resume). */

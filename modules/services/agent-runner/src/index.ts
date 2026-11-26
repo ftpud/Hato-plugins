@@ -10,9 +10,10 @@ import { advertisedChoices } from "@hato/sdk/workflow-provider-options";
 import { agentExecutable } from "@hato/sdk/agent-executable";
 import { modelChoices, relativeAgentPath, agentPolicy, agentSettings, LOW_RISK_TOOL_KINDS, agentProgress, PROGRESS_INSTRUCTION, PROGRESS_MARKER_INSTRUCTION, scanProgressChunk, stripProgressMarkers, type AgentSpec, type AgentSession, type AgentPermission } from "@hato/sdk/persistent-agents";
 import { imageAttachments } from "@hato/sdk/images";
+import { acpDiffs } from "@hato/sdk/chat-diffs";
 import { isLibraryRef, textDigest } from "@hato/sdk/library";
 import { reportedUsage } from "@hato/sdk/context-usage";
-import type { ImageAttachment } from "@hato/sdk/types";
+import type { ChatDiff, ImageAttachment } from "@hato/sdk/types";
 
 interface Live {
   session: AgentSession; peer: JsonRpcPeer; process: Handle; subscriptions: StreamSubscription[];
@@ -52,7 +53,8 @@ function persist(ctx:ModuleContext,s:AgentSession) {
   const json=JSON.stringify(s);
   return enqueue(()=>ctx.host.db.exec(db,"INSERT INTO sessions(id, data) VALUES(?, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data",[s.id,json]));
 }
-function message(ctx:ModuleContext,s:AgentSession,role:ChatMessage["role"],text:string,title?:string,status?:string,images?:ImageAttachment[],toolCallId?:string,providerMessageId?:string|null) {
+function message(ctx:ModuleContext,s:AgentSession,role:ChatMessage["role"],text:string,title?:string,status?:string,images?:ImageAttachment[],toolCallId?:string,providerMessageId?:string|null,diffs?:ChatDiff[]) {
+  const diffsJson=diffs?.length?JSON.stringify(diffs):null;
   // Persist each protocol chunk before turn completion; read projections merge adjacent chunks.
   // ACP messageId boundaries start a new row even within one provider turn.
   s.revision++;
@@ -61,14 +63,14 @@ function message(ctx:ModuleContext,s:AgentSession,role:ChatMessage["role"],text:
   return enqueue(async()=>{
     if(role==="tool" && toolCallId) {
       const existing=(await ctx.host.db.query<any>(db,"SELECT seq FROM messages WHERE session_id=? AND turn=? AND tool_call_id=? ORDER BY seq DESC LIMIT 1",[s.id,turn,toolCallId]))[0];
-      if(existing)return ctx.host.db.exec(db,"UPDATE messages SET text=CASE WHEN ?1 = '' THEN text ELSE ?1 END,title=COALESCE(?2,title),status=COALESCE(?3,status),provider_message_id=COALESCE(?5,provider_message_id),provider_session_id=?6 WHERE seq=?4",[text,title||null,status||null,existing.seq,messageId,providerSessionId]);
+      if(existing)return ctx.host.db.exec(db,"UPDATE messages SET text=CASE WHEN ?1 = '' THEN text ELSE ?1 END,title=COALESCE(?2,title),status=COALESCE(?3,status),provider_message_id=COALESCE(?5,provider_message_id),provider_session_id=?6,diffs_json=COALESCE(?7,diffs_json) WHERE seq=?4",[text,title||null,status||null,existing.seq,messageId,providerSessionId,diffsJson]);
     }
     if(role==="assistant"||role==="thought") {
       const last=(await ctx.host.db.query<any>(db,"SELECT seq,role,turn,provider_message_id,provider_session_id FROM messages WHERE session_id=? ORDER BY seq DESC LIMIT 1",[s.id]))[0];
       const sameMessage=last?.role===role&&last.turn===turn&&last.provider_session_id===providerSessionId&&((!messageId&&!last.provider_message_id)||(!!messageId&&messageId===last.provider_message_id));
       if(sameMessage)return ctx.host.db.exec(db,"UPDATE messages SET text=text||?,provider_session_id=? WHERE seq=?",[text,providerSessionId,last.seq]);
     }
-    return ctx.host.db.exec(db,"INSERT INTO messages(session_id, role, text, title, status, turn, images_json, tool_call_id, provider_message_id, provider_session_id) VALUES(?,?,?,?,?,?,?,?,?,?)",[s.id,role,text,title||null,status||null,turn,images?.length?JSON.stringify(images):null,toolCallId||null,messageId,providerSessionId]);
+    return ctx.host.db.exec(db,"INSERT INTO messages(session_id, role, text, title, status, turn, images_json, tool_call_id, provider_message_id, provider_session_id, diffs_json, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",[s.id,role,text,title||null,status||null,turn,images?.length?JSON.stringify(images):null,toolCallId||null,messageId,providerSessionId,diffsJson,now()]);
   });
 }
 function isProviderCommand(s:AgentSession,text:string) {
@@ -161,7 +163,7 @@ function update(ctx:ModuleContext,c:Live,u:any) {
     if(u.toolCallId && u.title) titles.set(u.toolCallId,u.title);
     const title=u.title||titles.get(u.toolCallId)||u.toolCallId||"Tool";
     if(titles.size>500) titles.delete(titles.keys().next().value!);
-    void message(ctx,c.session,"tool",text,title,u.status,undefined,u.toolCallId,u.messageId||null).catch(e=>ctx.log.error(errMsg(e)));
+    void message(ctx,c.session,"tool",text,title,u.status,undefined,u.toolCallId,u.messageId||null,acpDiffs(u.content)).catch(e=>ctx.log.error(errMsg(e)));
   } else if(kind==="plan") {
     void message(ctx,c.session,"plan",(u.entries||[]).map((e:any)=>`- ${e.content} (${e.status})`).join("\n")).catch(e=>ctx.log.error(errMsg(e)));
   } else if(kind==="config_option_update") { c.session.configOptions=u.configOptions||[];void persist(ctx,c.session); }
@@ -493,6 +495,8 @@ const mod:AppModule={
     if(!columns.some(c=>c.name==="images_json"))await ctx.host.db.exec(db,"ALTER TABLE messages ADD COLUMN images_json TEXT");
     if(!columns.some(c=>c.name==="provider_message_id"))await ctx.host.db.exec(db,"ALTER TABLE messages ADD COLUMN provider_message_id TEXT");
     if(!columns.some(c=>c.name==="provider_session_id"))await ctx.host.db.exec(db,"ALTER TABLE messages ADD COLUMN provider_session_id TEXT");
+    if(!columns.some(c=>c.name==="diffs_json"))await ctx.host.db.exec(db,"ALTER TABLE messages ADD COLUMN diffs_json TEXT");
+    if(!columns.some(c=>c.name==="created_at"))await ctx.host.db.exec(db,"ALTER TABLE messages ADD COLUMN created_at TEXT");
     for(const row of await ctx.host.db.query<any>(db,"SELECT data FROM sessions")) {
       const s:AgentSession=JSON.parse(row.data);
       s.childSessions=disconnectSubagents(s.childSessions);
@@ -542,7 +546,9 @@ const mod:AppModule={
         else {
           let images:ImageAttachment[]|undefined;
           try{images=r.images_json?imageAttachments(JSON.parse(r.images_json)):undefined;}catch{images=undefined;}
-          messages.push({key:`agent-msg-${r.seq}`,role:r.role,text:r.text,title:r.title,status:r.status,...(images?.length?{images}:{}),turn:r.turn,providerMessageId:r.provider_message_id||null,providerSessionId:r.provider_session_id||null} as ChatMessage);
+          let diffs:ChatDiff[]|undefined;
+          try{diffs=r.diffs_json?JSON.parse(r.diffs_json):undefined;}catch{diffs=undefined;}
+          messages.push({key:`agent-msg-${r.seq}`,role:r.role,text:r.text,title:r.title,status:r.status,...(images?.length?{images}:{}),...(Array.isArray(diffs)&&diffs.length?{diffs}:{}),...(r.created_at?{at:r.created_at}:{}),turn:r.turn,providerMessageId:r.provider_message_id||null,providerSessionId:r.provider_session_id||null} as ChatMessage);
         }
       }
       const permissions=await ctx.host.db.query<any>(db,"SELECT data FROM permissions WHERE session_id=? AND resolved=0 ORDER BY rowid",[s.id]);

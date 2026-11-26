@@ -5,7 +5,7 @@ import { filterInput } from "@hato/sdk/filter-style";
 import { CHAT_MESSAGE_LIMIT, CHAT_HISTORY_LIMIT, messageWindow } from "@hato/sdk/chat-window";
 import { contextUsage, usagePieSvg } from "@hato/sdk/context-usage";
 import { chatStyle } from "@hato/sdk/chat-style";
-import { followKey, transcriptItems } from "@hato/sdk/chat-transcript";
+import { followKey, historyEdge, transcriptItems } from "@hato/sdk/chat-transcript";
 import { uiIcons } from "@hato/sdk/ui-icons";
 import { imageAttachments } from "@hato/sdk/images";
 import type { AppModule, ModuleContext, UiNode, UiColor, ImageAttachment, SettingField, SettingsSection } from "@hato/sdk/types";
@@ -137,7 +137,14 @@ let historyConversationId: string | null = null;
 let historyBefore: string[] = [];
 let pagingHistory = false;
 let historyLimit = CHAT_MESSAGE_LIMIT;
+/** Inline diffs the user expanded past the preview (`${messageKey}:${index}`). */
+const expandedDiffs = new Set<string>();
 let preserveHistoryScroll = false;
+/** First message key when paging began. The transcript anchors only on the render where the
+ *  window actually changes; after that the flag clears so new messages are followed again. */
+let preserveFrom: string | null = null;
+const windowEdges = (messages: any[]) => String(messages[0]?.key ?? ""); // streaming only moves the last edge
+function holdScroll() { preserveHistoryScroll = true; preserveFrom = windowEdges(visibleHistory(view?.active).messages); }
 let historyScrollReset = 0;
 let skillsOpen = false;
 let modelQuery = "";
@@ -260,6 +267,8 @@ async function load(ctx: ModuleContext, poll = false, fromEvent = false) {
   const generation = ++loadGeneration; pendingLoads++;
   try { await loadCurrent(ctx,poll,generation,fromEvent); } finally { pendingLoads--; }
 }
+/** Settings → AI & tools → Chat (owned by ai-sessions); applied here to background-agent transcripts. */
+const inlineDiffsOn = (ctx: ModuleContext) => ctx.state.get("files.changesEnabled") !== false && (ctx.state.get("ai-sessions.chatPrefs") as any)?.inlineDiffs !== false;
 async function loadCurrent(ctx: ModuleContext, poll: boolean, generation: number, fromEvent = false) {
   if (!ws) { view = null; ctx.ui.invalidate(); return; }
   if(background) {
@@ -279,7 +288,7 @@ async function loadCurrent(ctx: ModuleContext, poll: boolean, generation: number
       view={auth,workspace:{name:ws.name,machineId:session.machineId,root:session.root},profiles,
         mcpServers:(catalog?.mcps||[]).map((m:any)=>({id:m.id,name:m.name,description:m.description})),conversations:backgroundSessions.map(s=>({id:s.id,title:s.name,acpProfileId:s.profile.id,status:s.status})),activeId:session.id,active:{
         conversation:{id:session.id,title:session.name,acpProfileId:session.profile.id,status:session.status,approvalPolicy:agentPolicy(session),mcpSelection:sessionMcpIds(session)},
-        live:{...session,profileId:session.profile.id},messages:page.messages,windowed:true,hasOlder:page.before!==null,hasLoadedOlder:false,hasNewer:historyBefore.length>0,
+        live:{...session,profileId:session.profile.id},messages:inlineDiffsOn(ctx)?page.messages:page.messages.map((m:any)=>m.diffs?{...m,diffs:undefined}:m),windowed:true,hasOlder:page.before!==null,hasLoadedOlder:false,hasNewer:historyBefore.length>0,
         busy:["busy","waiting"].includes(session.status),steering:page.queued.length,
       }};
       error=null; syncOrigin();
@@ -596,6 +605,9 @@ const mod: AppModule = {
     libraryState = ctx.state.get(LIBRARY_STATE) ?? null;
     // Library edits change what background agents are offered; refresh their catalog.
     ctx.state.watch(LIBRARY_STATE, (value: any) => { libraryState = value; if (background) void loadCatalog(ctx); ctx.ui.invalidate(); });
+    ctx.events.on("files.changeCaptured", () => { if (background) void load(ctx); });
+    ctx.state.watch("files.changesEnabled", () => { void load(ctx); });
+    ctx.state.watch("ai-sessions.chatPrefs", () => { if (background) void load(ctx); });
     ctx.state.watch("workspace.selected", (v: any) => { const changed = ws?.id !== v?.id; ws = v; if(changed){void restoreComposer(ctx);publishSettings();if(background)leaveBackground(ctx);const saved=v?.view?.ui?.aiBackgroundSession;if(saved)void openBackground(ctx,{workspaceId:v.id,id:saved});else void load(ctx);} });
     ctx.events.on("persistent-agents.chatResponse",(response:any)=>{
       const pending=requests.get(response?.requestId);if(!pending)return;
@@ -605,6 +617,14 @@ const mod: AppModule = {
     ctx.events.on("agents-panel.openChat",(selection:any)=>{void openBackground(ctx,selection);});
     // Workflow block sessions and the workflow configurator are background agents too.
     ctx.events.on("workflows-panel.openChat",(selection:any)=>{void openBackground(ctx,selection);});
+    // Prompt history: an agent opens like the agents panel does; a chat becomes the active conversation.
+    ctx.events.on("prompt-history.openChat",(e:any)=>{
+      if(!e?.workspaceId||e.workspaceId!==ws?.id)return;
+      if(typeof e.agentId==="string"){void openBackground(ctx,{workspaceId:e.workspaceId,id:e.agentId});return;}
+      if(typeof e.conversationId!=="string")return;
+      if(background)leaveBackground(ctx);
+      void ctx.modules.call("ai-sessions","select",{workspaceId:e.workspaceId,conversationId:e.conversationId}).then(()=>load(ctx)).catch(err=>{error=errMsg(err);ctx.ui.invalidate();});
+    });
     ctx.events.on("agents-panel.agentRemoved",(e:any)=>{if(e?.id){backgroundDrafts.delete(e.id);if(background?.id===e.id){leaveBackground(ctx);void load(ctx);}}});
     ctx.events.on("agents-panel.agentCleared",(e:any)=>{if(background?.id===e?.id){resetChatWindows();void load(ctx);}});
     ctx.events.on("ai-sessions.changed", () => refresh());
@@ -692,7 +712,7 @@ const mod: AppModule = {
       : "Automatically approve agent tool permissions. Module changes still require native approval.";
     const kids: UiNode[] = [];
     if(background) {
-      kids.push({type:"row",key:"background-session",padding:8,gap:6,children:[
+      kids.push({type:"row",key:"background-session",padding:8,gap:6,align:"center",style:{background:"transparent",noShrink:true},children:[
         {type:"label",key:"name",text:conv?.title||"Background agent",grow:true,weight:"semibold"},
         {type:"button",key:"back-to-chats",text:"Chats",action:"backToChats",small:true,variant:"ghost"},
         {type:"button",key:"stop-agent",text:"Stop agent",action:"stopBackground",small:true,variant:"ghost"},
@@ -838,20 +858,25 @@ const mod: AppModule = {
         kids.push({ type: "column", key: "settings", style: chatStyle.settings, grow: true, scroll: true, gap: 16, padding: 14, children: fields });
       } else {
         const history = visibleHistory(active);
-        if (history.hasOlder || historyBefore.length || historyLimit > CHAT_MESSAGE_LIMIT) kids.push({ type: "row", key: "message-history", gap: 6, children: [
-          { type: "button", key: "older-messages", text: pagingHistory ? "Loading…" : "Older", action: "revealOlder", small: true, variant: "ghost", disabled: pagingHistory || !history.hasOlder },
-          { type: "label", key: "history-window", text: historyBefore.length ? "Older messages" : `Latest ${history.messages.length} messages`, size: "xs", color: "muted", grow: true },
+        // Scrolling up lazily grows the window (see revealOlder). Only past CHAT_HISTORY_LIMIT does the
+        // transcript page away its newest messages; then offer a way back down.
+        if (historyBefore.length) kids.push({ type: "row", key: "message-history", gap: 6, children: [
+          { type: "label", key: "history-window", text: "Viewing older messages", size: "xs", color: "muted", grow: true },
           ...(historyBefore.length ? [{ type: "button", key: "newer-messages", text: "Newer", action: "revealNewer", small: true, variant: "ghost", disabled: pagingHistory } as UiNode] : []),
           ...(historyBefore.length || historyLimit > CHAT_MESSAGE_LIMIT ? [{ type: "button", key: "latest-messages", text: "Latest", action: "latestMessages", small: true, variant: "ghost", disabled: pagingHistory } as UiNode] : []),
         ] });
         if (active.historyError) kids.push({ type: "status", key: "history-error", text: active.historyError, level: "error" });
         const loadingOlder = pagingHistory || !!active.historyLoading;
-        kids.push({ type: "transcript", key: "transcript", scrollbarMode: "scrolling", scrollKey: conv.id, followKey: followKey(history.messages),
+        const preserveNow = preserveHistoryScroll;
+        if (preserveHistoryScroll && preserveFrom !== windowEdges(history.messages)) { preserveHistoryScroll = false; preserveFrom = null; }
+        const edge = historyEdge({ hasOlder: history.hasOlder, loadingOlder, historyError: active.historyError, loadOlderAction: "revealOlder" });
+        kids.push({ type: "column", key: "transcript-wrap", grow: true, style: { position: "relative" }, children: [{ type: "transcript", key: "transcript", scrollbarMode: "scrolling", scrollKey: conv.id, followKey: followKey(history.messages),
           hasOlder: history.hasOlder, loadingOlder, loadOlderAction: "revealOlder",
           bottomAction: history.hasNewer ? "revealNewer" : historyLimit > CHAT_MESSAGE_LIMIT ? "collapseHistory" : undefined,
-          preserveScrollOnChange: preserveHistoryScroll, scrollReset: historyScrollReset, grow: true,
+          preserveScrollOnChange: preserveNow, scrollReset: historyScrollReset, grow: true,
           children: transcriptItems(history.messages, { agentLabel: providerName + (model.value ? " · " + modelName : ""), linkAction: "openLink",
-            hasOlder: history.hasOlder, loadingOlder, historyError: active.historyError, loadOlderAction: "revealOlder" }) });
+            hasOlder: history.hasOlder, loadingOlder, historyError: active.historyError, loadOlderAction: "revealOlder",
+            thinking: !!active.busy && !history.hasNewer, rootPath: view.workspace?.root, expandedDiffs, diffToggleAction: "toggleDiff" }) }, ...(edge ? [edge] : [])] });
         const composer: UiNode[] = [];
         if (attachments.length) composer.push({ type: "row", key: "attachments", gap: 8, children: attachments.map((image, index): UiNode => ({ type: "column", key: "attachment-" + index, gap: 4, children: [
           { type: "image", key: "preview", image, width: 80, height: 64 },
@@ -1042,6 +1067,12 @@ const mod: AppModule = {
       ctx.ui.invalidate(); return;
     }
     if (ev.action === "cancelDeleteChat") { deleteChat = null; ctx.ui.invalidate(); return; }
+    if (ev.action === "toggleDiff") {
+      const id = String(ev.value || "");
+      if (expandedDiffs.has(id)) expandedDiffs.delete(id); else expandedDiffs.add(id);
+      if (expandedDiffs.size > 200) expandedDiffs.delete(expandedDiffs.values().next().value!);
+      ctx.ui.invalidate(); return;
+    }
     if (ev.action === "confirmDeleteChat") {
       const target = deleteChat;
       if (!target || target.workspaceId !== ws?.id || target.background !== !!background || busy) return;
@@ -1205,8 +1236,8 @@ const mod: AppModule = {
         else if(["revealOlder","loadOlder","olderMessages"].includes(ev.action)) {
           if(historyLimit<200)historyLimit=Math.min(200,historyLimit+CHAT_MESSAGE_LIMIT);
           else if(backgroundPage?.before)historyBefore.push(String(backgroundPage.before));
-          preserveHistoryScroll=true;
-        }else if(["revealNewer","newerMessages"].includes(ev.action)){historyBefore.pop();preserveHistoryScroll=true;}
+          holdScroll();
+        }else if(["revealNewer","newerMessages"].includes(ev.action)){holdScroll();historyBefore.pop();}
         else if(["latestMessages","collapseHistory"].includes(ev.action)){historyBefore=[];historyLimit=CHAT_MESSAGE_LIMIT;preserveHistoryScroll=false;historyScrollReset++;}
         error=null;
       }catch(e){actionError=errMsg(e);}
@@ -1438,13 +1469,13 @@ const mod: AppModule = {
         try {
           if (!history.hasLoadedOlder) { const result = await call("loadOlder", { conversationId }); if (result?.loaded === 0) return; }
           if (historyConversationId === conversationId) {
-            preserveHistoryScroll = true;
+            holdScroll();
             if (ev.action === "revealOlder" && historyLimit < CHAT_HISTORY_LIMIT) historyLimit = Math.min(CHAT_HISTORY_LIMIT, historyLimit + CHAT_MESSAGE_LIMIT);
             else historyBefore.push(ev.action === "revealOlder" ? history.messages[Math.max(0, history.messages.length - CHAT_MESSAGE_LIMIT)].key : first);
           }
         } finally { pagingHistory = false; }
       }
-      else if (ev.action === "newerMessages" || ev.action === "revealNewer") { historyBefore.pop(); preserveHistoryScroll = true; }
+      else if (ev.action === "newerMessages" || ev.action === "revealNewer") { holdScroll(); historyBefore.pop(); }
       else if (ev.action === "latestMessages" || ev.action === "collapseHistory") {
         historyBefore = []; historyLimit = CHAT_MESSAGE_LIMIT; preserveHistoryScroll = false; historyScrollReset++;
       }

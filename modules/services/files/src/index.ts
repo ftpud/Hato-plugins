@@ -1,3 +1,4 @@
+import { ChangeCapture } from "./change-capture";
 import { FilePresentations } from "./presentation";
 // files: workspace-scoped listing and reading through scoped FS grants (local fs or SFTP on the
 // workspace's machine). Returns native document handles for the viewer.
@@ -83,6 +84,7 @@ async function watchSelected(ctx: ModuleContext) {
     if (selected?.id === next?.id && selected?.machineId === next?.machineId && selected?.rootAbsolutePath === next?.rootAbsolutePath) return;
     selected = next;
     await startWatcher(ctx, next);
+    await capture?.select(next);
     // Warm all paths independently of which folders are expanded.
     if (next) {
       // This root was unwatched while another workspace was selected.
@@ -106,11 +108,14 @@ async function publishSkills(ctx: ModuleContext) {
   }
 }
 
+let capture: ChangeCapture | null = null;
 let presentations: FilePresentations | null = null;
 const mod: AppModule = {
   id: "files",
   moduleApiVersion: 1,
   async activate(ctx) {
+    capture = new ChangeCapture(ctx);
+    await capture.activate();
     presentations = new FilePresentations(ctx);
     await presentations.activate();
     ctx.events.on("git.changed", (event: any) => {
@@ -128,13 +133,14 @@ const mod: AppModule = {
         description: "Build output and other ignored folders (from .gitignore) are not watched. Use Refresh to see new files there." },
       { key: "extra", label: "Also skip", type: "text", value: prefs.extra, placeholder: "out, generated, /tmp",
         description: "Folder names (any depth, * and ? allowed) or paths from the project root with /, separated by commas." },
-    ] }], async (_section, key, value) => {
+    ] }, ...(capture?.sections() || [])], async (_section, key, value) => {
+      if (_section === "change-capture") { await capture?.change(key, value); return; }
       if (key === "extra" ? typeof value !== "string" : !["defaults", "gitignored"].includes(key) || typeof value !== "boolean") throw new Error("Invalid file watching setting");
       const next = { ...prefs, [key]: value } as WatchPreferences;
       await ctx.modules.call("persistence", "settings.set", { key: "files.watch", value: next });
       prefs = next;
       if (selected) { invalidateIgnored(selected); await startWatcher(ctx, selected, true); }
-    });
+    }, { action: async (section) => { if (section === "change-capture") await capture?.clear(); } });
     watcher = fileWatch(ctx, workspaceId => {
       if (changeTimer) clearTimeout(changeTimer);
       changeTimer = setTimeout(() => {
@@ -164,6 +170,7 @@ const mod: AppModule = {
     await publishSkills(ctx);
   },
   async deactivate() {
+    await capture?.stop(); capture = null;
     presentations?.dispose(); presentations = null;
     selection++; skillsVersion++;
     stopSearchIndexes();

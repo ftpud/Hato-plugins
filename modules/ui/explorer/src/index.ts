@@ -35,7 +35,7 @@ async function refreshGit(ctx: ModuleContext) {
   try {
     const status = await ctx.modules.call("git", "status", { workspaceId }, { timeoutMs: 45000 });
     if (version === gitVersion && workspaceId === ws?.id) { gitFiles = status.files || []; ctx.ui.invalidate(); }
-  } catch { if (version === gitVersion) { gitFiles = []; ctx.ui.invalidate(); } }
+  } catch { /* Keep the last known badges; a slow or failed status call shouldn't blank them. */ }
 }
 async function loadDir(ctx: ModuleContext, path: string, version = epoch) {
   if (!ws || pending.has(path) || dirs.has(path)) return;
