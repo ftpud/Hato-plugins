@@ -8,7 +8,7 @@
       "type": "System",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.64",
+      "version": "0.1.65",
       "coreVersion": "^0.1.0",
       "description": "Hato essentials services and panels.",
       "dependencies": {},
@@ -35,11 +35,11 @@
       "type": "AI",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.23",
+      "version": "0.1.24",
       "coreVersion": "^0.1.0",
       "description": "Provider-independent ACP sessions, chat UI and MCP tools. Install AI providers separately.",
       "dependencies": {
-        "foundation": "^0.1.57"
+        "foundation": "^0.1.65"
       },
       "modules": [
         "acp",
@@ -58,7 +58,7 @@
       "type": "Development",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.19",
+      "version": "0.1.20",
       "coreVersion": "^0.1.0",
       "description": "Git changes, branch controls, worktree tasks and history panels.",
       "dependencies": {
@@ -80,7 +80,7 @@
       "type": "Development",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.8",
+      "version": "0.1.9",
       "coreVersion": "^0.1.0",
       "description": "Run configurations, Run bar and console, and the debugger for Java and JavaScript/TypeScript.",
       "dependencies": {
@@ -173,11 +173,11 @@
       "type": "Automation",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.18",
+      "version": "0.1.19",
       "coreVersion": "^0.1.0",
       "description": "Persistent agent runtime, background agent panel and workspace tools. Supports local and SSH machines.",
       "dependencies": {
-        "foundation": "^0.1.0",
+        "foundation": "^0.1.65",
         "core-acp": "^0.1.0",
         "git": "^0.1.0"
       },
@@ -194,7 +194,7 @@
       "type": "Automation",
       "core": false,
       "author": "Hato contributors",
-      "version": "0.1.15",
+      "version": "0.1.16",
       "coreVersion": "^0.1.0",
       "description": "Visual workflow editor and execution runtime. Uses Background Agents to run agent steps.",
       "dependencies": {

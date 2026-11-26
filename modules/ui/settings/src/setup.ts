@@ -14,12 +14,13 @@ interface Step { id: string; kind: Kind; label: string; detail: string; state: S
 const PROVIDERS = [
   { id: "claude-acp", name: "Claude", hint: "Anthropic's Claude Code agent" },
   { id: "codex-acp", name: "Codex", hint: "OpenAI's Codex agent" },
+  { id: "opencode-acp", name: "OpenCode", hint: "OpenCode CLI agent" },
   { id: "copilot-acp", name: "GitHub Copilot", hint: "GitHub Copilot's coding agent" },
 ];
 /** Shipped with Hato and on by default; "Empty" turns them off. */
 const BASELINE = ["core-acp", "git"];
-/** The Default profile: baseline plus remote development. Providers are chosen separately. */
-const DEFAULT_PACKAGES = ["core-acp", "git", "remote"];
+/** The Default profile: baseline plus background agents and remote development. Providers are chosen separately. */
+const DEFAULT_PACKAGES = ["core-acp", "git", "agents", "remote"];
 
 const S = {
   open: false, phase: "choose" as "choose" | "running" | "done",
@@ -139,7 +140,7 @@ function chooseView(): UiNode[] {
     { type: "column", key: "profiles", gap: 10, children: [
       profileCard("empty", "Empty", "Projects, files, the editor and terminals.",
         "AI chat and Git are turned off. Nothing is downloaded."),
-      profileCard("default", "Default", "Recommended: AI chat, Git and remote development, with the agents you use.",
+      profileCard("default", "Default", "AI chat, Git, background agents and remote development, with the providers you use.",
         `Includes ${DEFAULT_PACKAGES.map(name).join(", ")}. Choose agent providers:`, [
           { type: "column", key: "providers", gap: 2, children: PROVIDERS.map((p): UiNode => ({ type: "row", key: p.id, gap: 10, align: "center", children: [
             { type: "switch", key: `provider:${p.id}`, label: "", checked: S.providers.has(p.id), action: `setup.provider:${p.id}` } as UiNode,

@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 2,
+  "id": "run-configurations",
+  "name": "Run configurations",
+  "kind": "service",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [
+    "workspace",
+    "persistence"
+  ],
+  "calls": [
+    "workspace",
+    "persistence",
+    "language-java",
+    "language-typescript",
+    "cloud"
+  ],
+  "capabilities": [
+    "fs.scope",
+    "process.scope",
+    "ssh.connect"
+  ],
+  "runsOn": "ui",
+  "distribution": "marketplace",
+  "stateVersion": 1,
+  "description": "Project run configuration storage, environment previews and language detection.",
+  "author": "Hato contributors",
+  "version": "0.1.9",
+  "pluginPackage": "run-configurations",
+  "pluginType": "Development"
+}
