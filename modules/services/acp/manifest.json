@@ -17,7 +17,7 @@
   "stateVersion": 1,
   "description": "Agent Client Protocol client: profiles, transports, sessions, lifecycle, authentication, elicitation, config options.",
   "author": "Hato contributors",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "pluginPackage": "core-acp",
   "pluginType": "AI",
   "calls": [

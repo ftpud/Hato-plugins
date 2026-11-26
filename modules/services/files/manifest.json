@@ -19,7 +19,7 @@
   "stateVersion": 1,
   "description": "Workspace-scoped file listing and native document handles.",
   "author": "Hato contributors",
-  "version": "0.1.62",
+  "version": "0.1.63",
   "pluginPackage": "foundation",
   "pluginType": "System",
   "calls": [
