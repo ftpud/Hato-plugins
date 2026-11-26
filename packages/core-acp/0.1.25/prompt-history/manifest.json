@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 2,
+  "id": "prompt-history",
+  "kind": "ui",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [
+    "ai-sessions",
+    "workspace"
+  ],
+  "calls": [
+    "ai-sessions",
+    "persistent-agents",
+    "viewer",
+    "workspace"
+  ],
+  "capabilities": [
+    "ui.document"
+  ],
+  "stateVersion": 1,
+  "description": "Prompts sent in this project, each with the files its turn changed, for diff review.",
+  "contributes": {
+    "panels": [
+      {
+        "id": "prompt-history",
+        "title": "Prompt history",
+        "defaultHidden": true,
+        "dock": {
+          "column": 3
+        },
+        "activity": {
+          "side": "right",
+          "order": 52,
+          "title": "Prompt history",
+          "iconSvg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M3 12a9 9 0 1 0 3-6.7L3 8\"/><path d=\"M3 3v5h5M12 7v5l3 2\"/></svg>"
+        }
+      }
+    ]
+  },
+  "author": "Hato contributors",
+  "version": "0.1.25",
+  "pluginPackage": "core-acp",
+  "pluginType": "AI"
+}
