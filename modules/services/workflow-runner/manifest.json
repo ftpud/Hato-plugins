@@ -13,7 +13,8 @@
     "net.loopback"
   ],
   "calls": [
-    "agent-runner"
+    "agent-runner",
+    "persistence"
   ],
   "runsOn": "either",
   "stateVersion": 1,

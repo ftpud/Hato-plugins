@@ -4,11 +4,12 @@
 // fails immediately with an error. Connected agents can also inspect, reconfigure, arm, disarm
 // or wait on trigger blocks through workflow_use_block.
 import type { Handle, ModuleContext, StreamSubscription } from "@hato/sdk/types";
+import { hostOs, isAbsolutePath, slashPath } from "@hato/sdk/platform";
 import { errMsg } from "@hato/sdk/runtime";
 import {
   normalizeTriggerConfig, renderPrompt, type WorkflowBlock, type WorkflowBlockState, type WorkflowTriggerConfig,
 } from "@hato/sdk/workflows";
-import { runScript } from "./procs";
+import { createWindowsFile, runScript } from "./procs";
 
 export interface ArmedTrigger {
   blockId: string;
@@ -339,8 +340,8 @@ export async function armSocketTrigger(
   if (protocol === "unix") {
     const rawPath = (t.path || "").trim();
     if (!rawPath) throw new Error(`Socket Trigger '${b.label}' needs a Unix socket path`);
-    if (rawPath.split("/").includes("..")) throw new Error(`Socket Trigger '${b.label}' path cannot contain '..'`);
-    const resolvedPath = rawPath.startsWith("/") ? rawPath : `${x.env.root.replace(/\/$/, "")}/${rawPath}`;
+    if (slashPath(rawPath).split("/").includes("..")) throw new Error(`Socket Trigger '${b.label}' path cannot contain '..'`);
+    const resolvedPath = isAbsolutePath(rawPath) ? rawPath : `${x.env.root.replace(/\/$/, "")}/${rawPath}`;
     if (activeUnixSockets.has(resolvedPath) && activeUnixSockets.get(resolvedPath) !== ownerKey) {
       throw new Error(`EADDRINUSE: Unix socket '${rawPath}' is already in use`);
     }
@@ -538,7 +539,7 @@ export async function armFileTrigger(
   const t: WorkflowTriggerConfig = b.trigger || {};
   const rawPath = (t.path || "").trim();
   if (!rawPath) throw new Error(`File/Pipe Trigger '${b.label}' needs a file or pipe path`);
-  if (rawPath.startsWith("/") || rawPath.split("/").includes("..")) {
+  if (isAbsolutePath(rawPath) || slashPath(rawPath).split("/").includes("..")) {
     throw new Error(`File/Pipe Trigger '${b.label}' path '${rawPath}' must be workspace-relative`);
   }
   const mode = t.mode || "auto";
@@ -550,7 +551,11 @@ export async function armFileTrigger(
   const grant = await ctx.host.capabilities.request({ kind: "fs", root: x.env.root, target: { kind: "local" } });
   const quoted = `'${rawPath.replace(/'/g, `'\\''`)}'`;
   const create = async (command: string, what: string) => {
-    const mk = await runScript(ctx, x.env.root, `mkdir -p -- "$(dirname -- ${quoted})" && ${command} -- ${quoted}`, "", { timeoutMs: 5000, track: () => {} });
+    // Native Windows has no mkfifo or POSIX shell: files are created directly, pipes are refused.
+    const windows = hostOs(ctx) === "windows";
+    if (windows && command === "mkfifo") throw new Error(`Named pipes are not available on native Windows; use a file trigger`);
+    const mk = windows ? await createWindowsFile(ctx, x.env.root, rawPath)
+      : await runScript(ctx, x.env.root, `mkdir -p -- "$(dirname -- ${quoted})" && ${command} -- ${quoted}`, "", { timeoutMs: 5000, track: () => {} });
     if (mk.code !== 0) throw new Error(`Cannot create ${what} '${rawPath}': ${(mk.stderr || mk.stdout).trim() || `exit ${mk.code}`}`);
   };
 

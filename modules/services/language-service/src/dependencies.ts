@@ -3,6 +3,12 @@ import { errMsg, targetFor, workspaceGrant, type WorkspaceDescriptor } from "@ha
 import type { LanguageServerSpec } from "@hato/sdk/languages";
 import { get as scopedGet, set as scopedSet } from "@hato/sdk/scoped-settings";
 import { DEPENDENCY_SCRIPT } from "./dependency-script";
+import { workspaceOs } from "@hato/sdk/platform";
+
+/** Python interpreters to try: Windows has `python` and the `py` launcher (and a Store stub named python3). */
+export const pythonCandidates = (windows: boolean): { executable: string; args: string[] }[] => windows
+  ? [{ executable: "python", args: [] }, { executable: "py", args: ["-3"] }, { executable: "python3", args: [] }]
+  : [{ executable: "python3", args: [] }, { executable: "python", args: [] }];
 
 interface DependencyResult {
   ready: boolean; executable: string | null; supported: boolean; directory: string;
@@ -28,7 +34,7 @@ export class LanguageDependencies {
         description: status?.message || (workspace ? `Check the language server and runtimes on ${target}.` : "Select a workspace to check its dependencies.") },
       { type: "action", key: "installDependencies", label: "Dependency installation", buttonLabel: "Install missing dependencies",
         disabled: disabled || status?.ready === true || status?.supported === false,
-        description: `Install missing tools for your user on ${target}, configure this workspace, then check again. Downloads go under ~/.local/share/hato/language-tools; no administrator access is needed. Requires Python 3.8+; automatic runtime downloads support macOS and glibc Linux (x64/arm64).` },
+        description: `Install missing tools for your user on ${target}, configure this workspace, then check again. Downloads go under ${workspace && workspaceOs(this.ctx, workspace) === "windows" ? "%LOCALAPPDATA%\\Hato\\language-tools" : "~/.local/share/hato/language-tools"}; no administrator access is needed. Requires Python 3.8+; automatic runtime downloads support macOS and glibc Linux (x64/arm64).` },
     ];
   }
   async action(serverId: string, key: string, workspaceId?: string): Promise<DependencyResult> {
@@ -64,11 +70,11 @@ export class LanguageDependencies {
     const scope = await workspaceGrant(this.ctx, workspace, "process");
     const target = await targetFor(this.ctx, workspace);
     let diagnostic = "";
-    for (const python of ["python3", "python"]) {
+    for (const python of pythonCandidates(workspaceOs(this.ctx, workspace) === "windows")) {
       let result;
       try {
-        result = await this.ctx.host.process.run(scope.grant, { target, executable: python,
-          args: ["-c", DEPENDENCY_SCRIPT, JSON.stringify(request)], cwd: workspace.rootAbsolutePath, loginShell: workspace.location !== "local" },
+        result = await this.ctx.host.process.run(scope.grant, { target, executable: python.executable,
+          args: [...python.args, "-c", DEPENDENCY_SCRIPT, JSON.stringify(request)], cwd: workspace.rootAbsolutePath, loginShell: workspace.location !== "local" },
           { timeoutMs: install ? 15 * 60 * 1000 : 60000, limitBytes: 65536 });
       } catch (error) {
         if (["ENOENT", "ENOTFOUND", "ENOEXEC"].includes((error as any)?.code)) { diagnostic = errMsg(error); continue; }
@@ -77,7 +83,7 @@ export class LanguageDependencies {
       const line = result.stdout.split(/\r?\n/).filter(line => line.startsWith("__HATO_DEPENDENCIES__=")).pop();
       if (!line) {
         diagnostic = (result.stderr || result.stdout).trim().slice(-800);
-        if (result.code === 127 || /SyntaxError|not found|not recognized/i.test(diagnostic)) continue;
+        if (result.code === 127 || result.code === 9009 || /SyntaxError|not found|not recognized/i.test(diagnostic)) continue;
         throw new Error(`Dependency helper failed (${result.code}): ${diagnostic}`);
       }
       const parsed = JSON.parse(line.slice("__HATO_DEPENDENCIES__=".length));

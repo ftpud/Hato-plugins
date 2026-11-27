@@ -3,6 +3,7 @@ import type { AppModule, ModuleContext, StreamSubscription, SettingsSection } fr
 import { errMsg, targetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { languageDefinitions, languageForPath, documentUri, definitionLinks, workspacePath, relativeFile, validPosition, type LanguageDefinition, type LanguageServerSpec } from "@hato/sdk/languages";
 import { serverData } from "./server-data";
+import { isAbsolutePath, windowsLaunch, workspaceOs } from "@hato/sdk/platform";
 import { exportMcpTools } from "@hato/sdk/mcp";
 import { projectConfiguration, projectServer, documentSymbols } from "./project";
 import { LanguageDependencies } from "./dependencies";
@@ -128,7 +129,10 @@ async function start(ctx: ModuleContext, d: WorkspaceDescriptor, server: Languag
     const data = server.args.some(arg => arg.includes("$SERVER_DATA")) ? await serverData(ctx, d, server.id, grant.grant) : "";
     if(data)report(ctx,d,server,{dataDirectory:data});
     const args = server.args.map(arg => arg.replace(/\$WORKSPACE/g, d.rootAbsolutePath).replace(/\$SERVER_DATA/g, data));
-    handle = (await ctx.host.process.spawn(grant.grant, { target: await targetFor(ctx, d), executable, args, cwd: d.rootAbsolutePath, loginShell: d.location !== "local" })).handle;
+    // Native Windows: servers installed with npm are .cmd shims; start them through node directly.
+    const launch = workspaceOs(ctx, d) === "windows" ? await windowsLaunch(ctx, grant.grant, { executable, args, cwd: d.rootAbsolutePath }) : { executable, args };
+    handle = (await ctx.host.process.spawn(grant.grant, { target: await targetFor(ctx, d), executable: launch.executable, args: launch.args, cwd: d.rootAbsolutePath,
+      ...((launch as any).env ? { env: (launch as any).env } : {}), loginShell: d.location !== "local" })).handle;
   } catch (error) { throw new Error(`${server.id} on ${d.machineId}: ${errMsg(error)}. ${server.installHint}`); }
   const peer = new LspPeer(frame => ctx.host.process.write(handle, frame));
   const s: Session = { key, workspace: d, server, handle, peer, subscriptions: [], documents: new Map(), closing: false, initialized: false, capabilities: {}, queue: Promise.resolve(), stderr: "" };
@@ -353,7 +357,8 @@ const mod: AppModule = {
       const status=statuses.get(sessionKey(d,server));
       if(!status?.dataDirectory)return {status,log:(status?.log||[]).join("\n")};
       const grant=await workspaceGrant(ctx,d,"process");
-      const result=await ctx.host.process.run(grant.grant,{target:await targetFor(ctx,d),executable:"python3",args:["-c","import pathlib,sys; p=pathlib.Path(sys.argv[1])/'.metadata/.log'; print(p.read_text(errors='replace')[-32000:] if p.is_file() else 'No index log yet')",status.dataDirectory],cwd:d.rootAbsolutePath,loginShell:d.location==="ssh"},{timeoutMs:30000});
+      const python=workspaceOs(ctx,d)==="windows"?"python":"python3";
+      const result=await ctx.host.process.run(grant.grant,{target:await targetFor(ctx,d),executable:python,args:["-c","import pathlib,sys; p=pathlib.Path(sys.argv[1])/'.metadata/.log'; print(p.read_text(errors='replace')[-32000:] if p.is_file() else 'No index log yet')",status.dataDirectory],cwd:d.rootAbsolutePath,loginShell:d.location==="ssh"},{timeoutMs:30000});
       if(result.code!==0)throw new Error(result.stderr||"Cannot read server log");
       return {status,log:result.stdout};
     },
@@ -398,7 +403,7 @@ const mod: AppModule = {
       const server = servers().find(s => s.id === a.serverId);
       if (!server) throw new Error("Language server is no longer available");
       const bundles = Array.isArray(a.bundles) ? a.bundles : [];
-      if (bundles.length > 8 || !bundles.every((p: unknown) => typeof p === "string" && p.startsWith("/") && p.endsWith(".jar") && p.length < 1024 && !p.includes("\n")))
+      if (bundles.length > 8 || !bundles.every((p: unknown) => typeof p === "string" && isAbsolutePath(p) && p.endsWith(".jar") && p.length < 1024 && !p.includes("\n")))
         throw new Error("Bundles must be absolute JAR paths");
       const current = await extraBundles(ctx, d, server);
       if (JSON.stringify(current) === JSON.stringify(bundles)) return { changed: false };

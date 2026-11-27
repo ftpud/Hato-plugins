@@ -17,6 +17,7 @@
     "net.websocket",
     "net.fetch",
     "process.scope",
+    "fs.scope",
     "ssh.connect",
     "ssh.forward",
     "remote.daemon",

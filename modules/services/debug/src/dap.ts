@@ -28,7 +28,7 @@ export class Relay {
   static async start(ctx: ModuleContext, d: WorkspaceDescriptor, config: RelayConfig, handlers: RelayHandlers): Promise<Relay> {
     const grant = await workspaceGrant(ctx, d, "process");
     const { handle } = await ctx.host.process.spawn(grant.grant, {
-      target: await targetFor(ctx, d), executable: "python3", args: ["-c", RELAY_SCRIPT, JSON.stringify(config)],
+      target: await targetFor(ctx, d), executable: ctx.host?.env?.info?.().platform === "windows" && d.location === "local" ? "python" : "python3", args: ["-c", RELAY_SCRIPT, JSON.stringify(config)],
       cwd: d.rootAbsolutePath, env: {}, loginShell: d.location !== "local",
     });
     const relay = new Relay(ctx, handle, handlers);

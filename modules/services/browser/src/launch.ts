@@ -4,6 +4,7 @@
 import type { DaemonTarget, ExecutionTarget, ModuleContext, ScopeGrant } from "@hato/sdk/types";
 import { daemonTargetFor, errMsg, sshConnect, targetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import type { BrowserSessionSpec } from "@hato/sdk/browser";
+import { firstExistingFile, isAbsolutePath, programExists, windowsDirs, windowsPowerShell } from "@hato/sdk/platform";
 
 export interface Machine {
   id: string;
@@ -13,6 +14,8 @@ export interface Machine {
   /** Per-machine state root for profiles and the managed browser. */
   stateDir: string;
   desc?: WorkspaceDescriptor;
+  /** Native Windows: no POSIX shell; programs are started directly. */
+  windows?: boolean;
 }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -24,7 +27,7 @@ export async function machineFor(ctx: ModuleContext, spec: BrowserSessionSpec): 
     const shared = String(ctx.host.env.info().sharedDir || "").replace(/\/+$/, "");
     if (!shared) throw new Error("Hato's shared data folder is unavailable");
     const grant = await ctx.host.capabilities.request({ kind: "process", root: shared, purpose: "Run browser sessions" });
-    return { id: "local", label: "This computer", grant, target: { kind: "local" }, stateDir: `${shared}/browser` };
+    return { id: "local", label: "This computer", grant, target: { kind: "local" }, stateDir: `${shared}/browser`, windows: isWindowsHost(ctx) };
   }
   if (loc.kind !== "workspace") throw new Error("Endpoint sessions do not run a browser process");
   const desc: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: loc.workspaceId });
@@ -37,9 +40,23 @@ export async function machineFor(ctx: ModuleContext, spec: BrowserSessionSpec): 
   if (!home) throw new Error("Cannot determine the home folder on the workspace machine");
   if (desc.location === "local") {
     const shared = String(ctx.host.env.info().sharedDir || "").replace(/\/+$/, "");
-    return { id: "local", label: "This computer", grant, target, stateDir: `${shared}/browser`, desc };
+    return { id: "local", label: "This computer", grant, target, stateDir: `${shared}/browser`, desc, windows: isWindowsHost(ctx) };
   }
   return { id: desc.machineId, label: desc.name, grant, target, stateDir: `${home.replace(/\/+$/, "")}/.local/state/hato/browser`, desc };
+}
+
+const isWindowsHost = (ctx: ModuleContext) => ctx.host?.env?.info?.().platform === "windows";
+
+/** Chrome, Edge (always installed on Windows 10/11), Brave and Chromium in their default folders. */
+function windowsBrowsers(ctx: ModuleContext): string[] {
+  const d = windowsDirs(ctx), x86 = d.programFiles.replace(/ ?\(x86\)$/, "") + " (x86)";
+  const roots = [d.programFiles, x86, ...(d.localAppData ? [d.localAppData] : [])];
+  return [
+    ...roots.map(r => `${r}\\Google\\Chrome\\Application\\chrome.exe`),
+    ...roots.map(r => `${r}\\Microsoft\\Edge\\Application\\msedge.exe`),
+    ...roots.map(r => `${r}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`),
+    ...roots.map(r => `${r}\\Chromium\\Application\\chrome.exe`),
+  ];
 }
 
 export async function sh(ctx: ModuleContext, m: Machine, script: string, args: string[] = [], timeoutMs = 30_000, env?: Record<string, string>) {
@@ -61,6 +78,11 @@ exit 3`;
 
 /** System browser, then the managed headless shell. `preferred` wins when executable. */
 export async function findBrowser(ctx: ModuleContext, m: Machine, preferred?: string): Promise<string | null> {
+  if (m.windows) {
+    // A preferred name on PATH is resolved first; the default folders are probed in one PowerShell start.
+    if (preferred && !isAbsolutePath(preferred) && await programExists(ctx, m.grant.grant, m.grant.root, preferred)) return preferred;
+    return firstExistingFile(ctx, m.grant.grant, m.grant.root, [...(preferred ? [preferred] : []), ...windowsBrowsers(ctx)]);
+  }
   const r = await sh(ctx, m, DETECT, [m.stateDir], 15_000, { HATO_BROWSER: preferred || "" });
   return r.code === 0 && r.stdout.trim() ? r.stdout.trim() : null;
 }
@@ -78,6 +100,7 @@ printf '%s' "$D/current/chrome-headless-shell"`;
 
 /** Download Chrome for Testing's headless shell onto the machine. */
 export async function installHeadlessShell(ctx: ModuleContext, m: Machine): Promise<string> {
+  if (m.windows) throw new Error("No Chromium browser found. Install Google Chrome or Microsoft Edge, or set the browser path.");
   const uname = await sh(ctx, m, "uname -sm");
   const [os, arch] = uname.stdout.trim().split(/\s+/);
   const platform = os === "Darwin" ? (arch === "arm64" ? "mac-arm64" : "mac-x64") : os === "Linux" && (arch === "x86_64" || arch === "amd64") ? "linux64" : null;
@@ -128,6 +151,17 @@ export async function launch(ctx: ModuleContext, m: Machine, spec: BrowserSessio
     spec.startUrl || "about:blank",
   ];
   const key = processKey(spec.id);
+  if (m.windows) {
+    // No daemon on native Windows. Like LAUNCH: a scratch profile starts empty and a kept one loses
+    // its stale DevToolsActivePort (a fixed script; the path travels in the environment).
+    const reset = keep ? "Remove-Item -LiteralPath (Join-Path $env:HATO_PROFILE 'DevToolsActivePort') -Force -ErrorAction SilentlyContinue"
+      : "Remove-Item -LiteralPath $env:HATO_PROFILE -Recurse -Force -ErrorAction SilentlyContinue";
+    await ctx.host.process.run(m.grant.grant, { target: m.target, executable: windowsPowerShell(ctx), args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", reset],
+      cwd: m.grant.root, env: { HATO_PROFILE: profile.replace(/\//g, "\\") } }, { timeoutMs: 30_000 }).catch(e => ctx.log.warn("reset browser profile", errMsg(e)));
+    const { handle } = await ctx.host.process.spawn(m.grant.grant, { target: m.target, executable: bin, args: flags, cwd: m.grant.root });
+    launchedAt.set(profile, Date.now());
+    return { handle, key, daemon: null, profile };
+  }
   const daemon = await daemonFor(ctx, m);
   const req = { target: m.target, executable: "sh", args: ["-c", LAUNCH, "sh", profile, bin, keep ? "0" : "1", ...flags], cwd: m.grant.root, loginShell: m.target.kind !== "local" };
   const { handle } = await ctx.host.process.spawn(m.grant.grant, daemon ? { ...req, persist: { key } } : req);
@@ -135,8 +169,28 @@ export async function launch(ctx: ModuleContext, m: Machine, spec: BrowserSessio
 }
 
 /** Wait for the DevTools port file, then return the browser websocket path and port. */
+const launchedAt = new Map<string, number>();
+
 export async function devtoolsPort(ctx: ModuleContext, m: Machine, profile: string, timeoutMs = 30_000): Promise<{ port: number; path: string }> {
   const deadline = Date.now() + timeoutMs;
+  if (m.windows) {
+    const g = await ctx.host.capabilities.request({ kind: "fs", root: m.stateDir, target: { kind: "local" }, purpose: "Read the browser's DevTools port" })
+      .catch(() => ctx.host.capabilities.request({ kind: "fs", root: profile, target: { kind: "local" } }));
+    try {
+      const since = (launchedAt.get(profile) || 0) - 2000;
+      while (Date.now() < deadline) {
+        const file = `${profile}/DevToolsActivePort`;
+        const st = await ctx.host.fs.stat(g.grant, file).catch(() => null);
+        if (st && (st.mtime == null || st.mtime * 1000 >= since)) {
+          const r = await ctx.host.fs.read(g.grant, file, 4096).catch(() => null);
+          const [port, path] = (r?.text || "").split(/\r?\n/).map(s => s.trim());
+          if (/^\d+$/.test(port || "") && path?.startsWith("/devtools/browser/")) return { port: Number(port), path };
+        }
+        await sleep(250);
+      }
+    } finally { await ctx.host.capabilities.release(g.grant).catch(() => {}); }
+    throw new Error("The browser did not open its DevTools port in time");
+  }
   while (Date.now() < deadline) {
     const r = await sh(ctx, m, 'cat "$1/DevToolsActivePort" 2>/dev/null', [profile], 10_000).catch(() => null);
     const [port, path] = (r?.stdout || "").split("\n").map(s => s.trim());

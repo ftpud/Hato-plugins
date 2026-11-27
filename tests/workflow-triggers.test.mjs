@@ -8,7 +8,7 @@ const sdk = fileURLToPath(new URL("../../sdk", import.meta.url));
 // Trigger helpers only use runScript to create FIFOs; tests do not reach it.
 const stubProcs = { name: "stub-procs", setup(b) {
   b.onResolve({ filter: /^\.\/procs$/ }, () => ({ path: "procs", namespace: "stub" }));
-  b.onLoad({ filter: /.*/, namespace: "stub" }, () => ({ contents: "export const runScript = async (...a) => globalThis.runScriptStub ? globalThis.runScriptStub(...a) : ({ code: 1, stdout: '', stderr: 'stub' });", loader: "js" }));
+  b.onLoad({ filter: /.*/, namespace: "stub" }, () => ({ contents: "export const runScript = async (...a) => globalThis.runScriptStub ? globalThis.runScriptStub(...a) : ({ code: 1, stdout: '', stderr: 'stub' }); export const createWindowsFile = async () => ({ code: 1, stdout: '', stderr: 'stub' });", loader: "js" }));
 } };
 const load = async (path, plugins = []) => import("data:text/javascript;base64," + Buffer.from((await build({ entryPoints: [fileURLToPath(new URL(path, import.meta.url))], bundle: true, format: "esm", write: false, alias: { "@hato/sdk": sdk }, plugins })).outputFiles[0].text).toString("base64"));
 const triggers = await load("../modules/services/workflow-runner/src/triggers.ts", [stubProcs]);
@@ -117,7 +117,7 @@ test("file trigger fails to arm when the file is missing and creation is off", a
 const stubEngineDeps = { name: "stub-engine-deps", setup(b) {
   b.onResolve({ filter: /^\.\/(procs|mcp)$/ }, a => ({ path: a.path, namespace: "stub-engine" }));
   b.onLoad({ filter: /.*/, namespace: "stub-engine" }, a => ({ loader: "js", contents: a.path === "./procs"
-    ? "export const appAction = async () => ({}); export const runScript = async (_c, _r, _cmd, input) => { (globalThis.scriptCalls ||= []).push({ input, at: Date.now() }); await new Promise(r => setTimeout(r, 40)); return { code: 0, stdout: 'done ' + input, stderr: '' }; };"
+    ? "export const appAction = async () => ({}); export const createWindowsFile = async () => ({ code: 1, stdout: '', stderr: 'stub' }); export const runScript = async (_c, _r, _cmd, input) => { (globalThis.scriptCalls ||= []).push({ input, at: Date.now() }); await new Promise(r => setTimeout(r, 40)); return { code: 0, stdout: 'done ' + input, stderr: '' }; };"
     : "export const issueEndpoint = async () => ({}); export const revokeWhere = async () => {};" }));
 } };
 const engine = await load("../modules/services/workflow-runner/src/engine.ts", [stubEngineDeps]);

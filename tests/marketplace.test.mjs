@@ -1,4 +1,5 @@
 import {test} from 'node:test';
+import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
 import {fileURLToPath} from 'node:url';
@@ -69,7 +70,7 @@ test('downloads are pinned and fully validated before one native install request
  const ctx = {modules:{call:async()=>({})},host:{
   net:{fetch:async({url})=>{
    requests.push(url);
-   if(url.endsWith('commits/main'))return {status:200,body:JSON.stringify({sha})};
+   if(/\/commits\/[^/]+$/.test(url))return {status:200,body:JSON.stringify({sha})};
    assert.ok(url.includes('/'+sha+'/'));
    if(url.endsWith('catalogue.json'))return {status:200,body:JSON.stringify({schemaVersion:1,packages:[pkg]})};
    if(url.endsWith('/manifest.json')){
@@ -88,7 +89,10 @@ test('downloads are pinned and fully validated before one native install request
  assert.equal(installs.length,1);assert.equal(installs[0].length,2);
  assert.equal(writes.length,4);
  assert.ok(members.every(m=>m.enabled),'install enables all included modules');
- assert.equal(requests.filter(url=>url.endsWith('commits/main')).length,1);
+ assert.equal(requests.filter(url=>/\/commits\/[^/]+$/.test(url)).length,1);
+ // The marketplace follows the branch named in the bundled catalogue (main when absent).
+ const branch=JSON.parse(fs.readFileSync(new URL('../plugins.catalogue.json', import.meta.url),'utf8')).branch||'main';
+ assert.ok(requests.some(url=>url.endsWith(`/commits/${branch}`)));
 });
 
 test('update discovery never treats a newer development build as an available downgrade', () => {
@@ -152,7 +156,7 @@ test('refreshing an older published catalogue preserves unpublished offers and n
   .flatMap(p=>p.modules.map(id=>({id,source:'builtin',enabled:true,active:id,metadata:{version:p.version}})));
  const before=fresh.packageRows(installed,'marketplace').map(p=>p.key);
  let broken=false;
- const ctx={modules:{call:async()=>({})},host:{net:{fetch:async({url})=>({status:broken?503:200,body:JSON.stringify(url.endsWith('commits/main')?{sha:'b'.repeat(40)}:remote)})}}};
+ const ctx={modules:{call:async()=>({})},host:{net:{fetch:async({url})=>({status:broken?503:200,body:JSON.stringify(/\/commits\/[^/]+$/.test(url)?{sha:'b'.repeat(40)}:remote)})}}};
  await fresh.refreshMarket(ctx);
  assert.deepEqual(fresh.packageRows(installed,'marketplace').map(p=>p.key),before);
  assert.deepEqual(fresh.availableUpdates(installed),[],'an older published catalogue does not downgrade installed development packages');
@@ -175,7 +179,7 @@ for(const corrupt of [false,true])test(`unpublished SAP plugin installs from pre
   modules:{sourceInfo:async()=>({repoRoot:localRoot})},env:{info:()=>({dataDir:'/fixture-data'})},
   capabilities:{request:async args=>{requests.push(args);return {grant:args.write?'write':'local-read'};},release:async g=>releases.push(g)},
   net:{fetch:async({url})=>{
-   if(url.endsWith('commits/main'))return {status:200,body:JSON.stringify({sha:'c'.repeat(40)})};
+   if(/\/commits\/[^/]+$/.test(url))return {status:200,body:JSON.stringify({sha:'c'.repeat(40)})};
    assert.ok(url.endsWith('catalogue.json'),'unpublished artifacts must not be fetched from GitHub');
    return {status:200,body:JSON.stringify(remote)};
   }},

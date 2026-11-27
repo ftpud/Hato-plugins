@@ -3,6 +3,8 @@ import type { ModuleContext, PluginInfo, TreeRow, UiNode } from '@hato/sdk/types
 import { sha256HexAsync } from '@hato/sdk/sha256';
 import bundled from '../../../../plugins.catalogue.json';
 export const REPOSITORY = 'ftpud/Hato-plugins';
+/** Plugin branch this build follows for updates: the catalogue's `branch` (e.g. `experimental`), else `main`. */
+export const BRANCH: string = /^[A-Za-z0-9._\/-]{1,100}$/.test(String((bundled as any).branch || '')) ? (bundled as any).branch : 'main';
 export interface Package { id:string; name:string; type:string; core:boolean; author:string; description:string; version:string; coreVersion:string; dependencies:Record<string,string>; modules:string[]; artifacts?: {id:string; manifest:string; bundle:string; manifestSha256?:string; bundleSha256?:string}[] }
 export function satisfies(version:string, range:string):boolean {
   const parse=(s:string)=> /^\d+\.\d+\.\d+$/.test(s) ? s.split('.').map(Number) : null;
@@ -69,7 +71,7 @@ export function pluginBrowserAction(action: string, value: string) {
 export async function refreshMarket(ctx:ModuleContext){
   receipts=(await ctx.modules.call('persistence','settings.get',{key:'plugins.receipts.v1'}))||{};
   const get=async(url:string)=>{const r=await ctx.host.net.fetch({url,maxBytes:2*1024*1024});if(r.status!==200)throw Error(`Marketplace HTTP ${r.status}`);return JSON.parse(r.body);};
-  const commit=await get(`https://api.github.com/repos/${REPOSITORY}/commits/main`);
+  const commit=await get(`https://api.github.com/repos/${REPOSITORY}/commits/${encodeURIComponent(BRANCH)}`);
   if(!/^[a-f0-9]{40}$/.test(commit.sha))throw Error('Invalid repository revision');
   const nextBase=`https://raw.githubusercontent.com/${REPOSITORY}/${commit.sha}/`;
   const cat=await get(nextBase+'catalogue.json');
@@ -217,6 +219,7 @@ export function marketNodes(plugins: PluginInfo[], busy: boolean, renderPlugin: 
   return [{ type: 'tabs', key: 'plugin-tabs', height: 474, style: { gap: 12 }, tabs: [{ key: 'marketplace', label: 'Marketplace' }, { key: 'installed', label: 'Installed' }, { key: 'builtin', label: 'System' }], active: tab, action: 'plugin:marketTab', children: [{ type: 'column', key: tab, height: 430, gap: 0, style: { borderWidth: 1, borderColor: 'border', radius: 8 }, children: [
     { type: 'row', key: 'toolbar', gap: 8, padding: 12, style: { borderBottom: 1, borderColor: 'border' }, children: [
       { type: 'textInput', key: 'plugin-search', ...filterInput, value: search, placeholder: 'Search plugins…', changeAction: 'plugin:marketSearch', grow: true },
+      { type: 'label', key: 'branch', text: `Branch: ${BRANCH}`, size: 'xs', color: BRANCH === 'main' ? 'muted' : 'warning', selectable: true },
       { type: 'button', key: 'refresh', text: 'Refresh', action: 'plugin:marketRefresh', disabled: busy, small: true },
       ...(availableUpdates(plugins).length ? [{type:'button',key:'update-all',text:`Update all (${availableUpdates(plugins).length})`,action:'plugin:marketUpdateAll',disabled:busy,small:true,variant:'primary'} as UiNode] : []),
       ...(tab === 'installed' ? [{type:'button',key:'folder',text:'Install from folder…',action:'plugin:install',disabled:busy,small:true} as UiNode] : []),

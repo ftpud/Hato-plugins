@@ -132,11 +132,13 @@ export default {
       try {
         let result: any;
         try {
-          result = await run(executablePath ?? 'opencode', API_ARGS, desc.location !== 'local');
+          // Windows: acp passes node.exe plus the npm shim's entry script as leading arguments.
+          const leading: string[] = Array.isArray(a.executableArgs) ? a.executableArgs.filter((x: unknown) => typeof x === 'string') : [];
+          result = await run(executablePath ?? 'opencode', [...leading, ...API_ARGS], desc.location !== 'local');
           if (result.code === 127) throw new Error(result.stderr);
         } catch (error) {
           // An explicit path identifies the same binary/account as chat; only discover PATH when absent.
-          if (executablePath != null || !MISSING.test(errorText(error))) throw error;
+          if (executablePath != null || !MISSING.test(errorText(error)) || (desc.location === 'local' && ctx.host?.env?.info?.().platform === 'windows')) throw error;
           // GUI and non-interactive shells often miss npm/bun/nvm bin directories.
           const retry = await run('sh', ['-c', FALLBACK_SCRIPT, 'sh', ...API_ARGS], desc.location !== 'local').catch((e) => e);
           if (retry instanceof Error || retry.code === 127) {

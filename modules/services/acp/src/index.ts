@@ -11,6 +11,8 @@ import { reportedUsage, type ReportedUsage } from "@hato/sdk/context-usage";
 import { type LimitProvider, type LimitsSnapshot } from "@hato/sdk/usage-limits";
 import type { AppModule, Handle, ModuleContext } from "@hato/sdk/types";
 import { errMsg, JsonRpcPeer, rpcError, targetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
+import { firstExistingFile, resolveWindowsExecutable, shellPrograms, workspaceOs } from "@hato/sdk/platform";
+import { windowsSupportOf, type WindowsSupport } from "@hato/sdk/agent-providers";
 
 const PROTOCOL_VERSION = 1;
 async function providers(ctx: ModuleContext) { return agentProviders((await ctx.host.plugins.list()).plugins); }
@@ -168,6 +170,8 @@ interface Conn {
   mcp: { enabled: boolean; status: string; selection?: string[] };
   mcpServers: any[];
   executablePath: string;
+  /** Program and leading arguments that start the adapter (Windows: node.exe + entry script). */
+  launchPrefix?: { executable: string; args: string[] };
   startedAt: number;
 }
 
@@ -218,14 +222,15 @@ async function probeLimits(ctx: ModuleContext, providerId: LimitProvider, worksp
   if (det.pathEnv) env.PATH = det.pathEnv;
   const envRemove = await environmentPolicy(ctx, profile);
   for (const key of envRemove) delete env[key];
-  const execution = { workspaceId, executablePath: desc.location === "local" ? det.path : profile.executable, env, envRemove, cwd: desc.rootAbsolutePath };
+  const start = startWith(desc, det, profile.executable);
+  const execution = { workspaceId, executablePath: start.executable, executableArgs: start.args, env, envRemove, cwd: desc.rootAbsolutePath };
   if (definition.usageCommand.startsWith("module:")) {
     return ctx.modules.call(definition.module, definition.usageCommand.slice(7), execution);
   }
   const g = await workspaceGrant(ctx, desc, "process");
   const proc = await ctx.host.process.spawn(g.grant, {
     target: await targetFor(ctx, desc), executable: execution.executablePath,
-    args: profile.args || [], cwd: desc.rootAbsolutePath, env, envRemove, loginShell: desc.location !== "local",
+    args: [...start.args, ...(profile.args || [])], cwd: desc.rootAbsolutePath, env, envRemove, loginShell: desc.location !== "local",
   });
   const peer = new JsonRpcPeer((line) => ctx.host.process.write(proc.handle, line + "\n"), 1);
   let text = ""; const updates: any[] = [];
@@ -278,10 +283,47 @@ async function resolveProfile(ctx: ModuleContext, id: string, machineId: string)
   return p;
 }
 
+interface Detected { found: boolean; path: string; pathEnv: string | null; /** Windows: how to start it without cmd.exe. */ launch?: { executable: string; args: string[] } }
+
+const warnedUntested = new Set<string>();
+
+/**
+ * Native Windows: apply the provider's declared support. Unsupported agents stop with their note,
+ * untested ones warn once, and required tools (Git Bash) are located and passed in the agent's env.
+ */
+async function windowsRequirements(ctx: ModuleContext, grant: Handle, desc: WorkspaceDescriptor, profile: any): Promise<Record<string, string>> {
+  const support: WindowsSupport = profile.windows || windowsSupportOf(undefined);
+  const name = profile.name || profile.id;
+  if (support.status === "unsupported")
+    throw new Error(`${name} does not support native Windows projects${support.note ? `: ${support.note}` : "."} Open this project in WSL to use it.`);
+  if (support.status === "untested" && profile.provider && !warnedUntested.has(profile.provider)) {
+    warnedUntested.add(profile.provider);
+    ctx.host.ui.toast("warn", `${name} has not been tested on native Windows yet. If it misbehaves, open the project in WSL.`);
+  }
+  const env: Record<string, string> = {};
+  for (const r of support.requires || []) {
+    const found = await firstExistingFile(ctx, grant, desc.rootAbsolutePath, shellPrograms(ctx, { kind: "git-bash" }));
+    if (!found) throw new Error(`${name} needs Git for Windows (Git Bash) on this PC. Install it from https://git-scm.com/download/win, then reconnect.`);
+    if (r.env) env[r.env] = found;
+  }
+  return env;
+}
+
+/** Program and leading arguments to start a detected tool (`configured` is the name used remotely). */
+function startWith(desc: WorkspaceDescriptor, det: Detected, configured: string): { executable: string; args: string[] } {
+  if (det.launch) return det.launch;
+  return { executable: desc.location !== "local" ? configured : det.path, args: [] };
+}
+
 /** Find the adapter executable on the workspace machine (login-shell PATH). Never installs anything. */
-export async function detect(ctx: ModuleContext, desc: WorkspaceDescriptor, executable: string) {
+export async function detect(ctx: ModuleContext, desc: WorkspaceDescriptor, executable: string): Promise<Detected> {
   const g = await workspaceGrant(ctx, desc, "process");
   const target = await targetFor(ctx, desc);
+  if (workspaceOs(ctx, desc) === "windows") {
+    // Registry PATH (finds tools installed after Hato started); npm shims start node.exe directly.
+    const r = await resolveWindowsExecutable(ctx, g.grant, desc.rootAbsolutePath, executable);
+    return r ? { found: true, path: r.path, pathEnv: r.pathEnv, launch: r.launch } : { found: false, path: "", pathEnv: null };
+  }
   if (executable.startsWith("/") && desc.location === "local") {
     const r = await ctx.host.process.run(g.grant, { target, executable: "test", args: ["-x", executable], cwd: desc.rootAbsolutePath }, { timeoutMs: 15000 });
     return { found: r.code === 0, path: executable, pathEnv: null as string | null };
@@ -319,13 +361,15 @@ async function npmRunner(ctx: ModuleContext, desc: WorkspaceDescriptor) {
   const target = await targetFor(ctx, desc);
   const env: Record<string, string> = {};
   if (det.pathEnv) env.PATH = det.pathEnv;
-  const npm = desc.location !== "local" ? "npm" : det.path;
+  const start = startWith(desc, det, "npm"), npm = start.executable;
   const run = (args: string[], timeoutMs: number) => ctx.host.process.run(g.grant, {
-    target, executable: npm, args, cwd: desc.rootAbsolutePath, env, loginShell: desc.location !== "local",
+    target, executable: npm, args: [...start.args, ...args], cwd: desc.rootAbsolutePath, env, loginShell: desc.location !== "local",
   }, { timeoutMs, limitBytes: 1 << 20 });
   /** Where `npm install -g` should go: null for npm's global prefix when this user can write to it,
    *  otherwise `$HOME/.local` (bin in ~/.local/bin) so installing never needs root or sudo. */
   const userPrefix = async (): Promise<string | null> => {
+    // Windows: npm's global prefix is %APPDATA%\npm, which the user owns.
+    if (workspaceOs(ctx, desc) === "windows") return null;
     const script = 'g=$("$1" prefix -g) || exit 1; m="$g/lib/node_modules"; '
       + 'if [ -w "$m" ] || { [ ! -e "$m" ] && [ -w "$g" ]; }; then printf "\\n__HATO_PREFIX__=\\n"; else printf "\\n__HATO_PREFIX__=%s\\n" "$HOME/.local"; fi';
     const r = await ctx.host.process.run(g.grant, { target, executable: "sh", args: ["-c", script, "hato-npm-prefix", npm], cwd: desc.rootAbsolutePath, env, loginShell: desc.location !== "local" }, { timeoutMs: 30000 });
@@ -386,18 +430,20 @@ async function startConnection(ctx: ModuleContext, a: any) {
   const g = await workspaceGrant(ctx, desc, "process");
   const env: Record<string, string> = { ...(profile.envRefs || {}) };
   if (det.pathEnv) env.PATH = det.pathEnv;
+  if (workspaceOs(ctx, desc) === "windows") Object.assign(env, await windowsRequirements(ctx, g.grant, desc, profile));
   const envRemove = await environmentPolicy(ctx, profile);
   for (const key of envRemove) delete env[key];
   const dirs = additionalDirectories(a.additionalDirectories);
   const preparedMcp = profile.mcpLaunch ? await sessionMcp(ctx, a, desc) : null;
-  let launch = providerMcpLaunch(undefined, desc.location !== "local" ? profile.executable : det.path, profile.args || [], env, preparedMcp?.servers || []);
+  const start = startWith(desc, det, profile.executable);
+  let launch = providerMcpLaunch(undefined, start.executable, [...start.args, ...(profile.args || [])], env, preparedMcp?.servers || []);
   let spawned;
   try {
-    launch = providerMcpLaunch(profile.mcpLaunch, launch.executable, profile.args || [], env, preparedMcp?.servers || []);
+    launch = providerMcpLaunch(profile.mcpLaunch, launch.executable, [...start.args, ...(profile.args || [])], env, preparedMcp?.servers || []);
     if (launch.wrapped) {
       const node = await detect(ctx, desc, "node");
       if (!node.found) throw new Error("Node.js is required on the workspace machine for this provider's MCP launcher");
-      launch = { ...launch, executable: desc.location !== "local" ? "node" : node.path,
+      launch = { ...launch, executable: startWith(desc, node, "node").executable,
         env: { ...launch.env, ...(node.pathEnv ? { PATH: [node.pathEnv, launch.env.PATH].filter(Boolean).join(desc.location !== "local" || ctx.host.env.info().platform !== "windows" ? ":" : ";") } : {}) } };
     }
     spawned = await ctx.host.process.spawn(g.grant, {
@@ -415,7 +461,7 @@ async function startConnection(ctx: ModuleContext, a: any) {
     agentInfo: null, agentCapabilities: null, steering: false, authMethods: [], authProcess: null,
     configOptions: null, modes: null, models: null, commands: [], usage: null, turnUsage: null, sessionInfo: null, childSessions: {}, compaction: null,
     status: "starting", error: null, stderrTail: "", activeTurn: null, pendingPermissions: new Map(), pendingElicitations: new Map(),
-    mcp: { enabled: !!a.mcp, status: a.mcp ? "pending" : "disabled" }, mcpServers: [], executablePath: det.path, startedAt: Date.now(),
+    mcp: { enabled: !!a.mcp, status: a.mcp ? "pending" : "disabled" }, mcpServers: [], executablePath: det.path, launchPrefix: start, startedAt: Date.now(),
   };
   conns.set(c.conversationId, c);
   await wire(ctx, c, 1);
@@ -918,7 +964,8 @@ const mod: AppModule = {
           const extra = terminal.args ?? (method._meta?.["terminal-auth"] ? ["--login"] : []);
           if (!Array.isArray(extra) || extra.length > 128 || extra.some(v => typeof v !== "string" || v.includes("\0") || v.length > 16384)) throw new Error("Invalid authentication arguments");
           // Use the configured provider invocation; descriptors never choose a command.
-          const launch = providerMcpLaunch(profile.mcpLaunch, desc.location === "local" ? c.executablePath : profile.executable, profile.args || [], configured.env, []);
+          const start = c.launchPrefix || { executable: desc.location === "local" ? c.executablePath : profile.executable, args: [] };
+          const launch = providerMcpLaunch(profile.mcpLaunch, start.executable, [...start.args, ...(profile.args || [])], configured.env, []);
           const token = crypto.randomUUID();
           c.authPlan = { token, methodId: method.id, desc, launch, args: [...launch.args, ...extra], envKeys: configured.keys, expires: Date.now() + 300000 };
           return { outcome: "prepared", confirmToken: token, methodId: method.id, label: method.name || method.id, command: launch.executable, args: c.authPlan.args, envKeys: configured.keys, display: [launch.executable, ...c.authPlan.args.map((a: string) => JSON.stringify(a))].join(" ") };
@@ -1061,6 +1108,7 @@ const mod: AppModule = {
       for (const definition of definitions) {
         const ad = { id: definition.id, name: definition.profile.name, ...definition.adapter };
         const row: any = { id: ad.id, name: ad.name, pkg: ad.pkg, bin: ad.bin, machineId: desc.machineId, installed: null, latest: null, path: null, error: null,
+          windows: workspaceOs(ctx, desc) === "windows" ? windowsSupportOf(definition) : null,
           prefix, installCommand: "npm " + installArgs(ad.pkg, prefix).join(" ") };
         try {
           if (!npm.ok) throw new Error(npm.error);

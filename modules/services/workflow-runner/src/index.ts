@@ -4,6 +4,7 @@
 // going while the desktop is closed or disconnected. The desktop gateway (`workflows`) resolves
 // providers and workspace details and is the only caller of the mutating methods.
 import type { AppModule, ModuleContext, Handle } from "@hato/sdk/types";
+import { isAbsolutePath } from "@hato/sdk/platform";
 import { errMsg } from "@hato/sdk/runtime";
 import {
   WORKFLOW_REFERENCE, WORKFLOW_RUNNER_VERSION, type WorkflowActiveRun, type WorkflowDefinition, type WorkflowRun, type WorkflowRunEnv,
@@ -230,7 +231,7 @@ async function runToolBody(s: Extract<Scope, { kind: "run" }>, name: string, a: 
     const allowed = t.app?.actions?.length ? t.app.actions : ["start", "status", "kill", "tail"];
     const act = action || t.app?.action || "start";
     if (!allowed.includes(act as any)) throw new Error(`Run App '${t.label}' allows ${allowed.join(", ")}`);
-    const app = await appAction(ctxRef, x.env.root, t.app!.name, t.command || "", act, Math.min(Math.max(Number(a.lines) || t.app?.lines || 100, 1), 10_000));
+    const app = await appAction(ctxRef, x.env.root, t.app!.name, t.command || "", act, Math.min(Math.max(Number(a.lines) || t.app?.lines || 100, 1), 10_000), x.env);
     const st = stateOf(x, t.id); st.output = JSON.stringify(app); x.outputs.set(t.id, st.output); st.status = "succeeded"; st.runs++; touch(x);
     return { app };
   }
@@ -316,7 +317,7 @@ const mod: AppModule = {
     async start(ctx, a, meta) {
       gateway(meta);
       const env: WorkflowRunEnv = a.env;
-      if (!env?.root?.startsWith("/") || !env.workspaceId || !Array.isArray(env.profiles)) throw new Error("Invalid workflow run environment");
+      if (!env?.root || !isAbsolutePath(env.root) || !env.workspaceId || !Array.isArray(env.profiles)) throw new Error("Invalid workflow run environment");
       const { definition: def } = await definition(String(a.projectId), String(a.workflowId));
       const issues = blockingIssues(validateWorkflow(def, { profiles: env.profiles, mcps: env.mcpServers }));
       if (issues.length) throw new Error(`Fix the workflow first: ${issues.slice(0, 3).map(i => i.message).join("; ")}`);

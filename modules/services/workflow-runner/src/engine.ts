@@ -220,7 +220,7 @@ export async function invoke(x: Exec, id: string, input: string, ancestors: stri
       case "meeting": output = JSON.stringify(meetingTail(s, 20)); break;
       case "terminal_control": case "task_controls": case "mcp": case "browser": output = `${b.label} adds tools to connected agents.`; break;
       case "script": output = await script(x, b, s, input); break;
-      case "run_app": output = JSON.stringify(await appAction(ctx, x.env.root, b.app!.name, b.command || "", b.app?.action || "start", b.app?.lines || 100)); break;
+      case "run_app": output = JSON.stringify(await appAction(ctx, x.env.root, b.app!.name, b.command || "", b.app?.action || "start", b.app?.lines || 100, x.env)); break;
       case "text_input": output = b.prompt.trim() ? rendered() : input; break;
       case "http_trigger": case "socket_trigger": case "file_trigger": {
         // Reached by a connection or tool call: (re)arm the trigger and return without followers.
@@ -431,7 +431,7 @@ async function script(x: Exec, b: WorkflowBlock, s: WorkflowBlockState, input: s
   log(s, "prompt", input);
   const timeoutMs = Math.min(Math.max((b.timeoutSeconds ?? 1800) * 1000, 1000), 86_400_000);
   let current: Handle | null = null;
-  const r = await runScript(ctx, x.env.root, b.command || "", input, { timeoutMs, track: h => { if (current) x.procs.delete(current); current = h; if (h) x.procs.add(h); } });
+  const r = await runScript(ctx, x.env.root, b.command || "", input, { timeoutMs, workspace: x.env, track: h => { if (current) x.procs.delete(current); current = h; if (h) x.procs.add(h); } });
   assertActive(x);
   if (r.code !== 0) throw new Error(`Script exited with ${r.code ?? "a signal"}${r.stderr.trim() ? `: ${preview(r.stderr.trim(), 4000)}` : r.stdout.trim() ? `: ${preview(r.stdout.trim(), 4000)}` : ""}`);
   return r.stdout + (r.stderr.trim() ? `\n[stderr]\n${r.stderr}` : "");

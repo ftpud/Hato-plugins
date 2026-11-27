@@ -1,18 +1,23 @@
 // Script blocks and named Run App processes on the daemon machine.
 import type { ModuleContext, Handle } from "@hato/sdk/types";
 import { errMsg } from "@hato/sdk/runtime";
+import { executionPolicyHint, slashPath, userCommandLaunch, windowsPowerShell } from "@hato/sdk/platform";
 
-const shell = (ctx: ModuleContext) => ctx.host.env.info().platform === "macos" ? "/bin/zsh" : "/bin/sh";
+/** The workspace a run belongs to, for its shell choice. The runner spawns on its own machine, so
+ *  the workspace is local to it (a Linux/macOS daemon resolves to the login shell). */
+export interface RunnerWorkspace { workspaceId: string; machineId: string }
+const shellWorkspace = (w?: RunnerWorkspace | null) => w ? { id: w.workspaceId, machineId: w.machineId, location: "local" } : null;
 
 export interface ScriptResult { code: number | null; stdout: string; stderr: string }
 
-/** Run `command` through a login shell in `root`. The input arrives on stdin and in $HATO_WORKFLOW_INPUT. */
-export async function runScript(ctx: ModuleContext, root: string, command: string, input: string, opts: { timeoutMs: number; track: (h: Handle | null) => void }): Promise<ScriptResult> {
+/** Run `command` through the user's shell (login shell on Linux/macOS) in `root`. The input arrives on stdin and in $HATO_WORKFLOW_INPUT. */
+export async function runScript(ctx: ModuleContext, root: string, command: string, input: string, opts: { timeoutMs: number; track: (h: Handle | null) => void; workspace?: RunnerWorkspace | null }): Promise<ScriptResult> {
   const grant = await ctx.host.capabilities.request({ kind: "process", root, target: { kind: "local" } });
   let handle: Handle;
   try {
     const env = { HATO_WORKFLOW_INPUT: input, HATOPAD_WORKFLOW_INPUT: input, TERM: "dumb" };
-    handle = (await ctx.host.process.spawn(grant.grant, { target: { kind: "local" }, executable: shell(ctx), args: ["-lc", command], cwd: root, env })).handle;
+    const launch = await userCommandLaunch(ctx, grant.grant, root, shellWorkspace(opts.workspace), command);
+    handle = (await ctx.host.process.spawn(grant.grant, { target: { kind: "local" }, ...launch, cwd: root, env })).handle;
   } finally { await ctx.host.capabilities.release(grant.grant); }
   opts.track(handle);
   let stdout = "", stderr = "";
@@ -27,7 +32,8 @@ export async function runScript(ctx: ModuleContext, root: string, command: strin
     const exit = await ctx.host.process.wait(handle);
     // Let the final stream chunks arrive before reading the buffers.
     await new Promise(r => setTimeout(r, 50));
-    return { code: exit?.code ?? null, stdout, stderr };
+    const hint = exit?.code ? executionPolicyHint(stderr + stdout.slice(-4000)) : null;
+    return { code: exit?.code ?? null, stdout, stderr: hint ? `${stderr}\n${hint}` : stderr };
   } finally {
     clearTimeout(timer); opts.track(null);
     for (const s of subs) await s.close().catch(() => {});
@@ -48,7 +54,7 @@ function appState(a: App | undefined, name = "", lines = 0) {
   return { name: a.name, status: a.status, pid: a.pid, exitCode: a.exitCode, startedAt: a.startedAt, command: a.command, ...(out !== undefined ? { output: out } : {}) };
 }
 
-export async function appAction(ctx: ModuleContext, root: string, name: string, command: string, action: string, lines = 100) {
+export async function appAction(ctx: ModuleContext, root: string, name: string, command: string, action: string, lines = 100, workspace?: RunnerWorkspace | null) {
   const k = key(root, name), current = apps.get(k);
   if (action === "status") return appState(current, name);
   if (action === "tail") return appState(current, name, lines);
@@ -66,7 +72,8 @@ export async function appAction(ctx: ModuleContext, root: string, name: string, 
   apps.set(k, app);
   const grant = await ctx.host.capabilities.request({ kind: "process", root, target: { kind: "local" } });
   try {
-    const spawned = await ctx.host.process.spawn(grant.grant, { target: { kind: "local" }, executable: shell(ctx), args: ["-lc", command], cwd: root, env: { TERM: "dumb" } });
+    const launch = await userCommandLaunch(ctx, grant.grant, root, shellWorkspace(workspace), command);
+    const spawned = await ctx.host.process.spawn(grant.grant, { target: { kind: "local" }, ...launch, cwd: root, env: { TERM: "dumb" } });
     app.handle = spawned.handle; app.pid = spawned.pid; app.status = "running";
   } catch (e) { app.status = "exited"; app.output = errMsg(e); throw e; }
   finally { await ctx.host.capabilities.release(grant.grant); }
@@ -82,4 +89,19 @@ export async function appAction(ctx: ModuleContext, root: string, name: string, 
 
 export async function killAllApps(ctx: ModuleContext) {
   for (const a of apps.values()) if (a.handle && a.status !== "exited") await ctx.host.process.terminate(a.handle, "SIGKILL").catch(() => {});
+}
+
+/**
+ * Native Windows: create an empty file (and its folders) at a workspace-relative path with a fixed
+ * Windows PowerShell script; the path travels in the environment, never in the script text.
+ */
+export async function createWindowsFile(ctx: ModuleContext, root: string, relative: string): Promise<ScriptResult> {
+  const grant = await ctx.host.capabilities.request({ kind: "process", root, target: { kind: "local" } });
+  try {
+    const script = "$ErrorActionPreference='Stop';$p=[IO.Path]::Combine($env:HATO_ROOT,$env:HATO_PATH);"
+      + "[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($p));if(-not [IO.File]::Exists($p)){[IO.File]::WriteAllBytes($p,[byte[]]@())}";
+    return await ctx.host.process.run(grant.grant, { target: { kind: "local" }, executable: windowsPowerShell(ctx),
+      args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], cwd: root,
+      env: { HATO_ROOT: root, HATO_PATH: slashPath(relative).replace(/\//g, "\\") } }, { timeoutMs: 15000 });
+  } finally { await ctx.host.capabilities.release(grant.grant).catch(() => {}); }
 }

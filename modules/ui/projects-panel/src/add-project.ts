@@ -24,12 +24,11 @@ export interface AddProjectView {
   cloudSignedIn?: boolean;
 }
 
-/** On Windows, projects live in WSL or on a Linux host; there are no local Windows projects. */
+/** On Windows a project is a native folder, a folder in a WSL distribution, or on a remote host. */
 export function sourcesFor(windows: boolean): { id: AddSource; title: string; description: string }[] {
   return [
-    windows
-      ? { id: "wsl", title: "WSL", description: "A Linux distribution on this PC" }
-      : { id: "local", title: "Local folder", description: "A folder on this computer" },
+    { id: "local", title: "Local folder", description: windows ? "A Windows folder on this PC" : "A folder on this computer" },
+    ...(windows ? [{ id: "wsl" as const, title: "WSL", description: "A Linux distribution on this PC" }] : []),
     { id: "ssh", title: "SSH host", description: "A folder on another machine" },
     { id: "cloud", title: "Cloud host", description: "A folder on an enrolled Hato Cloud host" },
   ];
@@ -104,7 +103,7 @@ const nameField = (view: AddProjectView, key: string, submit: string, placeholde
 
 function localForm(view: AddProjectView): UiNode[] {
   return [
-    field(view, "local-path", "Folder", { placeholder: "/path/to/project", submit: "addLocalPath", trailing: browse(view) }),
+    field(view, "local-path", "Folder", { placeholder: view.windows ? "C:\\Users\\you\\project" : "/path/to/project", submit: "addLocalPath", trailing: browse(view) }),
     nameField(view, "local-name", "addLocalPath", "The folder's name"),
   ];
 }
@@ -165,7 +164,9 @@ function cloudForm(view: AddProjectView): UiNode[] {
 }
 
 const FORMS: Record<AddSource, { form: (view: AddProjectView) => UiNode[]; submit: string; label: string; intro: (windows: boolean) => string }> = {
-  local: { form: localForm, submit: "addLocalPath", label: "Add project", intro: () => "Files, Git, terminals and agents run on this computer." },
+  local: { form: localForm, submit: "addLocalPath", label: "Add project", intro: (windows) => windows
+    ? "Files, Git, terminals and agents run natively on Windows. Terminals use PowerShell by default; change it in Settings → Terminals."
+    : "Files, Git, terminals and agents run on this computer." },
   wsl: { form: wslForm, submit: "addWsl", label: "Add project", intro: () => "Files, Git, terminals and agents run inside the distribution." },
   ssh: { form: sshForm, submit: "addSsh", label: "Connect & add", intro: (windows) => `Files, Git, terminals and agents run on that machine. Its host key is checked against known_hosts${windows ? " in your default WSL distribution" : ""}.` },
   cloud: { form: cloudForm, submit: "addCloud", label: "Connect & add", intro: () => "Files, Git, terminals and agents run on the enrolled host." },

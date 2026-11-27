@@ -164,7 +164,7 @@ const mod: AppModule = {
         let delimiter = "HATO_SCRIPT";
         while (args.code.split(/\r?\n/).includes(delimiter)) delimiter += "_";
         const command = `${shell} <<'${delimiter}'\n${args.code}${args.code.endsWith("\n") ? "" : "\n"}${delimiter}`;
-        await ctx.modules.call("terminals", "runCode", { workspaceId, key, command }, { timeoutMs: 10000 });
+        await ctx.modules.call("terminals", "runCode", { workspaceId, key, command, language: args.language, code: args.code }, { timeoutMs: 10000 });
         return { key };
       } finally { if (version === epoch) busy.delete(block.id); ctx.ui.invalidate(); }
     },

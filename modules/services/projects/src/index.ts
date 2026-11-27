@@ -4,6 +4,7 @@ import type { AppModule, ModuleContext } from "@hato/sdk/types";
 import { exportMcpTools } from "@hato/sdk/mcp";
 import { cloudMachineId, errMsg, projectWorkspaceId, sshFromProfile, sshProfileSpec, targetFor, workspaceGrant, wslLocation, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { parseOrder } from "@hato/sdk/settings-order";
+import { baseName, isAbsolutePath } from "@hato/sdk/platform";
 import { groupTools, pendingGroups, projectGroups } from "./groups";
 
 interface GitInfo { isGit: boolean; topLevel: string | null; hasCommits: boolean; error?: string; checkedAt: number }
@@ -67,7 +68,7 @@ async function refreshGit(ctx: ModuleContext, projectId: string) {
   ctx.events.emit("projects.changed", { projectId });
 }
 
-function basename(p: string) { const parts = p.replace(/\/+$/, "").split("/"); return parts[parts.length - 1] || p; }
+const basename = baseName;
 
 const isWindows = (ctx: ModuleContext) => ctx.host.env.info().platform === "windows";
 
@@ -92,9 +93,11 @@ const mod: AppModule = {
     // First launch: register --root (or the process cwd) when no project exists.
     const list = await ctx.modules.call("persistence", "projects.list");
     if (list.length === 0) {
-      const root = ctx.host.env.info().initialRoot;
-      // On Windows the process cwd only names a project when it is inside a WSL distribution.
-      if (root && (!isWindows(ctx) || wslLocation(root))) {
+      const info = ctx.host.env.info();
+      const root = info.initialRoot;
+      // On Windows a working directory from Explorer/Start is System32 or the install folder, not a
+      // project: register it only when given with `--root` (or when it is inside WSL).
+      if (root && (!isWindows(ctx) || info.initialRootExplicit === true || wslLocation(root))) {
         try {
           await mod.methods!.addLocal(ctx, { path: root }, { caller: "projects" });
           ctx.log.info("registered initial project", root);
@@ -219,11 +222,12 @@ const mod: AppModule = {
     async addLocal(ctx, a) {
       const path = String(a.path || "").trim();
       if (isWindows(ctx)) {
+        // A folder under \\wsl.localhost is a Linux project in that distribution; any other folder
+        // (C:\..., a network share) is a native Windows project.
         const wsl = wslLocation(path);
-        if (!wsl) throw new Error("On Windows, Hato opens projects in WSL or on a Linux host. Choose a folder under \\\\wsl.localhost, or add a WSL project.");
-        return mod.methods!.addWsl(ctx, { ...wsl, name: a.name }, { caller: "projects" });
+        if (wsl) return mod.methods!.addWsl(ctx, { ...wsl, name: a.name }, { caller: "projects" });
       }
-      if (!path.startsWith("/")) throw new Error("project path must be absolute");
+      if (!isAbsolutePath(path)) throw new Error("project path must be absolute");
       // The kernel canonicalizes and validates the root when granting.
       const g = await ctx.host.capabilities.request({ kind: "fs", root: path, target: { kind: "local" } });
       const root = g.root;

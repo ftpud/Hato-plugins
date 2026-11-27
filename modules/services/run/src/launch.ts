@@ -19,8 +19,10 @@ export async function buildTools(ctx: ModuleContext, d: WorkspaceDescriptor, cwd
   const g = await workspaceGrant(ctx, d, "fs");
   const entries = (await ctx.host.fs.list(g.grant, cwd)).entries;
   const file = (name: string) => entries.some(e => e.name === name && (e.kind === "file" || e.kind === "symlink"));
-  return { maven: file("mvnw") ? "./mvnw" : "mvn", gradle: file("gradlew") ? "./gradlew" : "gradle",
-    hasMaven: file("pom.xml") || file("mvnw"), hasGradle: file("build.gradle") || file("build.gradle.kts") || file("gradlew") };
+  // Windows wrappers are mvnw.cmd / gradlew.bat; `./mvnw` is resolved to them at launch.
+  const mvnw = file("mvnw") || file("mvnw.cmd"), gradlew = file("gradlew") || file("gradlew.bat");
+  return { maven: mvnw ? "./mvnw" : "mvn", gradle: gradlew ? "./gradlew" : "gradle",
+    hasMaven: file("pom.xml") || mvnw, hasGradle: file("build.gradle") || file("build.gradle.kts") || gradlew };
 }
 
 export async function launchCommand(ctx: ModuleContext, d: WorkspaceDescriptor, c: RunConfigDraft): Promise<Launch> {
@@ -64,7 +66,7 @@ export const JDWP_LISTENING = /Listening for transport dt_socket at address: (\d
 /** Add a JDWP agent to the JVM that runs the user's code (not the build tool's own JVM). Gradle's
  *  --debug-jvm uses its fixed port 5005 and prints the same line. */
 export function javaDebugLaunch(c: RunConfigDraft, launch: Launch): Launch {
-  const gradle = /gradlew?$/.test(launch.executable);
+  const gradle = /gradlew?(\.bat)?$/i.test(launch.executable);
   switch (c.type) {
     case "java-application": return { ...launch, args: [JDWP, ...launch.args] };
     case "spring-boot": return gradle ? { ...launch, args: [...launch.args, "--debug-jvm"] }

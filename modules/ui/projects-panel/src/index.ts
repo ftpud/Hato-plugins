@@ -429,11 +429,12 @@ const mod: AppModule = {
       case "browse": {
         const path = await run("Choosing a folder…", () => ctx.modules.call("projects", "pickFolder", {}));
         if (!path) break;
-        if (!windows) { addValues = { ...addValues, "local-path": path }; break; }
-        const location = wslLocation(path);
-        if (!location) { error = "Choose a folder under \\\\wsl.localhost, inside a WSL distribution."; break; }
+        const location = windows ? wslLocation(path) : null;
+        // A folder picked under \\wsl.localhost fills the WSL form; any other folder is a native local project.
+        if (!location) { addValues = { ...addValues, "local-path": path }; if (windows && addSource !== "local") addSource = "local"; break; }
         if (wslDistros.includes(location.distro)) wslDistro = location.distro;
         addValues = { ...addValues, "wsl-path": location.remotePath };
+        if (addSource !== "wsl") { addSource = "wsl"; await loadDistros(ctx); }
         break;
       }
       case "addLocalPath": {

@@ -42,11 +42,12 @@ async function remoteStateDir(ctx: ModuleContext, desc: WorkspaceDescriptor) {
   if (desc.location === "cloud") {
     const grant = await workspaceGrant(ctx, desc, "process");
     const result = await ctx.host.process.run(grant.grant, {
-      target: await targetFor(ctx, desc), executable: "sh", args: ["-c", 'printf "%s" "$HOME"'],
+      target: await targetFor(ctx, desc), executable: "printenv", args: ["HOME"],
       cwd: grant.root,
     }, { timeoutMs: 10000 });
-    if (result.code !== 0 || !result.stdout.startsWith("/")) throw new Error("cannot determine Cloud host home directory");
-    return `${result.stdout.replace(/\/+$/, "")}/.local/state/hato`;
+    const home = result.stdout.trim();
+    if (result.code !== 0 || !home.startsWith("/")) throw new Error("cannot determine Cloud host home directory");
+    return `${home.replace(/\/+$/, "")}/.local/state/hato`;
   }
   const c = await ctx.host.ssh.connect(sshProfileSpec(desc.ssh!));
   if (!c.home) throw new Error("cannot determine remote home directory");

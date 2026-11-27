@@ -36,6 +36,12 @@
           "tools": [
             "*"
           ]
+        },
+        "platforms": {
+          "windows": {
+            "status": "untested",
+            "note": "Not yet smoke-tested on native Windows; run the Windows adapter smoke test and record the adapter version here."
+          }
         }
       }
     ]

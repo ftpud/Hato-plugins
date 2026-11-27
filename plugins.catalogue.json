@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "branch": "experimental",
   "coreVersion": "0.1.0",
   "packages": [
     {

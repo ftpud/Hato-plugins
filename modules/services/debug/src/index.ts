@@ -3,6 +3,7 @@
 // launches here and receives output/state through `run.debugReport`.
 import type { AppModule, ModuleContext } from "@hato/sdk/types";
 import { errMsg, targetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
+import { isAbsolutePath, slashPath, workspaceOs } from "@hato/sdk/platform";
 import { exportMcpTools } from "@hato/sdk/mcp";
 import { DEBUG_EVENTS, DEBUG_TYPES, type Breakpoint, type BreakpointStatus, type DebugFrame, type DebugSessionInfo, type DebugThread, type DebugVariable, type ExceptionBreakpoints } from "@hato/sdk/debug";
 import { Relay, type DapMessage } from "./dap";
@@ -24,12 +25,18 @@ const breakpointWrites = new Map<string, Promise<void>>();
 let mcp: ReturnType<typeof exportMcpTools> | undefined;
 
 // ---------- helpers ----------
-const abs = (d: WorkspaceDescriptor, rel: string) => rel.startsWith("/") ? rel : `${d.rootAbsolutePath.replace(/\/$/, "")}/${rel}`;
+const abs = (d: WorkspaceDescriptor, rel: string) => isAbsolutePath(rel) ? rel : `${d.rootAbsolutePath.replace(/\/$/, "")}/${rel}`;
+/** Adapters on Windows report `C:\x\a.ts` (any drive-letter case); the root is `C:/x`. */
 function rel(d: WorkspaceDescriptor, path: string | undefined | null): string | null {
   if (!path) return null;
   const root = d.rootAbsolutePath.replace(/\/$/, "") + "/";
+  if (/^[A-Za-z]:[\\/]/.test(path)) {
+    const p = slashPath(path);
+    return p.toLowerCase().startsWith(root.toLowerCase()) ? p.slice(root.length) : p;
+  }
   return path.startsWith(root) ? path.slice(root.length) : path;
 }
+export const pythonFor = (ctx: ModuleContext, d: WorkspaceDescriptor) => workspaceOs(ctx, d) === "windows" ? "python" : "python3";
 async function workspace(ctx: ModuleContext, workspaceId: string): Promise<WorkspaceDescriptor> {
   if (typeof workspaceId !== "string" || !workspaceId) throw new Error("Select a workspace");
   return ctx.modules.call("workspace", "resolve", { workspaceId });
@@ -109,7 +116,7 @@ const allSessions = (workspaceId: string) => [...sessions.values()].filter(s => 
 async function adapters(ctx: ModuleContext, d: WorkspaceDescriptor, names: AdapterId[], install: boolean): Promise<Record<string, string | null>> {
   const grant = await workspaceGrant(ctx, d, "process");
   const request = { action: install ? "install" : "check", adapters: Object.fromEntries(names.map(n => [n, ADAPTERS[n]])) };
-  const r = await ctx.host.process.run(grant.grant, { target: await targetFor(ctx, d), executable: "python3", args: ["-c", INSTALL_SCRIPT, JSON.stringify(request)],
+  const r = await ctx.host.process.run(grant.grant, { target: await targetFor(ctx, d), executable: pythonFor(ctx, d), args: ["-c", INSTALL_SCRIPT, JSON.stringify(request)],
     cwd: d.rootAbsolutePath, env: {}, loginShell: d.location !== "local" }, { timeoutMs: install ? 10 * 60 * 1000 : 60000, limitBytes: 65536 });
   const line = (r.stdout || "").split("\n").find(l => l.startsWith(INSTALL_MARKER));
   if (!line) throw new Error(`Python 3 is required on ${d.machineId} to install the debugger. ${(r.stderr || "").slice(-500)}`);
@@ -254,7 +261,7 @@ async function launchJs(ctx: ModuleContext, a: LaunchArgs) {
   const s = newSession(ctx, d, a.id, a.name, "js");
   try {
     const server = await adapterPath(ctx, s, "js-debug");
-    const node = a.launch.executable.endsWith("node") ? a.launch.executable : "node";
+    const node = /node(\.exe)?$/i.test(a.launch.executable) ? a.launch.executable : "node";
     s.relay = await Relay.start(ctx, d, { spawn: { command: [node, server, "0", "127.0.0.1"], cwd: a.launch.cwd, portPattern: ":(\\d+)\\s*$" } }, handlers(ctx, s));
     const root: Conn = { id: s.nextConn++, caps: {}, parent: null, ready: false, threads: new Map() };
     s.conns.set(root.id, root);
@@ -421,7 +428,7 @@ async function operation(ctx: ModuleContext, d: WorkspaceDescriptor, op: Op, a: 
     case "breakpointsSet": {
       const list = (await loadBreakpoints(ctx, d.id)).map(bp => ({ ...bp }));
       const path = typeof a.path === "string" ? rel(d, a.path.replace(/^\.\//, "")) : null;
-      if (!path || path.startsWith("/") || path.split("/").includes("..")) throw new Error("Use a workspace-relative file path");
+      if (!path || isAbsolutePath(path) || slashPath(path).split("/").includes("..")) throw new Error("Use a workspace-relative file path");
       if (!Number.isInteger(a.line) || a.line < 0) throw new Error("line must be a zero-based line number");
       let bp = list.find(b => (a.breakpointId && b.id === a.breakpointId) || (b.path === path && b.line === a.line));
       if (!bp) { if (list.length >= 2000) throw new Error("Too many breakpoints"); bp = { id: crypto.randomUUID(), path, line: a.line, enabled: true }; list.push(bp); }
