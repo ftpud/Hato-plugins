@@ -1,7 +1,8 @@
+import { RUNNABLE_CODE_LANGUAGES } from "@hato/sdk/platform";
 /** Keep fenced blocks intact when composing Markdown with adjacent module-owned actions. */
 export interface ShellBlock { start: number; end: number; language: string; code: string }
-/** POSIX shells, plus PowerShell and cmd blocks for native Windows terminals (the terminals service checks the shell). */
-const RUNNABLE_LANGUAGES = ["sh", "shell", "bash", "zsh", "powershell", "pwsh", "ps1", "cmd", "bat", "batch"];
+/** Fence languages some shell profile runs (the terminals service checks the terminal's shell). */
+const RUNNABLE_LANGUAGES = RUNNABLE_CODE_LANGUAGES;
 export function shellBlocks(text: string): ShellBlock[] {
   const blocks: ShellBlock[] = [];
   let fence: { start: number; body: number; mark: string; length: number; language: string; indent: number } | null = null;

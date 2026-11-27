@@ -1,5 +1,6 @@
 // DAP client over the relay process (see relay.ts): request/response per connection, events and
 // reverse requests. One relay serves an adapter and all of its (child) session connections.
+import { pythonCandidates, workspaceOs } from "@hato/sdk/platform";
 import type { Handle, ModuleContext, StreamSubscription } from "@hato/sdk/types";
 import { errMsg, targetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { RELAY_SCRIPT } from "./relay";
@@ -28,7 +29,7 @@ export class Relay {
   static async start(ctx: ModuleContext, d: WorkspaceDescriptor, config: RelayConfig, handlers: RelayHandlers): Promise<Relay> {
     const grant = await workspaceGrant(ctx, d, "process");
     const { handle } = await ctx.host.process.spawn(grant.grant, {
-      target: await targetFor(ctx, d), executable: ctx.host?.env?.info?.().platform === "windows" && d.location === "local" ? "python" : "python3", args: ["-c", RELAY_SCRIPT, JSON.stringify(config)],
+      target: await targetFor(ctx, d), executable: pythonCandidates(workspaceOs(ctx, d))[0].executable, args: ["-c", RELAY_SCRIPT, JSON.stringify(config)],
       cwd: d.rootAbsolutePath, env: {}, loginShell: d.location !== "local",
     });
     const relay = new Relay(ctx, handle, handlers);

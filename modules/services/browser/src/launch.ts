@@ -4,7 +4,7 @@
 import type { DaemonTarget, ExecutionTarget, ModuleContext, ScopeGrant } from "@hato/sdk/types";
 import { daemonTargetFor, errMsg, sshConnect, targetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import type { BrowserSessionSpec } from "@hato/sdk/browser";
-import { firstExistingFile, isAbsolutePath, programExists, windowsDirs, windowsPowerShell } from "@hato/sdk/platform";
+import { firstExistingFile, hostOs, isAbsolutePath, isPosix, knownDirs, programExists, windowsPowerShell } from "@hato/sdk/platform";
 
 export interface Machine {
   id: string;
@@ -27,7 +27,7 @@ export async function machineFor(ctx: ModuleContext, spec: BrowserSessionSpec): 
     const shared = String(ctx.host.env.info().sharedDir || "").replace(/\/+$/, "");
     if (!shared) throw new Error("Hato's shared data folder is unavailable");
     const grant = await ctx.host.capabilities.request({ kind: "process", root: shared, purpose: "Run browser sessions" });
-    return { id: "local", label: "This computer", grant, target: { kind: "local" }, stateDir: `${shared}/browser`, windows: isWindowsHost(ctx) };
+    return { id: "local", label: "This computer", grant, target: { kind: "local" }, stateDir: `${shared}/browser`, windows: !isPosix(hostOs(ctx)) };
   }
   if (loc.kind !== "workspace") throw new Error("Endpoint sessions do not run a browser process");
   const desc: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: loc.workspaceId });
@@ -40,17 +40,16 @@ export async function machineFor(ctx: ModuleContext, spec: BrowserSessionSpec): 
   if (!home) throw new Error("Cannot determine the home folder on the workspace machine");
   if (desc.location === "local") {
     const shared = String(ctx.host.env.info().sharedDir || "").replace(/\/+$/, "");
-    return { id: "local", label: "This computer", grant, target, stateDir: `${shared}/browser`, desc, windows: isWindowsHost(ctx) };
+    return { id: "local", label: "This computer", grant, target, stateDir: `${shared}/browser`, desc, windows: !isPosix(hostOs(ctx)) };
   }
   return { id: desc.machineId, label: desc.name, grant, target, stateDir: `${home.replace(/\/+$/, "")}/.local/state/hato/browser`, desc };
 }
 
-const isWindowsHost = (ctx: ModuleContext) => ctx.host?.env?.info?.().platform === "windows";
 
 /** Chrome, Edge (always installed on Windows 10/11), Brave and Chromium in their default folders. */
 function windowsBrowsers(ctx: ModuleContext): string[] {
-  const d = windowsDirs(ctx), x86 = d.programFiles.replace(/ ?\(x86\)$/, "") + " (x86)";
-  const roots = [d.programFiles, x86, ...(d.localAppData ? [d.localAppData] : [])];
+  const d = knownDirs(ctx), programs = d.programs || "C:\\Program Files", x86 = programs.replace(/ ?\(x86\)$/, "") + " (x86)";
+  const roots = [programs, x86, ...(d.localData ? [d.localData] : [])];
   return [
     ...roots.map(r => `${r}\\Google\\Chrome\\Application\\chrome.exe`),
     ...roots.map(r => `${r}\\Microsoft\\Edge\\Application\\msedge.exe`),

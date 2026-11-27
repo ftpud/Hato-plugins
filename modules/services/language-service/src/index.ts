@@ -3,7 +3,7 @@ import type { AppModule, ModuleContext, StreamSubscription, SettingsSection } fr
 import { errMsg, targetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { languageDefinitions, languageForPath, documentUri, definitionLinks, workspacePath, relativeFile, validPosition, type LanguageDefinition, type LanguageServerSpec } from "@hato/sdk/languages";
 import { serverData } from "./server-data";
-import { isAbsolutePath, windowsLaunch, workspaceOs } from "@hato/sdk/platform";
+import { isAbsolutePath, prepareLaunch, pythonCandidates, workspaceOs } from "@hato/sdk/platform";
 import { exportMcpTools } from "@hato/sdk/mcp";
 import { projectConfiguration, projectServer, documentSymbols } from "./project";
 import { LanguageDependencies } from "./dependencies";
@@ -130,7 +130,7 @@ async function start(ctx: ModuleContext, d: WorkspaceDescriptor, server: Languag
     if(data)report(ctx,d,server,{dataDirectory:data});
     const args = server.args.map(arg => arg.replace(/\$WORKSPACE/g, d.rootAbsolutePath).replace(/\$SERVER_DATA/g, data));
     // Native Windows: servers installed with npm are .cmd shims; start them through node directly.
-    const launch = workspaceOs(ctx, d) === "windows" ? await windowsLaunch(ctx, grant.grant, { executable, args, cwd: d.rootAbsolutePath }) : { executable, args };
+    const launch = await prepareLaunch(ctx, grant.grant, workspaceOs(ctx, d), { executable, args, cwd: d.rootAbsolutePath });
     handle = (await ctx.host.process.spawn(grant.grant, { target: await targetFor(ctx, d), executable: launch.executable, args: launch.args, cwd: d.rootAbsolutePath,
       ...((launch as any).env ? { env: (launch as any).env } : {}), loginShell: d.location !== "local" })).handle;
   } catch (error) { throw new Error(`${server.id} on ${d.machineId}: ${errMsg(error)}. ${server.installHint}`); }
@@ -357,7 +357,7 @@ const mod: AppModule = {
       const status=statuses.get(sessionKey(d,server));
       if(!status?.dataDirectory)return {status,log:(status?.log||[]).join("\n")};
       const grant=await workspaceGrant(ctx,d,"process");
-      const python=workspaceOs(ctx,d)==="windows"?"python":"python3";
+      const python=pythonCandidates(workspaceOs(ctx,d))[0].executable;
       const result=await ctx.host.process.run(grant.grant,{target:await targetFor(ctx,d),executable:python,args:["-c","import pathlib,sys; p=pathlib.Path(sys.argv[1])/'.metadata/.log'; print(p.read_text(errors='replace')[-32000:] if p.is_file() else 'No index log yet')",status.dataDirectory],cwd:d.rootAbsolutePath,loginShell:d.location==="ssh"},{timeoutMs:30000});
       if(result.code!==0)throw new Error(result.stderr||"Cannot read server log");
       return {status,log:result.stdout};

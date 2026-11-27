@@ -3,7 +3,7 @@
 // launches here and receives output/state through `run.debugReport`.
 import type { AppModule, ModuleContext } from "@hato/sdk/types";
 import { errMsg, targetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
-import { isAbsolutePath, slashPath, workspaceOs } from "@hato/sdk/platform";
+import { isAbsolutePath, pythonCandidates, slashPath, workspaceOs } from "@hato/sdk/platform";
 import { exportMcpTools } from "@hato/sdk/mcp";
 import { DEBUG_EVENTS, DEBUG_TYPES, type Breakpoint, type BreakpointStatus, type DebugFrame, type DebugSessionInfo, type DebugThread, type DebugVariable, type ExceptionBreakpoints } from "@hato/sdk/debug";
 import { Relay, type DapMessage } from "./dap";
@@ -36,7 +36,7 @@ function rel(d: WorkspaceDescriptor, path: string | undefined | null): string | 
   }
   return path.startsWith(root) ? path.slice(root.length) : path;
 }
-export const pythonFor = (ctx: ModuleContext, d: WorkspaceDescriptor) => workspaceOs(ctx, d) === "windows" ? "python" : "python3";
+export const pythonFor = (ctx: ModuleContext, d: WorkspaceDescriptor) => pythonCandidates(workspaceOs(ctx, d))[0].executable;
 async function workspace(ctx: ModuleContext, workspaceId: string): Promise<WorkspaceDescriptor> {
   if (typeof workspaceId !== "string" || !workspaceId) throw new Error("Select a workspace");
   return ctx.modules.call("workspace", "resolve", { workspaceId });

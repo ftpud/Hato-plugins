@@ -160,11 +160,8 @@ const mod: AppModule = {
         if (version !== epoch) throw new Error("Workspace changed before the shell block could run.");
         await save(ctx);
         ctx.events.emit("terminal-panel.reveal", { workspaceId });
-        const shell = ["bash", "zsh"].includes(args.language) ? args.language : "sh";
-        let delimiter = "HATO_SCRIPT";
-        while (args.code.split(/\r?\n/).includes(delimiter)) delimiter += "_";
-        const command = `${shell} <<'${delimiter}'\n${args.code}${args.code.endsWith("\n") ? "" : "\n"}${delimiter}`;
-        await ctx.modules.call("terminals", "runCode", { workspaceId, key, command, language: args.language, code: args.code }, { timeoutMs: 10000 });
+        // The terminals service types the block in a form the terminal's shell runs.
+        await ctx.modules.call("terminals", "runCode", { workspaceId, key, language: args.language, code: args.code }, { timeoutMs: 10000 });
         return { key };
       } finally { if (version === epoch) busy.delete(block.id); ctx.ui.invalidate(); }
     },

@@ -1,7 +1,7 @@
 // Script blocks and named Run App processes on the daemon machine.
 import type { ModuleContext, Handle } from "@hato/sdk/types";
 import { errMsg } from "@hato/sdk/runtime";
-import { executionPolicyHint, slashPath, userCommandLaunch, windowsPowerShell } from "@hato/sdk/platform";
+import { failureHint, slashPath, userCommandLaunch, windowsPowerShell } from "@hato/sdk/platform";
 
 /** The workspace a run belongs to, for its shell choice. The runner spawns on its own machine, so
  *  the workspace is local to it (a Linux/macOS daemon resolves to the login shell). */
@@ -32,7 +32,7 @@ export async function runScript(ctx: ModuleContext, root: string, command: strin
     const exit = await ctx.host.process.wait(handle);
     // Let the final stream chunks arrive before reading the buffers.
     await new Promise(r => setTimeout(r, 50));
-    const hint = exit?.code ? executionPolicyHint(stderr + stdout.slice(-4000)) : null;
+    const hint = exit?.code ? failureHint(stderr + stdout.slice(-4000)) : null;
     return { code: exit?.code ?? null, stdout, stderr: hint ? `${stderr}\n${hint}` : stderr };
   } finally {
     clearTimeout(timer); opts.track(null);

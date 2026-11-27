@@ -11,8 +11,8 @@ import { reportedUsage, type ReportedUsage } from "@hato/sdk/context-usage";
 import { type LimitProvider, type LimitsSnapshot } from "@hato/sdk/usage-limits";
 import type { AppModule, Handle, ModuleContext } from "@hato/sdk/types";
 import { errMsg, JsonRpcPeer, rpcError, targetFor, workspaceGrant, type WorkspaceDescriptor } from "@hato/sdk/runtime";
-import { firstExistingFile, resolveWindowsExecutable, shellPrograms, workspaceOs } from "@hato/sdk/platform";
-import { windowsSupportOf, type WindowsSupport } from "@hato/sdk/agent-providers";
+import { firstExistingFile, pathListSeparator, resolveWindowsExecutable, workspaceOs, type MachineOs } from "@hato/sdk/platform";
+import { PLATFORM_LABELS, platformSupportOf, REQUIRED_TOOLS } from "@hato/sdk/agent-providers";
 
 const PROTOCOL_VERSION = 1;
 async function providers(ctx: ModuleContext) { return agentProviders((await ctx.host.plugins.list()).plugins); }
@@ -287,23 +287,31 @@ interface Detected { found: boolean; path: string; pathEnv: string | null; /** W
 
 const warnedUntested = new Set<string>();
 
+const osLabel = (os: MachineOs) => os === "posix" ? "this machine" : `${PLATFORM_LABELS[os]} projects`;
+
 /**
- * Native Windows: apply the provider's declared support. Unsupported agents stop with their note,
- * untested ones warn once, and required tools (Git Bash) are located and passed in the agent's env.
+ * Apply the provider's declared support for the workspace OS. Unsupported agents stop with their note,
+ * untested ones warn once per OS, and required tools are located and passed in the agent's env.
  */
-async function windowsRequirements(ctx: ModuleContext, grant: Handle, desc: WorkspaceDescriptor, profile: any): Promise<Record<string, string>> {
-  const support: WindowsSupport = profile.windows || windowsSupportOf(undefined);
+async function platformRequirements(ctx: ModuleContext, grant: Handle, desc: WorkspaceDescriptor, profile: any): Promise<Record<string, string>> {
+  const os = workspaceOs(ctx, desc);
+  const support = platformSupportOf({ platforms: profile.platforms }, os);
   const name = profile.name || profile.id;
+  // WSL runs the Linux build of the same agent on this PC.
+  const alternative = os === "windows" ? " Open this project in WSL to use it." : "";
   if (support.status === "unsupported")
-    throw new Error(`${name} does not support native Windows projects${support.note ? `: ${support.note}` : "."} Open this project in WSL to use it.`);
-  if (support.status === "untested" && profile.provider && !warnedUntested.has(profile.provider)) {
-    warnedUntested.add(profile.provider);
-    ctx.host.ui.toast("warn", `${name} has not been tested on native Windows yet. If it misbehaves, open the project in WSL.`);
+    throw new Error(`${name} does not support ${osLabel(os)}${support.note ? `: ${support.note}` : "."}${alternative}`);
+  if (support.status === "untested" && profile.provider && !warnedUntested.has(`${os}:${profile.provider}`)) {
+    warnedUntested.add(`${os}:${profile.provider}`);
+    ctx.host.ui.toast("warn", `${name} has not been tested on ${osLabel(os)} yet.${alternative ? " If it misbehaves, open the project in WSL." : ""}`);
   }
   const env: Record<string, string> = {};
   for (const r of support.requires || []) {
-    const found = await firstExistingFile(ctx, grant, desc.rootAbsolutePath, shellPrograms(ctx, { kind: "git-bash" }));
-    if (!found) throw new Error(`${name} needs Git for Windows (Git Bash) on this PC. Install it from https://git-scm.com/download/win, then reconnect.`);
+    const tool = REQUIRED_TOOLS[r.tool];
+    if (!tool) throw new Error(`${name} requires '${r.tool}', which this version of Hato cannot locate. Update Hato.`);
+    // Required tools are found on the local machine (native Windows); remote machines resolve their own.
+    const found = desc.location === "local" && os === "windows" ? await firstExistingFile(ctx, grant, desc.rootAbsolutePath, tool.programs(ctx)) : null;
+    if (!found) throw new Error(`${name} needs ${tool.label} on ${desc.location === "local" ? "this PC" : desc.machineId}. Install it from ${tool.install}, then reconnect.`);
     if (r.env) env[r.env] = found;
   }
   return env;
@@ -430,7 +438,7 @@ async function startConnection(ctx: ModuleContext, a: any) {
   const g = await workspaceGrant(ctx, desc, "process");
   const env: Record<string, string> = { ...(profile.envRefs || {}) };
   if (det.pathEnv) env.PATH = det.pathEnv;
-  if (workspaceOs(ctx, desc) === "windows") Object.assign(env, await windowsRequirements(ctx, g.grant, desc, profile));
+  Object.assign(env, await platformRequirements(ctx, g.grant, desc, profile));
   const envRemove = await environmentPolicy(ctx, profile);
   for (const key of envRemove) delete env[key];
   const dirs = additionalDirectories(a.additionalDirectories);
@@ -444,7 +452,7 @@ async function startConnection(ctx: ModuleContext, a: any) {
       const node = await detect(ctx, desc, "node");
       if (!node.found) throw new Error("Node.js is required on the workspace machine for this provider's MCP launcher");
       launch = { ...launch, executable: startWith(desc, node, "node").executable,
-        env: { ...launch.env, ...(node.pathEnv ? { PATH: [node.pathEnv, launch.env.PATH].filter(Boolean).join(desc.location !== "local" || ctx.host.env.info().platform !== "windows" ? ":" : ";") } : {}) } };
+        env: { ...launch.env, ...(node.pathEnv ? { PATH: [node.pathEnv, launch.env.PATH].filter(Boolean).join(pathListSeparator(workspaceOs(ctx, desc))) } : {}) } };
     }
     spawned = await ctx.host.process.spawn(g.grant, {
       target: await targetFor(ctx, desc), executable: launch.executable,
@@ -1108,7 +1116,7 @@ const mod: AppModule = {
       for (const definition of definitions) {
         const ad = { id: definition.id, name: definition.profile.name, ...definition.adapter };
         const row: any = { id: ad.id, name: ad.name, pkg: ad.pkg, bin: ad.bin, machineId: desc.machineId, installed: null, latest: null, path: null, error: null,
-          windows: workspaceOs(ctx, desc) === "windows" ? windowsSupportOf(definition) : null,
+          platform: (() => { const os = workspaceOs(ctx, desc); return { os, label: os === "posix" ? null : PLATFORM_LABELS[os], ...platformSupportOf(definition, os) }; })(),
           prefix, installCommand: "npm " + installArgs(ad.pkg, prefix).join(" ") };
         try {
           if (!npm.ok) throw new Error(npm.error);

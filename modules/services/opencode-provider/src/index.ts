@@ -1,3 +1,4 @@
+import { isPosix, workspaceOs } from "@hato/sdk/platform";
 import type { AppModule, ModuleContext } from '@hato/sdk/types';
 
 interface LimitWindow {
@@ -138,7 +139,7 @@ export default {
           if (result.code === 127) throw new Error(result.stderr);
         } catch (error) {
           // An explicit path identifies the same binary/account as chat; only discover PATH when absent.
-          if (executablePath != null || !MISSING.test(errorText(error)) || (desc.location === 'local' && ctx.host?.env?.info?.().platform === 'windows')) throw error;
+          if (executablePath != null || !MISSING.test(errorText(error)) || !isPosix(workspaceOs(ctx, desc))) throw error;
           // GUI and non-interactive shells often miss npm/bun/nvm bin directories.
           const retry = await run('sh', ['-c', FALLBACK_SCRIPT, 'sh', ...API_ARGS], desc.location !== 'local').catch((e) => e);
           if (retry instanceof Error || retry.code === 127) {

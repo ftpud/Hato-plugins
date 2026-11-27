@@ -235,11 +235,12 @@ function adapterSections(): SettingsSection[] {
   const fields: SettingField[] = (list || []).map((a: any) => {
     const upToDate = a.installed && a.latest && a.installed === a.latest;
     const status = a.error ? a.error : !a.installed ? `not installed · latest ${a.latest || "?"}` : `installed ${a.installed}${a.latest ? upToDate ? " · up to date" : ` · update available: ${a.latest}` : ""}`;
-    // Native Windows: the provider's declared support (from its Windows smoke test).
-    const windows = a.windows ? a.windows.status === "supported" ? "Windows: supported · " : a.windows.status === "unsupported"
-      ? `Windows: not supported${a.windows.note ? ` (${a.windows.note})` : ""} — use a WSL project · ` : "Windows: untested · " : "";
-    return { key: "install:" + a.id, type: "action", label: a.name, description: `${windows}${a.pkg}${a.path ? " → " + a.path : ""} · ${status}`,
-      buttonLabel: adaptersBusy === a.id ? "Installing…" : !a.installed ? "Install" : upToDate ? "Reinstall" : "Update", disabled: busy || a.windows?.status === "unsupported" };
+    // The provider's declared support for this machine's OS (from its smoke tests); silent when supported.
+    const p = a.platform, on = p?.label || "this machine";
+    const platform = !p || p.status === "supported" ? "" : p.status === "unsupported"
+      ? `${on}: not supported${p.note ? ` (${p.note})` : ""}${p.os === "windows" ? " — use a WSL project" : ""} · ` : `${on}: untested · `;
+    return { key: "install:" + a.id, type: "action", label: a.name, description: `${platform}${a.pkg}${a.path ? " → " + a.path : ""} · ${status}`,
+      buttonLabel: adaptersBusy === a.id ? "Installing…" : !a.installed ? "Install" : upToDate ? "Reinstall" : "Update", disabled: busy || p?.status === "unsupported" };
   });
   fields.push({ key: "check", type: "action", label: list ? "Versions" : "Adapters", disabled: busy || !ws,
     description: adaptersBusy === "check" ? "Checking installed and latest versions…" : list ? "Check the installed and latest npm versions again." : ws ? "Check which adapters are installed on this machine." : "Select a project to manage the adapters on its machine.",

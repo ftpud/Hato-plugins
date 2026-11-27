@@ -8,7 +8,7 @@ import type { AppModule, ModuleContext, Handle, ChatMessage, StreamSubscription 
 import { JsonRpcPeer, errMsg, rpcError } from "@hato/sdk/runtime";
 import { advertisedChoices } from "@hato/sdk/workflow-provider-options";
 import { agentExecutable } from "@hato/sdk/agent-executable";
-import { hostOs, isAbsolutePath } from "@hato/sdk/platform";
+import { hostOs, isAbsolutePath, pathListSeparator } from "@hato/sdk/platform";
 import { modelChoices, relativeAgentPath, agentPolicy, agentSettings, LOW_RISK_TOOL_KINDS, agentProgress, PROGRESS_INSTRUCTION, PROGRESS_MARKER_INSTRUCTION, scanProgressChunk, stripProgressMarkers, type AgentSpec, type AgentSession, type AgentPermission } from "@hato/sdk/persistent-agents";
 import { imageAttachments } from "@hato/sdk/images";
 import { acpDiffs } from "@hato/sdk/chat-diffs";
@@ -283,11 +283,11 @@ async function start(ctx:ModuleContext,s:AgentSession,preserveConversation=false
       const resolved=await agentExecutable(ctx,grant.grant,s.root,s.profile.executable);
       // Apply the discovered PATH after login initialization, including for node shebangs and
       // child tools. Keep shell startup noise out of the ACP protocol stream.
-      const windows = hostOs(ctx) === "windows";
+      const os = hostOs(ctx), windows = os === "windows";
       let nodePath = "node", pathEnv = resolved.pathEnv;
       if (s.profile.mcpLaunch && mcpServers.some(server => !server.type || server.type === "stdio")) {
         const node = await agentExecutable(ctx, grant.grant, s.root, "node");
-        nodePath = node.launch.executable; pathEnv = `${node.pathEnv}${windows ? ";" : ":"}${resolved.pathEnv}`;
+        nodePath = node.launch.executable; pathEnv = `${node.pathEnv}${pathListSeparator(os)}${resolved.pathEnv}`;
       }
       const launch = providerMcpLaunch(s.profile.mcpLaunch, resolved.launch.executable, [...resolved.launch.args, ...(s.profile.args || [])], env, mcpServers, nodePath);
       sessionServers = launch.sessionServers;
@@ -295,7 +295,7 @@ async function start(ctx:ModuleContext,s:AgentSession,preserveConversation=false
       // Elsewhere the login shell's `env` applies PATH after profile initialization.
       spawned=windows
         ? await ctx.host.process.spawn(grant.grant,{target:{kind:"local"},executable:launch.executable,args:launch.args,cwd:s.root,env:{...launch.env,PATH:pathEnv},envRemove})
-        : await ctx.host.process.spawn(grant.grant,{target:{kind:"local"},executable:ctx.host.env.info().platform==="macos"?"/bin/zsh":"/bin/sh",
+        : await ctx.host.process.spawn(grant.grant,{target:{kind:"local"},executable:os==="macos"?"/bin/zsh":"/bin/sh",
         args:["-lc",envRemove.length?'exec /usr/bin/env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN "$@"':'exec /usr/bin/env "$@"',"hato-agent",`PATH=${pathEnv}`,launch.executable,...launch.args],cwd:s.root,env:launch.env,envRemove});
     } finally { await ctx.host.capabilities.release(grant.grant); }
     c={session:s,process:spawned.handle,peer:null as any,subscriptions:[],permissions:new Map(),queued:[],cancelSent:false,stopping:false,context:"",firstPrompt:!s.contextSent,turn:Date.now(),stderr:"",steering:false,systemPrompt:false};

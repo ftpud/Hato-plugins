@@ -5,7 +5,7 @@ import { errMsg, targetFor, workspaceGrant, type WorkspaceDescriptor } from "@ha
 import type { AppModule, Handle, ModuleContext, StreamSubscription } from "@hato/sdk/types";
 import { absoluteCwd, buildTools, javaDebugLaunch, JDWP_LISTENING, launchCommand, launchEnvironment, type Launch } from "./launch";
 import { debugKind } from "@hato/sdk/debug";
-import { executionPolicyHint, windowsLaunch, workspaceOs } from "@hato/sdk/platform";
+import { failureHint, prepareLaunch, workspaceOs } from "@hato/sdk/platform";
 
 type StartArgs = Parameters<RunServiceMethods["start"]>[0];
 type Entry = {
@@ -54,7 +54,7 @@ async function command(ctx: ModuleContext, d: WorkspaceDescriptor, e: Entry, lau
   const target = await targetFor(ctx, d);
   if (e.cancelled) return null;
   // Native Windows: npm/mvn/gradlew are .cmd/.bat files found on the registry PATH.
-  const started = workspaceOs(ctx, d) === "windows" ? await windowsLaunch(ctx, grant.grant, { ...launch, args: launch.args || [] }) : launch;
+  const started = await prepareLaunch(ctx, grant.grant, workspaceOs(ctx, d), { ...launch, args: launch.args || [] });
   const { handle } = await ctx.host.process.spawn(grant.grant, { ...started, target, loginShell: d.location !== "local" });
   e.handle = handle;
   if (main && !e.cancelled) {
@@ -75,7 +75,7 @@ async function command(ctx: ModuleContext, d: WorkspaceDescriptor, e: Entry, lau
     const exit = await ctx.host.process.wait(handle);
     await Promise.race([Promise.all(drained), pause(1000)]);
     // PowerShell refusing npm.ps1 and similar: say how to fix it (Hato never changes the policy).
-    const hint = exit?.code && workspaceOs(ctx, d) === "windows" ? executionPolicyHint(e.chunks.slice(-40).map(c => c.text).join("")) : null;
+    const hint = exit?.code ? failureHint(e.chunks.slice(-40).map(c => c.text).join("")) : null;
     if (hint) append(ctx, e, "system", `\n${hint}\n`);
     return exit;
   } catch (error) {

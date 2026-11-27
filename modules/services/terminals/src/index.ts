@@ -8,7 +8,7 @@ import type { AppModule, ModuleContext } from "@hato/sdk/types";
 import { daemonTargetFor, errMsg, workspaceGrant, withWorkspace, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { exportSettings } from "@hato/sdk/settings";
 import type { DaemonTarget } from "@hato/sdk/types";
-import { hostOs, parseShellChoice, SHELL_SETTING, shellChoiceValue, shellChoiceFor, shellOptions, terminalCandidates, workspaceOs } from "@hato/sdk/platform";
+import { hostFeature, hostOs, parseShellChoice, SHELL_SETTING, shellChoiceValue, shellChoiceFor, shellCode, shellOptions, shellsFor, terminalCandidates, workspaceOs } from "@hato/sdk/platform";
 import { set as scopedSet } from "@hato/sdk/scoped-settings";
 
 // Persistence preferences: terminals held by `hato daemon` survive disconnects (remote) and app
@@ -21,8 +21,8 @@ const daemonKey = (stable: string) => stable.replace(/[^A-Za-z0-9\-_.:@/]/g, "_"
 async function daemonTarget(ctx: ModuleContext, d: WorkspaceDescriptor): Promise<DaemonTarget | null> {
   if (d.location === "cloud") return daemonTargetFor(ctx, d);
   if (d.location === "ssh" ? !keepRemote : !keepLocal) return null;
-  // The workspace daemon runs on Linux and macOS; native Windows terminals are ordinary shells.
-  if (workspaceOs(ctx, d) === "windows") return null;
+  // Local projects keep terminals in a daemon only where the host has one (not native Windows yet).
+  if (d.location === "local" && !hostFeature(ctx, "daemon.local")) return null;
   const target = await daemonTargetFor(ctx, d);
   let p = ensured.get(d.machineId);
   if (!p) {
@@ -37,14 +37,15 @@ async function daemonTarget(ctx: ModuleContext, d: WorkspaceDescriptor): Promise
   }
 }
 
-// Shell profile (Windows): a default for all native projects and an optional per-workspace override.
+// Shell profile: a default for local projects and an optional per-workspace override, offered when
+// this machine has more than one shell (native Windows today).
 let selected: WorkspaceDescriptor | null = null;
 let userShell = "auto";
 let workspaceShell: string | null = null;
 let distros: string[] = [];
 
 async function loadShells(ctx: ModuleContext) {
-  if (hostOs(ctx) !== "windows") return;
+  if (shellsFor(hostOs(ctx)).length <= 1) return;
   const get = (scopes: string[]) => ctx.modules.call("persistence", "scoped.resolve", { key: SHELL_SETTING, scopes }).catch(() => null);
   userShell = parseShellChoiceValue((await get(["user"]))?.value) || "auto";
   workspaceShell = selected?.location === "local" ? parseShellChoiceValue((await get([`workspace:${selected.id}`]))?.value) : null;
@@ -54,31 +55,16 @@ async function loadShells(ctx: ModuleContext) {
 /** A stored value normalized to a select option value (null when unset). */
 const parseShellChoiceValue = (v: unknown) => typeof v === "string" && v ? shellChoiceValue(parseShellChoice(v)) : null;
 
-function shellFields() {
-  const options = shellOptions(distros);
+function shellFields(ctx: ModuleContext) {
+  const options = shellOptions(hostOs(ctx), distros);
   const local = selected?.location === "local";
   return [
     { key: "shell", label: "Shell", type: "select" as const, value: userShell, options,
-      description: "Terminals and workflow Script/Run App blocks in native Windows projects (run configurations start their programs directly). WSL and SSH projects use the login shell there." },
+      description: "Terminals and workflow Script/Run App blocks in local projects (run configurations start their programs directly). WSL and SSH projects use the login shell there." },
     { key: "workspaceShell", label: "Shell for this workspace", type: "select" as const, value: local ? workspaceShell || "default" : "default",
       options: [{ value: "default", label: "Use the default shell" }, ...options],
-      description: local ? `Overrides the shell for ${selected!.name}. Reopen a terminal to apply.` : "Select a native Windows project to override its shell." },
+      description: local ? `Overrides the shell for ${selected!.name}. Reopen a terminal to apply.` : "Select a local project to override its shell." },
   ];
-}
-
-/** A Markdown code block typed into a native Windows terminal, if that terminal's shell can run it. */
-async function windowsCode(ctx: ModuleContext, d: WorkspaceDescriptor, language: string, code: string): Promise<string> {
-  const kind = (await shellChoiceFor(ctx, d)).kind;
-  const powershell = kind === "auto" || kind === "pwsh" || kind === "powershell";
-  const posix = kind === "git-bash" || kind === "wsl";
-  if (["powershell", "pwsh", "ps1"].includes(language) && powershell) return code.replace(/\n$/, "");
-  if (["cmd", "bat", "batch"].includes(language) && kind === "cmd") return code.replace(/\n$/, "");
-  if (["sh", "shell", "bash", "zsh"].includes(language) && posix) {
-    let delimiter = "HATO_SCRIPT";
-    while (code.split(/\r?\n/).includes(delimiter)) delimiter += "_";
-    return `${language === "zsh" ? "bash" : language === "shell" ? "sh" : language} <<'${delimiter}'\n${code}${code.endsWith("\n") ? "" : "\n"}${delimiter}`;
-  }
-  throw new Error(`This terminal's shell cannot run ${language || "this"} code. Choose a matching shell in Settings → Terminals, or open the project in WSL.`);
 }
 
 let commands: ReturnType<typeof terminalTools>;
@@ -119,7 +105,9 @@ async function attach(ctx: ModuleContext, a: any, forceNew = false) {
     const target = await daemonTarget(ctx, d);
     // Restart means a fresh shell: drop the daemon-held one first.
     if (target && forceNew) await ctx.host.daemon.request(target, "pty.kill", { key: daemonKey(stable) }).catch(() => {});
-    const shell = workspaceOs(ctx, d) === "windows" ? terminalCandidates(ctx, await shellChoiceFor(ctx, d)) : null;
+    // Local terminals start the chosen shell profile; empty candidates mean the machine's login shell.
+    const candidates = d.location === "local" && !target ? terminalCandidates(ctx, await shellChoiceFor(ctx, d), workspaceOs(ctx, d)) : [];
+    const shell = candidates.length ? candidates : null;
     const r = await ctx.host.pty.open(g.grant, { cwd: d.rootAbsolutePath, columns: a.columns || 120, rows: a.rows || 30,
       ...(target ? { persist: { key: daemonKey(stable) } } : {}), ...(shell ? { shellCandidates: shell } : {}) });
     await ctx.host.resources.retainForWorkspace(r.handle, stable);
@@ -136,15 +124,15 @@ const mod: AppModule = {
     contribution = exportMcpTools(ctx, "Terminal", commands.tools);
     const saved = await ctx.modules.call("persistence", "settings.get", { key: "terminals.persistence" }).catch(() => null);
     if (saved && typeof saved === "object") { keepRemote = saved.remote !== false; keepLocal = saved.local === true; }
-    const windows = hostOs(ctx) === "windows";
+    const choosable = shellsFor(hostOs(ctx)).length > 1, daemonLocal = hostFeature(ctx, "daemon.local");
     selected = ctx.state.get("workspace.selected") as any || null;
     await loadShells(ctx);
     const publish = exportSettings(ctx, () => [{ key: "terminals", title: "Terminals", fields: [
-      ...(windows ? shellFields() : []),
+      ...(choosable ? shellFields(ctx) : []),
       { key: "remote", label: "Keep SSH terminals running on the server", type: "toggle", value: keepRemote,
         description: "Shells run inside the Hato daemon on the remote machine and survive disconnects; reopening reattaches." },
       { key: "local", label: "Keep local terminals running after quitting", type: "toggle", value: keepLocal,
-        description: windows ? "Applies to WSL projects. Native Windows terminals end when Hato quits." : "Shells run inside a local Hato daemon and are reattached at the next start." },
+        description: daemonLocal ? "Shells run inside a local Hato daemon and are reattached at the next start." : "Applies to WSL projects. Terminals of local folders end when Hato quits." },
     ] }], async (_section, key, value) => {
       if (key === "shell" || key === "workspaceShell") {
         if (typeof value !== "string") throw new Error("Invalid shell");
@@ -192,10 +180,8 @@ const mod: AppModule = {
     async runCode(ctx, a) {
       const d: WorkspaceDescriptor = await ctx.modules.call("workspace", "resolve", { workspaceId: a.workspaceId });
       const tool = commands.tools.find(tool => tool.name === "send")!;
-      const windows = workspaceOs(ctx, d) === "windows";
-      if (!windows && ["powershell", "pwsh", "ps1", "cmd", "bat", "batch"].includes(String(a.language || "")))
-        throw new Error(`${a.language} code runs only in native Windows projects.`);
-      const text = windows ? await windowsCode(ctx, d, String(a.language || ""), String(a.code ?? "")) : a.command;
+      // The terminal's shell profile decides which fence languages it runs and how they are typed.
+      const text = shellCode(workspaceOs(ctx, d), await shellChoiceFor(ctx, d), String(a.language || ""), String(a.code ?? ""));
       return tool.handler({ tab: a.key, text, enter: true }, { conversationId: "markdown", workspaceId: d.id, machineId: d.machineId });
     },
     async activity(ctx, a) {

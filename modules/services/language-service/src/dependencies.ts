@@ -3,12 +3,7 @@ import { errMsg, targetFor, workspaceGrant, type WorkspaceDescriptor } from "@ha
 import type { LanguageServerSpec } from "@hato/sdk/languages";
 import { get as scopedGet, set as scopedSet } from "@hato/sdk/scoped-settings";
 import { DEPENDENCY_SCRIPT } from "./dependency-script";
-import { workspaceOs } from "@hato/sdk/platform";
-
-/** Python interpreters to try: Windows has `python` and the `py` launcher (and a Store stub named python3). */
-export const pythonCandidates = (windows: boolean): { executable: string; args: string[] }[] => windows
-  ? [{ executable: "python", args: [] }, { executable: "py", args: ["-3"] }, { executable: "python3", args: [] }]
-  : [{ executable: "python3", args: [] }, { executable: "python", args: [] }];
+import { pythonCandidates, workspaceOs } from "@hato/sdk/platform";
 
 interface DependencyResult {
   ready: boolean; executable: string | null; supported: boolean; directory: string;
@@ -70,7 +65,7 @@ export class LanguageDependencies {
     const scope = await workspaceGrant(this.ctx, workspace, "process");
     const target = await targetFor(this.ctx, workspace);
     let diagnostic = "";
-    for (const python of pythonCandidates(workspaceOs(this.ctx, workspace) === "windows")) {
+    for (const python of pythonCandidates(workspaceOs(this.ctx, workspace))) {
       let result;
       try {
         result = await this.ctx.host.process.run(scope.grant, { target, executable: python.executable,
