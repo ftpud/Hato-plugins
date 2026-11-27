@@ -6,6 +6,7 @@ import type { AppModule, DaemonTarget, ModuleContext, PluginInfo } from "@hato/s
 import { daemonTargetFor, errMsg, sshFromProfile, sshProfileSpec, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { syncScope } from "@hato/sdk/scoped-settings";
 import { exportSettings } from "@hato/sdk/settings";
+import { PLATFORM_LABELS, pluginSupport, workspaceOs } from "@hato/sdk/platform";
 
 let autoStart = true;
 let autoPush = true;
@@ -39,10 +40,22 @@ async function resolve(ctx: ModuleContext, workspaceId: string): Promise<{ d: Wo
   return { d, target };
 }
 
-/** Locally enabled service plugins meant for the workspace machine. */
-async function workspacePlugins(ctx: ModuleContext): Promise<PluginInfo[]> {
+/** Locally enabled service plugins meant for the workspace machine, minus those that declare its
+ *  OS unsupported (its daemon would refuse them). */
+async function workspacePlugins(ctx: ModuleContext, d: WorkspaceDescriptor): Promise<PluginInfo[]> {
   const { plugins } = await ctx.host.plugins.list();
-  return plugins.filter((p) => p.enabled && p.kind === "service" && p.runsOn === "workspace");
+  const os = workspaceOs(ctx, d);
+  return plugins.filter((p) => p.enabled && p.kind === "service" && p.runsOn === "workspace" && pluginSupport(p, os).status !== "unsupported");
+}
+
+/** Enabled workspace plugins left out on this machine, with the reason (shown in the remote panel). */
+async function skippedPlugins(ctx: ModuleContext, d: WorkspaceDescriptor): Promise<{ id: string; reason: string }[]> {
+  const { plugins } = await ctx.host.plugins.list();
+  const os = workspaceOs(ctx, d);
+  return plugins.filter((p) => p.enabled && p.kind === "service" && p.runsOn === "workspace").flatMap((p) => {
+    const s = pluginSupport(p, os);
+    return s.status === "unsupported" && os !== "posix" ? [{ id: p.id, reason: `not supported on ${PLATFORM_LABELS[os]}${s.note ? `: ${s.note}` : ""}` }] : [];
+  });
 }
 
 async function ensure(ctx: ModuleContext, workspaceId: string) {
@@ -56,7 +69,7 @@ async function ensure(ctx: ModuleContext, workspaceId: string) {
       connected.set(d.machineId, target);
     }
     const pushed: string[] = [];
-    if (autoPush) for (const p of await workspacePlugins(ctx)) {
+    if (autoPush) for (const p of await workspacePlugins(ctx, d)) {
       try { await ctx.host.daemon.request(target, "plugins.push", { id: p.id }); pushed.push(p.id); }
       catch (e) { lastError.set(d.machineId, `${p.id}: ${errMsg(e)}`); }
     }
@@ -115,9 +128,9 @@ const mod: AppModule = {
     // Newly enabled workspace plugins go to the current workspace machine right away.
     ctx.events.on("kernel.modules.changed", () => {
       const ws: any = ctx.state.get("workspace.selected");
-      if (autoPush && ws?.location === "ssh" && ws.id) resolve(ctx, ws.id).then(async ({ target }) => {
+      if (autoPush && ws?.location === "ssh" && ws.id) resolve(ctx, ws.id).then(async ({ d, target }) => {
         if (!(await ctx.host.daemon.status(target))) return;
-        for (const p of await workspacePlugins(ctx)) await ctx.host.daemon.request(target, "plugins.push", { id: p.id }).catch(() => {});
+        for (const p of await workspacePlugins(ctx, d)) await ctx.host.daemon.request(target, "plugins.push", { id: p.id }).catch(() => {});
       }).catch(() => {});
     });
   },
@@ -141,7 +154,7 @@ const mod: AppModule = {
     async status(ctx, a) {
       const { d, target } = await resolve(ctx, String(a.workspaceId));
       const daemon = await ctx.host.daemon.status(target);
-      const base = { machineId: d.machineId, location: d.location, error: lastError.get(d.machineId) || null, candidates: (await workspacePlugins(ctx)).map((p) => p.id) };
+      const base = { machineId: d.machineId, location: d.location, error: lastError.get(d.machineId) || null, candidates: (await workspacePlugins(ctx, d)).map((p) => p.id), skipped: await skippedPlugins(ctx, d) };
       if (!daemon) { ensuredMachines.delete(d.machineId); return { ...base, running: false }; }
       try {
         const hello = await ctx.host.daemon.request(target, "hello");
@@ -176,7 +189,7 @@ const mod: AppModule = {
       const ids = [...new Set([
         ...(d.location === "ssh" ? ["persistence"] : []),
         ...remote.filter((p) => p.enabled !== false && local.some((l) => l.id === p.id)).map((p) => String(p.id)),
-        ...(await workspacePlugins(ctx)).map((p) => p.id),
+        ...(await workspacePlugins(ctx, d)).map((p) => p.id),
       ])];
       const results: any[] = [];
       for (const id of ids) {
