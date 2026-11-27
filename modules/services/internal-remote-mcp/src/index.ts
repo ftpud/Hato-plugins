@@ -33,8 +33,11 @@ const tools=[
 async function ctl(ctx:ModuleContext,scope:Scope,op:string,args:any={}) {
   if(!scope.daemon)throw new Error("No daemon for this endpoint");
   const grant=await ctx.host.capabilities.request({kind:"process",root:scope.root});
+  // Prefer the binary this module runs in (the daemon's own copy, present while it runs): the
+  // path recorded with the agent may name an earlier build's copy that has since been removed.
+  const executable=ctx.host.env.info().executable||scope.daemon.bin;
   try {
-    const r=await ctx.host.process.run(grant.grant,{executable:scope.daemon.bin,args:["daemon","ctl","--dir",scope.daemon.dir],cwd:scope.root},{stdin:JSON.stringify({op,args})+"\n",timeoutMs:30000});
+    const r=await ctx.host.process.run(grant.grant,{executable,args:["daemon","ctl","--dir",scope.daemon.dir],cwd:scope.root},{stdin:JSON.stringify({op,args})+"\n",timeoutMs:30000});
     if(r.code!==0)throw new Error(r.stderr||"Daemon control failed");
     const v=JSON.parse(r.stdout);if(!v.ok)throw new Error(v.error?.message||"Daemon request failed");return v.value;
   }finally{await ctx.host.capabilities.release(grant.grant);}

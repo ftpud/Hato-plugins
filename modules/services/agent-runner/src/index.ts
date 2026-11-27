@@ -645,6 +645,8 @@ const mod:AppModule={
       if(["busy","waiting","starting"].includes(s.status))throw new Error("Wait for the agent to finish its turn, or cancel it, before reconnecting");
       if(live.has(s.id))await stop(ctx,s.id);
       if(typeof a.claudeSubscription==="boolean")s.claudeSubscription=a.claudeSubscription;
+      // The desktop's current daemon binary and home: an earlier build's copy may be gone.
+      if(s.daemon&&typeof a.daemon?.bin==="string"&&typeof a.daemon?.dir==="string")s.daemon={bin:a.daemon.bin,dir:a.daemon.dir};
       // Refreshed OAuth headers from the desktop replace the expired ones before reconnecting.
       const auth=a.authorization&&typeof a.authorization==="object"?a.authorization:{};
       s.mcps=(s.mcps as any[]).map(m=>typeof auth[m.id]==="string"&&Array.isArray(m.headers)?{...m,headers:[...m.headers.filter((h:any)=>String(h.name).toLowerCase()!=="authorization"),{name:"Authorization",value:auth[m.id]}]}:m);

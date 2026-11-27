@@ -636,7 +636,12 @@ const mod:AppModule={id:"persistent-agents",moduleApiVersion:1,
       const inline=desktopIds.includes("internal-remote-mcp-local")&&paths.some(isLibraryRef)?libraryInline(await catalog(ctx,a.workspaceId),paths):{};
       endpoints=await desktopEndpoints(ctx,a.workspaceId,v.session.id,desktopIds,paths,inline);
     }
-    return invoke(ctx,a.workspaceId,"reconnect",{id:a.id,authorization,endpoints,claudeSubscription:subscription!==false});
+    // The daemon binary changes with each build (a content-named copy on Windows, removed once
+    // unused): hand the agent the current one, so its workspace tools do not run a deleted file.
+    const d:WorkspaceDescriptor=await ctx.modules.call("workspace","resolve",{workspaceId:a.workspaceId});
+    const info=await ctx.host.daemon.ensure(await daemonTargetFor(ctx,d));
+    const daemon={bin:info.bin,dir:info.dir};daemonInfo.set(d.machineId,daemon);
+    return invoke(ctx,a.workspaceId,"reconnect",{id:a.id,authorization,endpoints,claudeSubscription:subscription!==false,daemon});
   },
   async setModel(ctx,a) {
     const v=await owned(ctx,a);
