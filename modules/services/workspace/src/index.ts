@@ -1,9 +1,20 @@
 // workspace: the sole resolver of WorkspaceDescriptors (project root or task worktree), active
 // selection and per-workspace view state. The kernel never constructs or parses descriptors.
 import type { AppModule, ModuleContext } from "@hato/sdk/types";
-import { cloudMachineId, projectWorkspaceId, sshFromProfile, type WorkspaceDescriptor } from "@hato/sdk/runtime";
+import { cloudMachineId, machinePlatformKey, projectWorkspaceId, sshFromProfile, type WorkspaceDescriptor } from "@hato/sdk/runtime";
+import { hostOs, osOf, type MachineOs } from "@hato/sdk/platform";
 
 let selectedId: string | null = null;
+
+/** Detected OS per SSH machine (`machine.platform.<id>`, recorded by projects); null: unknown. */
+const machineOs = new Map<string, MachineOs | null>();
+async function sshOs(ctx: ModuleContext, machineId: string): Promise<MachineOs | null> {
+  if (!machineOs.has(machineId)) {
+    const saved = await ctx.modules.call("persistence", "settings.get", { key: machinePlatformKey(machineId) }).catch(() => null);
+    machineOs.set(machineId, saved?.os ? osOf(saved.os) : null);
+  }
+  return machineOs.get(machineId) ?? null;
+}
 
 async function resolve(ctx: ModuleContext, workspaceId: string): Promise<WorkspaceDescriptor> {
   if (typeof workspaceId !== "string") throw new Error("workspaceId required");
@@ -32,14 +43,19 @@ async function resolve(ctx: ModuleContext, workspaceId: string): Promise<Workspa
     if (!p) throw new Error(`SSH profile ${project.sshProfileId} missing`);
     ssh = sshFromProfile(p);
   }
+  const machineId = project.kind === "cloud" ? cloudMachineId(project.cloudOrigin, project.cloudHostId)
+    : project.kind === "ssh" ? `ssh:${project.sshProfileId}` : "local";
+  // Local: this host. WSL: Linux. SSH: detected at first connection. Cloud: not reported yet.
+  const os = project.kind === "local" ? hostOs(ctx) : ssh?.transport === "wsl" ? "linux"
+    : project.kind === "ssh" ? await sshOs(ctx, machineId) : null;
   return {
     id: task ? `task:${task.id}` : projectWorkspaceId(project),
     projectId: project.id,
     taskId: task ? task.id : null,
     name: task ? `${project.name} / ${task.name}` : project.name,
     location: project.kind,
-    machineId: project.kind === "cloud" ? cloudMachineId(project.cloudOrigin, project.cloudHostId)
-      : project.kind === "ssh" ? `ssh:${project.sshProfileId}` : "local",
+    machineId,
+    ...(os ? { os } : {}),
     ...(project.kind === "cloud" ? { cloudHostId: project.cloudHostId } : {}),
     rootAbsolutePath: task ? task.worktreePath : project.rootPath,
     connectionRef: project.kind === "ssh" ? project.sshProfileId : null,
@@ -66,6 +82,11 @@ const mod: AppModule = {
   moduleApiVersion: 1,
   async activate(ctx, prev) {
     selectedId = (prev && prev.selectedId) || (await ctx.modules.call("persistence", "settings.get", { key: "workspace.selected" }));
+    ctx.events.on("projects.machinePlatform", (e: any) => {
+      if (typeof e?.machineId !== "string" || typeof e.os !== "string") return;
+      machineOs.set(e.machineId, osOf(e.os));
+      void publish(ctx); // the selected descriptor may be on that machine
+    });
     await publish(ctx);
   },
   snapshot: () => ({ selectedId }),

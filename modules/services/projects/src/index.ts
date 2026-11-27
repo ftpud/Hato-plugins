@@ -2,7 +2,7 @@
 // and the project/task tree model. Persistence goes through the `persistence` service.
 import type { AppModule, ModuleContext } from "@hato/sdk/types";
 import { exportMcpTools } from "@hato/sdk/mcp";
-import { cloudMachineId, errMsg, projectWorkspaceId, sshFromProfile, sshProfileSpec, targetFor, workspaceGrant, wslLocation, type WorkspaceDescriptor } from "@hato/sdk/runtime";
+import { cloudMachineId, errMsg, machinePlatformKey, projectWorkspaceId, sshConnect, sshFromProfile, sshProfileSpec, targetFor, workspaceGrant, wslLocation, type WorkspaceDescriptor } from "@hato/sdk/runtime";
 import { parseOrder } from "@hato/sdk/settings-order";
 import { baseName, isAbsolutePath } from "@hato/sdk/platform";
 import { groupTools, pendingGroups, projectGroups } from "./groups";
@@ -55,10 +55,26 @@ async function detectGit(ctx: ModuleContext, desc: WorkspaceDescriptor): Promise
   return { isGit: true, topLevel: top.stdout.trim(), hasCommits: head.code === 0, checkedAt: Date.now() };
 }
 
+/** Last platform recorded per SSH machine, so it is written only when it changes. */
+const recordedPlatform = new Map<string, string>();
+
+/** Record the OS the kernel detected for an SSH machine; `workspace` adds it to descriptors. */
+async function recordPlatform(ctx: ModuleContext, desc: WorkspaceDescriptor) {
+  if (desc.location !== "ssh" || desc.ssh?.transport === "wsl") return;
+  const platform = (await sshConnect(ctx, desc).catch(() => null))?.platform;
+  if (!platform?.os) return;
+  const value = JSON.stringify(platform);
+  if (recordedPlatform.get(desc.machineId) === value) return;
+  await ctx.modules.call("persistence", "settings.set", { key: machinePlatformKey(desc.machineId), value: platform });
+  recordedPlatform.set(desc.machineId, value);
+  ctx.events.emit("projects.machinePlatform", { machineId: desc.machineId, ...platform });
+}
+
 async function refreshGit(ctx: ModuleContext, projectId: string) {
   try {
     const { desc } = await describeProject(ctx, projectId);
     const info = await detectGit(ctx, desc);
+    await recordPlatform(ctx, desc).catch(e => ctx.log.warn("record machine platform", errMsg(e)));
     gitCache.set(projectId, info);
     offline.delete(projectId);
   } catch (e) {
