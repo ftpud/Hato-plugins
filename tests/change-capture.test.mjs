@@ -140,3 +140,23 @@ test("captured shell edits stay beside their tool call before later replies", as
   assert.deepEqual(sdk.capturedTranscript(messages, records, "chat", "c").map(m => m.key),
     ["u", "shell", "capture:edit", "reply", "later-tool", "final"]);
 });
+
+test("provider diffs with absolute paths are not duplicated by captured relative diffs", async () => {
+  const result = await build({
+    entryPoints: [fileURLToPath(new URL("../../sdk/change-capture.ts", import.meta.url))],
+    bundle: true, format: "esm", write: false,
+  });
+  const sdk = await import("data:text/javascript;base64," + Buffer.from(result.outputFiles[0].text).toString("base64"));
+  const records = [{ id: "w", at: 20, owner: { source: "chat", sessionId: "c", key: "u", prompt: "Write" },
+    diffs: [{ path: "runtime-todo.md", added: 1, removed: 0, lines: ["+x"] }] }];
+  const messages = [
+    { key: "u", role: "user", text: "Write" },
+    { key: "write", role: "tool", text: "", at: 10, diffs: [
+      { path: "C:\\_vibe\\Hato\\runtime-todo.md", added: 1, removed: 0, lines: ["+x"] },
+      { path: "C:\\_vibe\\Hato\\other-runtime-todo.md", added: 1, removed: 0, lines: ["+y"] },
+    ] },
+  ];
+  const out = sdk.capturedTranscript(messages, records, "chat", "c");
+  assert.deepEqual(out.map(m => m.key), ["u", "write", "capture:w"]);
+  assert.deepEqual(out[1].diffs.map(d => d.path), ["C:\\_vibe\\Hato\\other-runtime-todo.md"]);
+});

@@ -9,7 +9,7 @@ import { JsonRpcPeer, errMsg, rpcError } from "@hato/sdk/runtime";
 import { advertisedChoices } from "@hato/sdk/workflow-provider-options";
 import { agentExecutable } from "@hato/sdk/agent-executable";
 import { hostOs, isAbsolutePath, pathListSeparator } from "@hato/sdk/platform";
-import { modelChoices, relativeAgentPath, agentPolicy, agentSettings, LOW_RISK_TOOL_KINDS, agentProgress, PROGRESS_INSTRUCTION, PROGRESS_MARKER_INSTRUCTION, scanProgressChunk, stripProgressMarkers, type AgentSpec, type AgentSession, type AgentPermission } from "@hato/sdk/persistent-agents";
+import { modelChoices, relativeAgentPath, agentPolicy, agentSettings, LOW_RISK_TOOL_KINDS, NO_AGENT_LIMITS, normalizeAgentLimits, cappedPolicy, agentRefusal, type AgentLimits, agentProgress, PROGRESS_INSTRUCTION, PROGRESS_MARKER_INSTRUCTION, scanProgressChunk, stripProgressMarkers, type AgentSpec, type AgentSession, type AgentPermission } from "@hato/sdk/persistent-agents";
 import { imageAttachments } from "@hato/sdk/images";
 import { acpDiffs } from "@hato/sdk/chat-diffs";
 import { isLibraryRef, textDigest } from "@hato/sdk/library";
@@ -32,8 +32,12 @@ interface Live {
   providerTurn?: { id: string; output: string };
   turn: number; stderr: string;
   toolTitles?: Map<string, string>;
+  /** Cancels a turn that outlives the machine's maxTurnMinutes. */
+  turnTimer?: any;
 }
 let db: Handle;
+/** Machine limits sent by the desktop (remote-runtime); kept in this runtime's database. */
+let limits: AgentLimits = NO_AGENT_LIMITS;
 const sessions = new Map<string,AgentSession>();
 const live = new Map<string,Live>();
 const locks = new Map<string,Promise<any>>();
@@ -266,6 +270,8 @@ async function start(ctx:ModuleContext,s:AgentSession,preserveConversation=false
   s.status="starting";s.error=null;s.childSessions=disconnectSubagents(s.childSessions);await persist(ctx,s);
   let c:Live|undefined;
   try {
+    if(limits.maxConcurrent&&live.size>=limits.maxConcurrent)throw new Error(`This machine allows ${limits.maxConcurrent} connected agent${limits.maxConcurrent===1?"":"s"} at once. Stop another agent first.`);
+    const refused=agentRefusal(limits,s.profile?.provider,s.model);if(refused)throw new Error(refused);
     await readInstructions(ctx,s); // fail fast on missing or oversized instructions
     let mcpServers:any[]=s.mcps.map(({id,...server})=>server);
     if(s.workspaceMcp) {
@@ -336,7 +342,12 @@ async function start(ctx:ModuleContext,s:AgentSession,preserveConversation=false
       if(params.sessionId!==s.sessionId && !knownSubagent(s.childSessions||{},params.sessionId))throw rpcError(-32602,"Wrong session");
       const tool=params.toolCall||{},options:any[]=params.options||[];
       const allowOnce=options.find(o=>o.kind==="allow_once")||options.find(o=>String(o.kind).startsWith("allow"));
-      const policy=agentPolicy(s);
+      if(limits.deniedToolKinds.includes(tool.kind)) {
+        const reject=options.find(o=>o.kind==="reject_once")||options.find(o=>String(o.kind).startsWith("reject"));
+        await message(ctx,s,"system",`Refused "${tool.title||tool.kind}": ${tool.kind} tools are not allowed on this machine.`);
+        return reject?{outcome:{outcome:"selected",optionId:reject.optionId}}:{outcome:{outcome:"cancelled"}};
+      }
+      const policy=cappedPolicy(agentPolicy(s),limits);
       if(allowOnce&&(policy==="autopilot"||(policy==="auto-low"&&LOW_RISK_TOOL_KINDS.has(tool.kind)))) {
         ctx.log.info(`${policy} approved "${tool.title||tool.kind||"tool"}" for ${s.name}`);
         return {outcome:{outcome:"selected",optionId:allowOnce.optionId}};
@@ -424,6 +435,7 @@ async function start(ctx:ModuleContext,s:AgentSession,preserveConversation=false
       if(!choice)throw new Error(`Provider does not advertise model ${s.model}`);
       await config(ctx,c,choice.configId,choice.id);
     }
+    { const current=(s.models as any)?.currentModelId; const refused=agentRefusal(limits,s.profile?.provider,current?String(current):undefined); if(refused)throw new Error(refused); }
     if(s.reasoning) {
       const choices=advertisedChoices(s);
       if(!choices.reasoningId||!choices.reasoning.some(o=>o.value===s.reasoning))throw new Error(`Provider does not advertise reasoning ${s.reasoning} for this model`);
@@ -442,6 +454,13 @@ async function start(ctx:ModuleContext,s:AgentSession,preserveConversation=false
     else if(s.workspaceMcp) await ctx.modules.call("internal-remote-mcp","revoke",{sessionId:s.id}).catch(()=>{});
     s.status="error";s.error=errMsg(e);await persist(ctx,s);throw e;
   }
+}
+async function cancelTurn(ctx:ModuleContext,c:Live) {
+  if(c.turnTimer){clearTimeout(c.turnTimer);c.turnTimer=undefined;}
+  for(const p of c.permissions.values())p.resolve({outcome:{outcome:"cancelled"}});c.permissions.clear();
+  await ctx.host.db.exec(db,"UPDATE permissions SET resolved=1 WHERE session_id=?",[c.session.id]);
+  if(c.providerTurn)await request(c,"_session/async_task/stop",{sessionId:c.session.sessionId,asyncTaskId:c.providerTurn.id});
+  else await c.peer.notify("session/cancel",{sessionId:c.session.sessionId});
 }
 function promptBlocks(text:string,images:ImageAttachment[]) {
   return [...(text?[{type:"text",text}]:[]),...images.map(i=>({type:"image",mimeType:i.mimeType,data:i.data}))];
@@ -464,6 +483,11 @@ async function prompt(ctx:ModuleContext,c:Live,text:string,images:ImageAttachmen
   if(s.status!=="ready" || c.stopping)throw new Error("Agent is not idle");
   c.turn=Math.max(c.turn+1,Date.now());c.cancelSent=false;s.status="busy";s.error=null;s.progress=null;c.progressTail="";
   const turn=c.turn;
+  if(c.turnTimer)clearTimeout(c.turnTimer);
+  if(limits.maxTurnMinutes)c.turnTimer=setTimeout(()=>{
+    if(live.get(s.id)!==c||c.turn!==turn||!["busy","waiting"].includes(s.status))return;
+    void message(ctx,s,"system",`Turn stopped: it ran longer than this machine allows (${limits.maxTurnMinutes} min).`).then(()=>cancelTurn(ctx,c)).catch(e=>ctx.log.warn("turn limit",errMsg(e)));
+  },limits.maxTurnMinutes*60_000);
   await message(ctx,s,"user",text,undefined,undefined,images);await persist(ctx,s);
   // The first prompt of a session with Hato's workspace tools also carries the progress instruction.
   const progressInstruction=s.workspaceMcp?PROGRESS_INSTRUCTION:PROGRESS_MARKER_INSTRUCTION;
@@ -472,6 +496,7 @@ async function prompt(ctx:ModuleContext,c:Live,text:string,images:ImageAttachmen
   // after a skill is switched on/off or its text changes. Other messages are sent as typed.
   const body=(context?`${context}\n\nUser request:\n${text}`:text)+(instructions.preamble&&instructions.index?`\n\n${instructions.index}`:"");
   void c.peer.request("session/prompt",{sessionId:s.sessionId,prompt:promptBlocks(body,images)}).then(async r=>{
+    if(c.turn===turn&&c.turnTimer){clearTimeout(c.turnTimer);c.turnTimer=undefined;}
     if(c.stopping || live.get(s.id)!==c || c.turn!==turn)return;
     const cleanup=enqueue(()=>ctx.host.db.exec(db,"UPDATE permissions SET resolved=1 WHERE session_id=?",[s.id]));
     for(const pending of c.permissions.values())pending.resolve({outcome:{outcome:"cancelled"}});
@@ -510,9 +535,21 @@ const mod:AppModule={
       sessions.set(s.id,s);
     }
     await ctx.host.db.exec(db,"UPDATE permissions SET resolved=1 WHERE resolved=0");
+    await ctx.host.db.exec(db,"CREATE TABLE IF NOT EXISTS runtime_settings(key TEXT PRIMARY KEY, value_json TEXT NOT NULL)");
+    const saved=await ctx.host.db.query<any>(db,"SELECT value_json FROM runtime_settings WHERE key='limits'");
+    limits=normalizeAgentLimits(saved.length?JSON.parse(saved[0].value_json):null);
   },
   canSwap:()=>({ok:live.size===0&&locks.size===0&&pendingWrites===0&&inFlight===0,reason:"Stop persistent agents before replacing their runtime"}),
   methods:{
+    /** Machine limits from the desktop's remote-runtime. Applied to new connections, turns and
+     *  permission requests; agents already connected beyond a new concurrency limit keep running. */
+    async setLimits(ctx,a,meta) {
+      if(!["daemon-client","remote-runtime"].includes(meta?.caller))throw new Error("Only the desktop sets machine limits");
+      limits=normalizeAgentLimits(a?.limits);
+      await ctx.host.db.exec(db,"INSERT INTO runtime_settings(key,value_json) VALUES('limits',?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",[JSON.stringify(limits)]);
+      return {limits,connected:live.size};
+    },
+    limits:()=>({limits,connected:live.size}),
     /** report_progress from the agent's workspace MCP endpoint. Sidebar state only: no message is recorded. */
     setProgress:(ctx:ModuleContext,a:any,meta:any)=>{
       if(!["internal-remote-mcp","daemon-client"].includes(meta?.caller))throw new Error("Only workspace endpoints report progress");
@@ -618,26 +655,24 @@ const mod:AppModule={
       await start(ctx,s);return s;
     }),
     stop:(ctx,a)=>serialize(String(a.id),()=>stop(ctx,String(a.id))),
-    async cancel(ctx,a) {const c=live.get(String(a.id));if(c){
-      for(const p of c.permissions.values())p.resolve({outcome:{outcome:"cancelled"}});c.permissions.clear();
-      await ctx.host.db.exec(db,"UPDATE permissions SET resolved=1 WHERE session_id=?",[c.session.id]);
-      if(c.providerTurn)await request(c,"_session/async_task/stop",{sessionId:c.session.sessionId,asyncTaskId:c.providerTurn.id});
-      else await c.peer.notify("session/cancel",{sessionId:c.session.sessionId});}return null;},
-    setModel:(ctx,a)=>serialize(String(a.id),async()=>{const c=live.get(String(a.id));if(!c)throw new Error("Reconnect agent first");const choice=modelChoices(c.session).find(m=>m.id===a.model);if(!choice)throw new Error("Unknown model");await config(ctx,c,choice.configId,choice.id);return c.session;}),
+    async cancel(ctx,a) {const c=live.get(String(a.id));if(c)await cancelTurn(ctx,c);return null;},
+    setModel:(ctx,a)=>serialize(String(a.id),async()=>{const c=live.get(String(a.id));if(!c)throw new Error("Reconnect agent first");const choice=modelChoices(c.session).find(m=>m.id===a.model);if(!choice)throw new Error("Unknown model");const refused=agentRefusal(limits,c.session.profile?.provider,choice.id);if(refused)throw new Error(refused);await config(ctx,c,choice.configId,choice.id);return c.session;}),
     /** Change one provider option (mode, reasoning, ...) on the connected agent and keep it for reconnects. */
     setConfig:(ctx,a)=>serialize(String(a.id),async()=>{
       const c=live.get(String(a.id));if(!c)throw new Error("Reconnect agent first");
       if(c.session.status!=="ready")throw new Error("Agent must be idle to change its settings");
       const id=String(a.configId||""),value=typeof a.value==="boolean"?a.value:String(a.value??"");
       const model=modelChoices(c.session).find(m=>m.configId===id&&m.id===value);
-      if(id==="__model"||model){if(!model)throw new Error("Unknown model");await config(ctx,c,model.configId,model.id);c.session.usage=null;await persist(ctx,c.session);return publicSession(c.session);}
+      if(id==="__model"||model){if(!model)throw new Error("Unknown model");const refused=agentRefusal(limits,c.session.profile?.provider,model.id);if(refused)throw new Error(refused);await config(ctx,c,model.configId,model.id);c.session.usage=null;await persist(ctx,c.session);return publicSession(c.session);}
       await applySetting(c,id,value);
       c.session.settings={...agentSettings(c.session.settings),[id]:value};
       await persist(ctx,c.session);return publicSession(c.session);
     }),
     async setPolicy(ctx,a,meta) {
       if(meta.caller!=="daemon-client")throw new Error("Only the desktop gateway changes approval policy");
-      const s=session(a.id),policy=a.policy==="autopilot"?"autopilot":a.policy==="auto-low"?"auto-low":"ask";
+      const s=session(a.id),wanted=a.policy==="autopilot"?"autopilot":a.policy==="auto-low"?"auto-low":"ask";
+      const policy=cappedPolicy(wanted,limits);
+      if(policy!==wanted)throw new Error(`This machine allows at most "${limits.approvalCap}" approval for agents.`);
       if(policy==="autopilot")return mod.methods!.setAutopilot(ctx,{id:s.id,enabled:true},meta);
       const before=agentPolicy(s);
       s.approvalPolicy=policy;
@@ -648,6 +683,7 @@ const mod:AppModule={
     async setAutopilot(ctx,a,meta) {
       if(meta.caller!=="daemon-client")throw new Error("Only the desktop gateway changes autopilot");
       const s=session(a.id),enabled=a.enabled===true;
+      if(enabled&&limits.approvalCap!=="autopilot")throw new Error(`Autopilot is not allowed on this machine (at most "${limits.approvalCap}" approval).`);
       if(!!s.autopilot!==enabled) {
         s.autopilot=enabled;await persist(ctx,s);
         await message(ctx,s,"system",enabled?"Autopilot enabled: tool permissions are approved automatically, including Git task creation (which still needs the desktop open).":"Autopilot disabled: permission requests wait for review.");

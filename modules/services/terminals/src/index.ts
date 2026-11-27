@@ -21,7 +21,7 @@ const daemonKey = (stable: string) => stable.replace(/[^A-Za-z0-9\-_.:@/]/g, "_"
 async function daemonTarget(ctx: ModuleContext, d: WorkspaceDescriptor): Promise<DaemonTarget | null> {
   if (d.location === "cloud") return daemonTargetFor(ctx, d);
   if (d.location === "ssh" ? !keepRemote : !keepLocal) return null;
-  // Local projects keep terminals in a daemon only where the host has one (not native Windows yet).
+  // Local projects keep terminals in a daemon only where the host has one (`daemon.local`).
   if (d.location === "local" && !hostFeature(ctx, "daemon.local")) return null;
   const target = await daemonTargetFor(ctx, d);
   let p = ensured.get(d.machineId);
