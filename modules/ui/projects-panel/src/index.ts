@@ -26,8 +26,11 @@ let sshAuth: SshAuth = "agent";
 let cloudHosts: { id: string; name: string; online: boolean }[] = [];
 let cloudHost = "";
 let cloudSignedIn = false;
+/** False once the Cloud plugin is known to be missing; Cloud choices are hidden then. */
+let cloudAvailable = true;
 async function loadCloudHosts(ctx: ModuleContext, refresh = false) {
   const model = await ctx.modules.call("projects", "cloudHosts", { refresh });
+  cloudAvailable = model.available !== false;
   cloudSignedIn = model.signedIn;
   cloudHosts = model.hosts.filter((host: { online: boolean }) => host.online);
   if (!cloudHosts.some(host => host.id === cloudHost)) cloudHost = cloudHosts[0]?.id ?? "";
@@ -58,7 +61,7 @@ const taskMenu = (t: any) => [
 ];
 const projectMenu = (p: any) => [
   ...groups.projectMenu(p.id),
-  ...(p.kind === "ssh" && p.transport !== "wsl" ? [{ text: "Move to Hato Cloud…", action: "askMoveToCloud", value: p.id }] : []),
+  ...(cloudAvailable && p.kind === "ssh" && p.transport !== "wsl" ? [{ text: "Move to Hato Cloud…", action: "askMoveToCloud", value: p.id }] : []),
   { text: p.tasks.length ? "Remove from Hato (delete its tasks first)" : "Remove from Hato…", action: "askRemoveProject", value: p.id, disabled: p.tasks.length > 0 },
 ];
 // workspaceId -> number of working AI chats (ai-sessions) and background agents (persistent-agents).
@@ -332,6 +335,7 @@ const mod: AppModule = {
       ctx.events.on(topic, (e: any) => { if (typeof e?.workspaceId === "string") scheduleStats(ctx, e.workspaceId); });
     if (prev?.diffStats) diffStats = prev.diffStats;
     await Promise.all([reload(ctx), groups.activate(ctx)]);
+    void loadCloudHosts(ctx).then(() => ctx.ui.invalidate(), () => {});
   },
   methods: {
     /** Select a project or task workspace; remote projects connect first (this call is the user gesture). */
@@ -377,7 +381,7 @@ const mod: AppModule = {
       }
     }
     if (confirm) children.push(confirmModal(confirm));
-    if (addForm) children.push(addProjectModal({ windows, source: addSource, sshAuth, values: addValues, errors: fieldErrors, error, busy, distros: wslDistros, distro: wslDistro, cloudHosts, cloudHost, cloudSignedIn }));
+    if (addForm) children.push(addProjectModal({ windows, source: addSource, sshAuth, values: addValues, errors: fieldErrors, error, busy, distros: wslDistros, distro: wslDistro, cloudHosts, cloudHost, cloudSignedIn, cloudAvailable }));
     children.push(groups.render(tree));
     return { type: "column", key: "projects-root", gap: 4, padding: 6, grow: true,
       ...(backgroundOpacity > 0 ? { backgroundImage: projectsBranding, backgroundImageStyle: { opacity: backgroundOpacity, width: 960, left: -350, top: -60 } } : {}), children };
@@ -393,9 +397,12 @@ const mod: AppModule = {
     if (busy) return;
     const closeAdd = () => { addForm = false; addValues = {}; fieldErrors = {}; };
     const openAdd = async (source: AddSource) => {
-      addForm = true; addSource = source; error = null; fieldErrors = {};
+      // Cached Cloud state (no network): whether the Cloud plugin exists decides the sources.
+      let failed: string | null = null;
+      await loadCloudHosts(ctx, source === "cloud").catch((e) => { if (source === "cloud") failed = errMsg(e); });
+      if (!sourcesFor(windows, cloudAvailable).some((s) => s.id === source)) source = sourcesFor(windows, cloudAvailable)[0].id;
+      addForm = true; addSource = source; error = failed; fieldErrors = {};
       if (source === "wsl") await loadDistros(ctx);
-      if (source === "cloud") await loadCloudHosts(ctx, true);
     };
     switch (ev.action) {
       case "filter": filter = String(ev.value || ""); break;

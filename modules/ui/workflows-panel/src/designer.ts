@@ -192,8 +192,6 @@ function addBlockMenu(): UiNode {
 function toolbar(): UiNode {
   const d = S.draft!, blocking = blockingIssues(S.issues).length, run = designerRun();
   return { type: "row", key: "designer-toolbar", gap: 4, padding: 6, bg: "panel", wrap: true, children: [
-    ...(!S.designerInline ? [{ type: "row", key: "window-drag", windowDrag: true, width: 24, height: 28, tooltip: "Drag to move designer window",
-      children: [muted("grip", "⠿", { size: "md" })] } as UiNode] : []),
     { type: "textInput", key: `wf-name:${d.id}`, value: d.name, changeAction: "wfName", placeholder: "Workflow name", width: 220 },
     addBlockMenu(),
     muted("mode-label", "Connect:", { wrap: false }),

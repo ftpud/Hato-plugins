@@ -154,7 +154,8 @@ export function library(): UiNode[] {
   for (const w of shown) nodes.push(workflowCard(w, false));
   if (S.catalog && !S.list.length) nodes.push(card("empty", [
     text("t", "No workflows yet", { weight: "semibold" }),
-    muted("d", "Pick a template above and press + to create one, or import a HatoPad workflow JSON.", { size: "sm" }),
+    muted("d", "Start from a blank workflow in the designer, pick a template above and press +, or import a HatoPad workflow JSON.", { size: "sm" }),
+    { type: "row", key: "empty-actions", children: [btn("create-design", "Create new workflow…", "createAndDesign", { iconSvg: uiIcons.plus, variant: "primary", disabled: S.busy })] },
   ]));
   else if (q && !shown.length) nodes.push(muted("nomatch", "No matching workflows.", { size: "sm" }));
   return nodes;

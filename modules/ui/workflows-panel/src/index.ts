@@ -19,9 +19,14 @@ let timer: ReturnType<typeof setInterval> | null = null, tick = 0, polling = fal
 // ---------------------------------------------------------------- loading
 
 /** Lightweight sidebar navigation stays available while the panel is hidden. */
+const CREATE_CHILD = "create-workflow";
+/** The workspace's list has loaded (until then an empty list means "not known yet"). */
+let listLoaded = false;
 function publishRail(ctx: ModuleContext) {
   ctx.state.set("workflows-panel.panelChildren.workflows", [
     ...S.list.slice(0, 50).map(w => ({ id: `workflow:${w.id}`, label: w.name, count: w.blocks, selected: S.visible && S.maximized === w.id })),
+    // Loaded and empty: offer the first step instead of an empty group.
+    ...(S.ws && listLoaded && !S.list.length ? [{ id: CREATE_CHILD, label: "Create new workflow…" }] : []),
   ]);
 }
 
@@ -40,6 +45,7 @@ function revealPending(ctx: ModuleContext) {
 async function setup(ctx: ModuleContext) {
   const mine = ++S.epoch;
   Object.assign(S, { catalog: null, list: [], recent: [], error: null });
+  listLoaded = false;
   S.details.clear();
   S.chatHistory.clear();
   publishRail(ctx);
@@ -50,6 +56,7 @@ async function setup(ctx: ModuleContext) {
     const [c, l, r] = await Promise.all([call(ctx, "catalog"), call(ctx, "list"), call(ctx, "runs")]);
     if (mine !== S.epoch) return;
     Object.assign(S, { catalog: c, list: l, recent: r });
+    listLoaded = true;
     publishRail(ctx);
     if (c.templates?.length && !c.templates.some((t: any) => t.id === S.newTemplate)) S.newTemplate = c.templates.find((t: any) => t.id === "multi-agent-setup")?.id || c.templates[0].id;
     // Open the first workflow on first use so its preview is visible.
@@ -59,7 +66,11 @@ async function setup(ctx: ModuleContext) {
   } catch (e) { if (mine === S.epoch) S.error = errMsg(e); }
   ctx.ui.invalidate();
 }
-async function refreshList(ctx: ModuleContext) { S.list = await call(ctx, "list"); publishRail(ctx); }
+async function refreshList(ctx: ModuleContext) {
+  const mine = S.epoch, list = await call(ctx, "list");
+  if (mine !== S.epoch) return;
+  S.list = list; listLoaded = true; publishRail(ctx);
+}
 async function refreshRuns(ctx: ModuleContext) { S.recent = await call(ctx, "runs"); }
 /** Load definitions of shown cards and details of the runs they display (active ones every poll). */
 async function refreshDetails(ctx: ModuleContext) {
@@ -100,6 +111,22 @@ async function act(ctx: ModuleContext, fn: () => Promise<void>) {
   S.busy = true; S.error = null; S.notice = null; ctx.ui.invalidate();
   try { await fn(); } catch (e) { if (mine === S.epoch) S.error = errMsg(e); }
   finally { if (mine === S.epoch) { S.busy = false; ctx.ui.invalidate(); } }
+}
+async function openDesigner(ctx: ModuleContext, wf: string) {
+  const mine = S.epoch;
+  // Providers and MCP servers change outside the panel; offer the current ones in the designer.
+  const catalog = await call(ctx, "catalog").catch(() => null);
+  if (mine !== S.epoch) return;
+  if (catalog) { S.catalog = catalog; if (S.draft) S.issues = validateWorkflow(S.draft, { profiles: catalog.profiles, mcps: catalog.mcps }); }
+  if (S.selectedId !== wf || !S.draft) await openDraft(ctx, wf); S.designerOpen = true; schedule(ctx); await refreshDetails(ctx);
+}
+async function createAndDesign(ctx: ModuleContext) {
+  if (S.dirty) { S.error = "Save the open designer's changes first."; ctx.ui.invalidate(); return; }
+  await act(ctx, async () => {
+    const r = await call(ctx, "create", { templateId: "blank" });
+    await refreshList(ctx); S.open.add(r.id); S.defs.set(r.id, r.definition);
+    await openDesigner(ctx, r.id);
+  });
 }
 async function startRun(ctx: ModuleContext, wf: string, startBlockId: string | undefined, input: string) {
   if (S.selectedId === wf && S.dirty) await saveDraft(ctx);
@@ -176,6 +203,11 @@ const mod: AppModule = {
     });
     for (const rail of ["left-sidebar", "sidebar"]) ctx.events.on(`${rail}.panelChild`, (e: any) => {
       if (e?.panel !== "workflows") return;
+      if (e.child === CREATE_CHILD) {
+        ctx.events.emit("workflows-panel.reveal", {});
+        void createAndDesign(ctx);
+        return;
+      }
       const workflow = S.list.find(w => `workflow:${w.id}` === e.child);
       if (!workflow) return;
       if (S.visible && S.maximized === workflow.id) {
@@ -224,7 +256,7 @@ const mod: AppModule = {
       { type: "row", key: "lb", gap: 6, children: [{ type: "spacer", key: "s" }, btn("c", "Close", "libraryClose")] },
     ] } as UiNode);
     if (S.designerOpen && !S.designerInline && S.draft)
-      extra.push({ type: "window", key: "designer-window", titlebar: false, title: `Workflow designer — ${S.draft.name}`, width: S.designerSize.width, height: S.designerSize.height, closeAction: "designerClosed", children: [designer()] } as UiNode);
+      extra.push({ type: "window", key: "designer-window", title: `Workflow designer — ${S.draft.name}`, width: S.designerSize.width, height: S.designerSize.height, closeAction: "designerClosed", children: [designer()] } as UiNode);
     const maximized = !!S.maximized && !inline;
     return { type: "column", key: "root", gap: 10, padding: inline ? 0 : 10, grow: true, scroll: !inline && !maximized, children: [...(inline ? [designer()] : library()), ...extra] };
   },
@@ -357,16 +389,11 @@ const mod: AppModule = {
         case "openDesigner": {
           const wf = value || ev.rowKey || S.selectedId; if (!wf) return;
           if (S.dirty && S.selectedId !== wf) { S.error = "Save the open designer's changes first."; ctx.ui.invalidate(); return; }
-          const mine = S.epoch;
-          await act(ctx, async () => {
-            // Providers and MCP servers change outside the panel; offer the current ones in the designer.
-            const catalog = await call(ctx, "catalog").catch(() => null);
-            if (mine !== S.epoch) return;
-            if (catalog) { S.catalog = catalog; if (S.draft) S.issues = validateWorkflow(S.draft, { profiles: catalog.profiles, mcps: catalog.mcps }); }
-            if (S.selectedId !== wf || !S.draft) await openDraft(ctx, wf); S.designerOpen = true; schedule(ctx); await refreshDetails(ctx);
-          });
+          await act(ctx, () => openDesigner(ctx, wf));
           return;
         }
+        // Empty list: create a blank workflow and go straight to designing it.
+        case "createAndDesign": await createAndDesign(ctx); return;
         case "closeDesigner": if (S.confirm?.kind === "block") S.confirm = null; S.designerOpen = false; S.designerInline = false; schedule(ctx); ctx.ui.invalidate(); return;
         case "designerClosed": if (S.confirm?.kind === "block") S.confirm = null; S.designerOpen = false; if (v && Number.isFinite(v.width)) S.designerSize = { width: Math.max(800, v.width), height: Math.max(500, v.height) }; schedule(ctx); ctx.ui.invalidate(); return;
         case "toPanel": S.designerInline = true; ctx.events.emit("workflows-panel.reveal", {}); ctx.ui.invalidate(); return;

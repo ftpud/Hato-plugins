@@ -22,15 +22,17 @@ export interface AddProjectView {
   cloudHosts?: { id: string; name: string; online: boolean }[];
   cloudHost?: string;
   cloudSignedIn?: boolean;
+  /** False when the Cloud plugin is not installed: no Cloud source is offered. */
+  cloudAvailable?: boolean;
 }
 
 /** On Windows a project is a native folder, a folder in a WSL distribution, or on a remote host. */
-export function sourcesFor(windows: boolean): { id: AddSource; title: string; description: string }[] {
+export function sourcesFor(windows: boolean, cloud = true): { id: AddSource; title: string; description: string }[] {
   return [
     { id: "local", title: "Local folder", description: windows ? "A Windows folder on this PC" : "A folder on this computer" },
     ...(windows ? [{ id: "wsl" as const, title: "WSL", description: "A Linux distribution on this PC" }] : []),
     { id: "ssh", title: "SSH host", description: "A folder on another machine" },
-    { id: "cloud", title: "Cloud host", description: "A folder on an enrolled Hato Cloud host" },
+    ...(cloud ? [{ id: "cloud" as const, title: "Cloud host", description: "A folder on an enrolled Hato Cloud host" }] : []),
   ];
 }
 
@@ -153,7 +155,8 @@ function sshForm(view: AddProjectView): UiNode[] {
 function cloudForm(view: AddProjectView): UiNode[] {
   if (!view.cloudHosts?.length) return [{
     type: "status", key: "no-cloud-host", level: "warn",
-    text: view.cloudSignedIn ? "Bring an enrolled Cloud host online first." : "Sign in from the Cloud panel first.",
+    text: view.cloudAvailable === false ? "Install the Hato Cloud plugin to add Cloud projects."
+      : view.cloudSignedIn ? "Bring an enrolled Cloud host online first." : "Sign in from the Cloud panel first.",
   }];
   return [
     { type: "select", key: "cloud-host", value: view.cloudHost ?? null, action: "cloudHost",
@@ -177,7 +180,7 @@ export function addProjectModal(view: AddProjectView): UiNode {
   const unavailable = (view.source === "wsl" && !view.distros.length) || (view.source === "cloud" && !view.cloudHosts?.length);
   return { type: "modal", key: "add-modal", title: "Add project", width: 720, closeAction: "hideAdd", children: [
     { type: "row", key: "add-content", height: 430, gap: 14, align: "stretch", children: [
-      { type: "column", key: "sources", width: 190, gap: 4, borderSide: "right", children: sourcesFor(view.windows).map((source): UiNode => ({
+      { type: "column", key: "sources", width: 190, gap: 4, borderSide: "right", children: sourcesFor(view.windows, view.cloudAvailable !== false).map((source): UiNode => ({
         type: "choice", key: `source:${source.id}`, text: source.title, description: source.description, selected: view.source === source.id, action: "addSource", value: source.id, mark: "",
       })) },
       { type: "column", key: `form:${view.source}`, gap: 10, grow: true, scroll: true, children: [

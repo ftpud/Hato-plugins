@@ -263,13 +263,19 @@ const mod: AppModule = {
         const [status, inventory] = await Promise.all([
           ctx.modules.call("cloud", "status"), ctx.modules.call("cloud", "inventory"),
         ]);
-        return { server: status.server, signedIn: status.signedIn, hosts: inventory.hosts,
+        return { available: true, server: status.server, signedIn: status.signedIn, hosts: inventory.hosts,
           projectIds: inventory.projects.map((p: { id: string }) => p.id) };
-      } catch { return { server: null, signedIn: false, hosts: [], projectIds: [] }; }
+      } catch (e) {
+        // `available: false`: the Cloud plugin is not installed (or is disabled), so Cloud
+        // projects cannot be offered at all.
+        const available = !/no module '|is unavailable|has no active generation/i.test(errMsg(e));
+        return { available, server: null, signedIn: false, hosts: [], projectIds: [] };
+      }
     },
 
     async addCloud(ctx, a) {
-      const { server, signedIn, hosts } = await mod.methods!.cloudHosts(ctx, {}, { caller: "projects" });
+      const { available, server, signedIn, hosts } = await mod.methods!.cloudHosts(ctx, {}, { caller: "projects" });
+      if (!available) throw new Error("Install the Hato Cloud plugin to add Cloud projects.");
       if (!signedIn) throw new Error("Sign in from the Cloud panel first.");
       const host = hosts.find((h: { id: string }) => h.id === a.hostId);
       if (!host?.online) throw new Error("Choose an online Cloud host.");
