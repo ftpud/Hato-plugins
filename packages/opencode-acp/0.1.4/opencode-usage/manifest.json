@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 2,
+  "id": "opencode-usage",
+  "name": "OpenCode usage",
+  "kind": "ui",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [
+    "opencode-provider",
+    "acp",
+    "persistence"
+  ],
+  "calls": [
+    "acp",
+    "persistence"
+  ],
+  "capabilities": [],
+  "distribution": "marketplace",
+  "stateVersion": 1,
+  "description": "OpenCode Go plan allowance remaining, with rolling, weekly and monthly windows from the model-free usage.limits API.",
+  "contributes": {
+    "overlays": [
+      {
+        "module": "opencode-usage"
+      }
+    ]
+  },
+  "author": "Hato contributors",
+  "version": "0.1.4",
+  "pluginPackage": "opencode-acp",
+  "pluginType": "AI providers"
+}

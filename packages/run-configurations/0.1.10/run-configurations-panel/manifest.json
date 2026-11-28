@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 2,
+  "id": "run-configurations-panel",
+  "name": "Run Configurations panel",
+  "kind": "ui",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [
+    "run-configurations"
+  ],
+  "calls": [
+    "run-configurations",
+    "run"
+  ],
+  "capabilities": [],
+  "runsOn": "ui",
+  "distribution": "marketplace",
+  "stateVersion": 1,
+  "description": "Create, edit and detect Java and JavaScript/TypeScript run configurations.",
+  "author": "Hato contributors",
+  "version": "0.1.10",
+  "pluginPackage": "run-configurations",
+  "pluginType": "Development",
+  "contributes": {
+    "panels": [
+      {
+        "id": "run-configurations",
+        "title": "Run Configurations",
+        "defaultHidden": true,
+        "dock": "bottom",
+        "activity": {
+          "side": "left",
+          "order": 45,
+          "iconSvg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\"><path d=\"m6 4 14 8-14 8z\"/></svg>"
+        }
+      }
+    ]
+  }
+}

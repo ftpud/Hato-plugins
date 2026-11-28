@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 2,
+  "id": "run-bar",
+  "name": "Run bar",
+  "kind": "ui",
+  "entry": "src/index.ts",
+  "moduleApiVersion": 1,
+  "dependencies": [
+    "run-configurations",
+    "persistence"
+  ],
+  "calls": [
+    "run-configurations",
+    "run",
+    "persistence"
+  ],
+  "capabilities": [],
+  "runsOn": "ui",
+  "distribution": "marketplace",
+  "stateVersion": 1,
+  "description": "Workspace-rail configuration picker with Run, Debug, Stop and Restart.",
+  "contributes": {
+    "barItems": [
+      {
+        "id": "run-bar",
+        "title": "Run / Debug",
+        "bar": "top",
+        "width": 400,
+        "order": 80
+      }
+    ]
+  },
+  "author": "Hato contributors",
+  "version": "0.1.10",
+  "pluginPackage": "run-configurations",
+  "pluginType": "Development"
+}

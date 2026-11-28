@@ -47,7 +47,7 @@
       }
     ]
   },
-  "version": "0.1.3",
+  "version": "0.1.4",
   "pluginPackage": "opencode-acp",
   "pluginType": "AI providers",
   "description": "OpenCode CLI over native ACP stdio, with workspace-scoped launch and model-free OpenCode Go plan-usage probes."

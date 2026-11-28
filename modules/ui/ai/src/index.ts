@@ -886,7 +886,7 @@ const mod: AppModule = {
           { type: "image", key: "preview", image, width: 80, height: 64 },
           { type: "button", key: "remove", text: "× " + image.name, action: "removeImage", value: index, small: true, tooltip: "Remove picture" },
         ] })) });
-        composer.push({ type: "textInput", key: "prompt", style: { ...chatStyle.textarea, minHeight: 56 }, changeAction:"draftChanged", cancelAction: "dismissCommands", pasteImageAction: "attachImages", maxFiles: 4, maxBytes: 5 * 1024 * 1024, placeholder: active.busy ? "Steer " + providerName + "…" : "Ask " + providerName + "…", multiline: true, fillHeight: true, grow: true, rows: 2, submitAction: "send", value: draft });
+        composer.push({ type: "textInput", key: "prompt", style: { ...chatStyle.textarea, minHeight: 36 }, changeAction:"draftChanged", cancelAction: "dismissCommands", pasteImageAction: "attachImages", maxFiles: 4, maxBytes: 5 * 1024 * 1024, placeholder: active.busy ? "Steer " + providerName + "…" : "Ask " + providerName + "…", multiline: true, fillHeight: true, grow: true, rows: 2, submitAction: "send", value: draft });
         // Two fixed rows that fit any panel width: what the chat uses (attachments, tools, model),
         // then how it runs (Auto, settings, context, send). The composer's minimum height fits both.
         const chipStatus = active.steering ? "Steering · " : active.busy ? "Working · " : connected ? "" : `${live?.status || conv.status || "Offline"} · `;
@@ -930,6 +930,8 @@ const mod: AppModule = {
         const transcript = transcriptPane;
         kids.push({ type: "split", key: "chat-composer-split", direction: "vertical", grow: true,
           fixed: attachments.length ? [null, 240] : undefined,
+          // Padding, a one-line prompt and both control rows: the transcript gives way first.
+          minSizes: attachments.length ? undefined : [null, 128],
           sizes: [1 - Math.max(composerFraction, attachments.length ? 0.42 : 0), Math.max(composerFraction, attachments.length ? 0.42 : 0)], minSize: attachments.length ? 260 : 150, resizeAction: "resizeComposer",
           children: [transcript, { type: "column", key: "composer", style: chatStyle.composer, grow: true, gap: 6, padding: 8, children: composer }],
           tooltip: "Drag the divider above the input to resize it",

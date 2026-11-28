@@ -1,0 +1,1763 @@
+// ../sdk/images.ts
+function imageAttachments(value) {
+  if (value == null) return [];
+  if (!Array.isArray(value) || value.length > 4) throw new Error("Attach up to 4 pictures.");
+  let total = 0;
+  return value.map((image) => {
+    if (!image || !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(image.mimeType) || typeof image.data !== "string" || !image.data.length || image.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(image.data)) throw new Error("Invalid image attachment. Use PNG, JPEG, WebP or GIF.");
+    const size = image.data.length / 4 * 3 - (image.data.endsWith("==") ? 2 : image.data.endsWith("=") ? 1 : 0);
+    total += size;
+    if (size > 5 * 1024 * 1024 || total > 10 * 1024 * 1024) throw new Error("Pictures must be under 5 MB each and 10 MB combined.");
+    return { name: String(image.name || "Picture").slice(0, 180), mimeType: image.mimeType, data: image.data };
+  });
+}
+function transcriptContent(text, existing = []) {
+  const images = [...existing];
+  const original = text;
+  const extract = (mimeType, data, name = "Picture") => {
+    try {
+      const [image] = imageAttachments([{ name, mimeType, data }]);
+      if (!images.some((item) => item.mimeType === image.mimeType && item.data === image.data)) images.push(image);
+      return "";
+    } catch {
+      return "[Picture data omitted]";
+    }
+  };
+  const uri = "data:(image/(?:png|jpeg|jpg|webp|gif));base64,([A-Za-z0-9+/]+={0,2})";
+  text = text.replace(new RegExp("!\\[([^\\]\\n]*)\\]\\(<?" + uri + ">?\\)", "gi"), (_match, name, mime, data) => extract(mime.toLowerCase().replace("image/jpg", "image/jpeg"), data, name || "Picture"));
+  text = text.replace(new RegExp(uri, "gi"), (_match, mime, data) => extract(mime.toLowerCase().replace("image/jpg", "image/jpeg"), data));
+  text = text.replace(/[A-Za-z0-9+/]{512,}={0,2}/g, (data) => {
+    const mime = data.startsWith("/9j/") ? "image/jpeg" : data.startsWith("iVBORw0KGgo") ? "image/png" : data.startsWith("R0lGOD") ? "image/gif" : data.startsWith("UklGR") && data.slice(11, 16) === "XRUJQ" ? "image/webp" : null;
+    return mime ? extract(mime, data) : data;
+  });
+  return { text: text === original ? text : text.trim(), images };
+}
+
+// ../sdk/persistent-agents.ts
+function agentProgress(args) {
+  const n = Number(args?.percent);
+  if (!Number.isFinite(n)) throw new Error("percent must be a number from 0 to 100");
+  const note = typeof args?.note === "string" ? args.note.trim().slice(0, 80) : "";
+  return { percent: Math.round(Math.max(0, Math.min(100, n))), ...note ? { note } : {}, at: Date.now() };
+}
+var PROGRESS_MARKER_INSTRUCTION = "Progress: without Hato MCP tools, emit an HTML comment on its own line, exactly in this format: <!-- hato-progress 40 | Reading tests -->. Use a number from 0 to 100 and an optional short note after |. Emit about 5 when work starts, update at major milestones while working, and emit 100 only when finished; do not save all updates for the final reply. Hato reads these comments for its sidebar and hides them. Do not add visible progress percentages or explain the comments in chat.";
+var MARKER = /<!--\s*hato-progress\s+(\d{1,3}(?:\.\d+)?)\s*%?\s*(?:\|\s*([^>]*?))?\s*-->/gi;
+function lastProgressMarker(text) {
+  let last = null;
+  for (const m of String(text || "").matchAll(MARKER)) last = m;
+  return last ? agentProgress({ percent: Number(last[1]), note: last[2] || "" }) : null;
+}
+function stripProgressMarkers(text) {
+  if (!text || !text.includes("<!--")) return text;
+  let out = text.replace(new RegExp(`^[ \\t]*(?:${MARKER.source})[ \\t]*(?:\\r?\\n|$)`, "gim"), "").replace(MARKER, "");
+  const open = out.lastIndexOf("<!--");
+  if (open >= 0 && !out.includes("-->", open)) {
+    const head = out.slice(open + 4).replace(/^\s+/, "").toLowerCase();
+    const word = head.split(/[\s|]/)[0];
+    if ("hato-progress".startsWith(word) || /^hato-progress\b/.test(head)) out = out.slice(0, open);
+  }
+  return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+function scanProgressChunk(tail, chunk) {
+  const text = tail + chunk;
+  return { progress: lastProgressMarker(text), tail: text.slice(-240) };
+}
+var PROGRESS_INSTRUCTION = `Progress: call this session's report_progress tool with JSON like {"percent":5,"note":"Inspecting code"}. Use 0–100: about 5 at the start, update at major milestones while working, and 100 only when finished. The optional note is at most 80 characters. Inspect the tool result: {"percent":5} acknowledges the update; isError or 'Transport closed' means it failed even if the call returned normally. If a connection is closed, try another available report_progress endpoint for this session instead of repeatedly using the stale connection. Do not assume failed updates reached the sidebar. Progress feeds Hato's sidebar only — do not mention it in chat replies.`;
+function modelChoices(state) {
+  const option = state.configOptions?.find((o) => o.category === "model");
+  if (option) {
+    const flatten = (options) => options.flatMap((o) => Array.isArray(o.options) ? flatten(o.options) : [o]);
+    return flatten(option.options || []).map((o) => ({ id: String(o.value), label: o.name || String(o.value), configId: option.id }));
+  }
+  return (state.models?.availableModels || []).map((m) => ({ id: m.modelId, label: m.name || m.modelId, configId: "__model" }));
+}
+function relativeAgentPath(value) {
+  if (typeof value !== "string" || !value || value.startsWith("/") || value.includes("\\") || value.split("/").some((p) => p === ".." || !p)) throw new Error("Expected a workspace-relative instruction path");
+  return value;
+}
+var agentPolicy = (s) => s.autopilot ? "autopilot" : s.approvalPolicy === "auto-low" ? "auto-low" : "ask";
+var LOW_RISK_TOOL_KINDS = /* @__PURE__ */ new Set(["read", "search", "think", "fetch"]);
+var LIMITABLE_TOOL_KINDS = ["execute", "edit", "delete", "move", "fetch"];
+var NO_AGENT_LIMITS = { maxConcurrent: 0, maxTurnMinutes: 0, approvalCap: "autopilot", deniedToolKinds: [], allowedProviders: [], allowedModels: [] };
+var POLICY_RANK = { ask: 0, "auto-low": 1, autopilot: 2 };
+var idList = (v, max = 64) => Array.isArray(v) ? [...new Set(v.filter((x) => typeof x === "string").map((x) => x.trim()).filter((x) => x && x.length <= 200))].slice(0, max) : [];
+var whole = (v, max) => Number.isInteger(v) && v > 0 ? Math.min(v, max) : 0;
+function normalizeAgentLimits(value) {
+  const v = value && typeof value === "object" ? value : {};
+  return {
+    maxConcurrent: whole(v.maxConcurrent, 64),
+    maxTurnMinutes: whole(v.maxTurnMinutes, 7 * 24 * 60),
+    approvalCap: v.approvalCap === "ask" || v.approvalCap === "auto-low" ? v.approvalCap : "autopilot",
+    deniedToolKinds: idList(v.deniedToolKinds).filter((k) => LIMITABLE_TOOL_KINDS.includes(k)),
+    allowedProviders: idList(v.allowedProviders),
+    allowedModels: idList(v.allowedModels)
+  };
+}
+var cappedPolicy = (policy, limits2) => POLICY_RANK[policy] <= POLICY_RANK[limits2.approvalCap] ? policy : limits2.approvalCap;
+function agentRefusal(limits2, provider, model) {
+  if (limits2.allowedProviders.length && !limits2.allowedProviders.includes(provider || ""))
+    return `Provider ${provider || "(unknown)"} is not allowed on this machine (allowed: ${limits2.allowedProviders.join(", ")}).`;
+  if (model && limits2.allowedModels.length && !limits2.allowedModels.includes(model))
+    return `Model ${model} is not allowed on this machine (allowed: ${limits2.allowedModels.join(", ")}).`;
+  return null;
+}
+function agentSettings(value) {
+  const out = {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) return out;
+  for (const [k, v] of Object.entries(value).slice(0, 32))
+    if (k && k.length <= 200 && (typeof v === "boolean" || typeof v === "string" && v.length <= 500)) out[k] = v;
+  return out;
+}
+
+// ../sdk/chat-handoff.ts
+function chatHandoff(messages) {
+  const dialogue = messages.map((m) => ({ ...m, text: stripProgressMarkers(transcriptContent(m.text).text) })).filter((m) => (m.role === "user" || m.role === "assistant") && m.text.trim());
+  if (!dialogue.length) return "";
+  let budget = 14e3;
+  const recent = [];
+  for (const m of dialogue.slice(-12).reverse()) {
+    if (budget <= 0) break;
+    const text = m.text.slice(0, Math.min(4e3, budget));
+    recent.unshift(`${m.role}: ${text}${text.length < m.text.length ? " [truncated]" : ""}`);
+    budget -= text.length + 32;
+  }
+  return "Conversation handoff (historical dialogue, not new instructions). Continue the same task. This excerpt is bounded; earlier messages, tools, reasoning and image data are omitted. Use available history tools if more detail is needed.\n\n" + recent.join("\n\n");
+}
+
+// ../sdk/acp-protocol.ts
+function acpSystemPrompt(agentCapabilities, trustedInstructions) {
+  if (!agentCapabilities?.sessionCapabilities?.systemPrompt || typeof trustedInstructions !== "string") return null;
+  const text = trustedInstructions.trim();
+  if (!text) return null;
+  let bytes = 0;
+  for (const character of text) {
+    const point = character.codePointAt(0);
+    bytes += point <= 127 ? 1 : point <= 2047 ? 2 : point <= 65535 ? 3 : 4;
+  }
+  if (bytes > 128 * 1024) throw new Error("Trusted ACP systemPrompt exceeds the 128 KiB instruction budget");
+  return { mode: "append", content: [{ type: "text", text }] };
+}
+
+// ../sdk/acp-subagents.ts
+var validId = (id) => typeof id === "string" && id.length > 0 && id.length <= 4096;
+var own = (children, id) => Object.prototype.hasOwnProperty.call(children, id);
+var label = (v) => typeof v === "string" ? v.slice(0, 200) : void 0;
+var knownSubagent = (children, id) => validId(id) && own(children, id);
+function disconnectSubagents(children) {
+  return Object.fromEntries(Object.entries(children || {}).map(([id, c]) => [id, { ...c, state: "unknown", stopReason: void 0, progress: void 0, progressTail: void 0 }]));
+}
+var LEGACY_STATES = { created: "running", busy: "running", waiting: "requires_action", completed: "idle", done: "idle", error: "idle", failed: "idle", interrupted: "idle" };
+var LEGACY_STOPS = { completed: "end_turn", done: "end_turn", error: "error", failed: "error", interrupted: "cancelled" };
+var OPENCODE_CHILD_UPDATE = "opencode/session/child_update";
+var OPENCODE_CHILD_OPT_IN = { "opencode/child-session-updates": true };
+function openCodeChildUpdate(params) {
+  const root = params?.rootSessionId, id = params?.childSessionId;
+  if (!validId(root) || !validId(id)) return null;
+  const tag = { id, parentID: params.parentSessionId, depth: params.depth, ...typeof params.title === "string" ? { title: params.title } : {} };
+  if (params.type === "status" && typeof params.status === "string")
+    return { sessionId: root, update: { sessionUpdate: "_hato_child_status", _meta: { "opencode/child-session": { ...tag, status: params.status } } } };
+  if (params.type === "update" && params.update && typeof params.update === "object" && !Array.isArray(params.update)) {
+    const u = params.update, meta = u._meta && typeof u._meta === "object" ? u._meta : {};
+    return { sessionId: root, update: { ...u, _meta: { ...meta, "opencode/child-session": { ...tag, ...meta["opencode/child-session"] } } } };
+  }
+  return null;
+}
+function updateSubagents(children, rootId, params, replayed = false) {
+  const parent = params?.sessionId;
+  if (!validId(parent) || parent !== rootId && !knownSubagent(children, parent)) return false;
+  const u = params.update || {};
+  if (typeof u !== "object" || Array.isArray(u)) return false;
+  const meta = u._meta?.["opencode/child-session"] || params._meta?.["opencode/child-session"];
+  const legacy = meta && typeof meta === "object" && !Array.isArray(meta) ? meta : null;
+  if (u.sessionUpdate === "subagent_update" || legacy) {
+    const patch = legacy || u, id = legacy ? patch.id : patch.sessionId;
+    if (!validId(id) || id === rootId || id === parent || !own(children, id) && Object.keys(children).length >= 200) return false;
+    if (own(children, id) && children[id].parentId !== parent) return false;
+    const child2 = own(children, id) ? { ...children[id] } : { id, parentId: parent, state: "unknown" };
+    for (const key of ["title", "description"]) if (key in patch) child2[key] = label(patch[key]);
+    if (legacy && "name" in patch && !("title" in patch)) child2.title = label(patch.name);
+    if ("state" in patch || legacy && "status" in patch) {
+      const state = patch.state ?? patch.status;
+      const value = typeof state === "string" ? state : state?.state;
+      const next = legacy ? LEGACY_STATES[value] || value : value;
+      child2.state = !replayed && ["running", "requires_action", "idle"].includes(next) ? next : "unknown";
+      child2.stopReason = replayed ? void 0 : label(state?.stopReason) || (legacy ? LEGACY_STOPS[value] : void 0);
+      if (child2.state === "running" && children[id]?.state !== "running") {
+        child2.progress = void 0;
+        child2.progressTail = void 0;
+      }
+    }
+    Object.defineProperty(children, id, { value: child2, enumerable: true, writable: true, configurable: true });
+    return true;
+  }
+  if (!knownSubagent(children, parent)) return false;
+  const child = { ...children[parent] };
+  if (u.sessionUpdate === "session_info_update" && "title" in u) child.sessionTitle = label(u.title);
+  else if (u.sessionUpdate === "state_update") {
+    child.state = !replayed && ["running", "requires_action", "idle"].includes(u.state) ? u.state : "unknown";
+    child.stopReason = replayed ? void 0 : label(u.stopReason);
+  } else if (!replayed && ["tool_call", "tool_call_update"].includes(u.sessionUpdate) && u.title) child.activity = label(u.title);
+  else if (!replayed && u.sessionUpdate === "agent_message_chunk" && u.content?.type === "text") {
+    const scan = scanProgressChunk(child.progressTail || "", String(u.content.text || ""));
+    child.progressTail = scan.tail;
+    if (scan.progress) child.progress = scan.progress;
+  }
+  children[parent] = child;
+  return true;
+}
+
+// ../sdk/provider-mcp.ts
+var CONFIG_ENV = "HATO_MCP_LAUNCH_CONFIG";
+var MCP_LAUNCH_WRAPPER = `
+const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),cp=require('node:child_process');
+let dir;
+const cleanup=()=>{if(dir){try{fs.rmSync(dir,{recursive:true,force:true});}catch{}dir=undefined;}};
+process.on('exit',cleanup);
+try {
+ const config=process.env.${CONFIG_ENV};delete process.env.${CONFIG_ENV};
+ if(!config)throw new Error('missing configuration');
+ const [command,flag,...args]=process.argv.slice(1);
+ dir=fs.mkdtempSync(path.join(os.tmpdir(),'hato-mcp-'));fs.chmodSync(dir,0o700);
+ const file=path.join(dir,'servers.json');fs.writeFileSync(file,config,{mode:0o600});
+ const child=cp.spawn(command,[...args,flag,'@'+file],{stdio:'inherit',env:process.env});
+ for(const signal of ['SIGTERM','SIGINT','SIGHUP'])process.on(signal,()=>child.kill(signal));
+ child.on('error',()=>{cleanup();process.stderr.write('Hato MCP launcher could not start the provider\\n');process.exit(1);});
+ child.on('exit',code=>{cleanup();process.exit(code===null?1:code);});
+} catch {cleanup();process.stderr.write('Hato MCP launcher could not prepare the private configuration\\n');process.exit(1);}
+`;
+function providerMcpLaunch(options, executable, args, env, servers, nodeExecutable = "node") {
+  const stdio = options ? servers.filter((server) => (server.type || server.transport || "stdio") === "stdio") : [];
+  if (!options || !stdio.length) return { executable, args, env, sessionServers: servers, wrapped: false };
+  if (!/^--[a-z][a-z0-9-]*$/i.test(options.flag)) throw new Error("Invalid provider MCP launch flag");
+  const configs = /* @__PURE__ */ Object.create(null);
+  for (const server of stdio) {
+    if (typeof server.name !== "string" || typeof server.command !== "string" || !Array.isArray(server.args)) throw new Error("Invalid stdio MCP server");
+    if (Object.prototype.hasOwnProperty.call(configs, server.name)) throw new Error(`Duplicate MCP server name: ${server.name}`);
+    configs[server.name] = {
+      type: options.stdioType || "local",
+      command: server.command,
+      args: server.args,
+      env: Object.fromEntries((server.env || []).map((pair) => [pair.name, pair.value])),
+      ...options.tools ? { tools: options.tools } : {}
+    };
+  }
+  return {
+    executable: nodeExecutable,
+    args: ["-e", MCP_LAUNCH_WRAPPER, "--", executable, options.flag, ...args],
+    env: { ...env, [CONFIG_ENV]: JSON.stringify({ mcpServers: configs }) },
+    sessionServers: servers.filter((server) => !stdio.includes(server)),
+    wrapped: true
+  };
+}
+
+// ../sdk/sha256.ts
+var K = new Uint32Array([
+  1116352408,
+  1899447441,
+  3049323471,
+  3921009573,
+  961987163,
+  1508970993,
+  2453635748,
+  2870763221,
+  3624381080,
+  310598401,
+  607225278,
+  1426881987,
+  1925078388,
+  2162078206,
+  2614888103,
+  3248222580,
+  3835390401,
+  4022224774,
+  264347078,
+  604807628,
+  770255983,
+  1249150122,
+  1555081692,
+  1996064986,
+  2554220882,
+  2821834349,
+  2952996808,
+  3210313671,
+  3336571891,
+  3584528711,
+  113926993,
+  338241895,
+  666307205,
+  773529912,
+  1294757372,
+  1396182291,
+  1695183700,
+  1986661051,
+  2177026350,
+  2456956037,
+  2730485921,
+  2820302411,
+  3259730800,
+  3345764771,
+  3516065817,
+  3600352804,
+  4094571909,
+  275423344,
+  430227734,
+  506948616,
+  659060556,
+  883997877,
+  958139571,
+  1322822218,
+  1537002063,
+  1747873779,
+  1955562222,
+  2024104815,
+  2227730452,
+  2361852424,
+  2428436474,
+  2756734187,
+  3204031479,
+  3329325298
+]);
+
+// ../sdk/runtime.ts
+var JsonRpcPeer = class {
+  constructor(send, startId = 1) {
+    this.send = send;
+    this.buf = "";
+    this.nextId = 1;
+    this.pending = /* @__PURE__ */ new Map();
+    this.onRequest = async (m) => {
+      throw rpcError(-32601, "Method not found: " + m);
+    };
+    this.onNotification = () => {
+    };
+    this.onProtocolError = () => {
+    };
+    this.nextId = startId;
+  }
+  get pendingCount() {
+    return this.pending.size;
+  }
+  get nextRequestId() {
+    return this.nextId;
+  }
+  get partial() {
+    return this.buf;
+  }
+  restore(partial) {
+    this.buf = partial;
+  }
+  feed(chunk) {
+    this.buf += chunk;
+    let i;
+    while ((i = this.buf.indexOf("\n")) >= 0) {
+      const line = this.buf.slice(0, i).trim();
+      this.buf = this.buf.slice(i + 1);
+      if (!line) continue;
+      let msg;
+      try {
+        msg = JSON.parse(line);
+      } catch (e) {
+        this.onProtocolError("invalid JSON", line);
+        continue;
+      }
+      this.handle(msg, line);
+    }
+  }
+  handle(msg, line) {
+    if (msg && msg.method && msg.id !== void 0 && msg.id !== null) {
+      const id = msg.id;
+      this.onRequest(msg.method, msg.params, id).then(
+        (result) => this.send(JSON.stringify({ jsonrpc: "2.0", id, result: result === void 0 ? null : result })),
+        (err) => this.send(JSON.stringify({ jsonrpc: "2.0", id, error: { code: err && typeof err.rpcCode === "number" ? err.rpcCode : -32603, message: err && err.message || String(err), data: err && err.data } }))
+      ).catch(() => {
+      });
+    } else if (msg && msg.method) {
+      try {
+        this.onNotification(msg.method, msg.params);
+      } catch (e) {
+        this.onProtocolError(String(e), line);
+      }
+    } else if (msg && (msg.result !== void 0 || msg.error !== void 0) && msg.id !== void 0) {
+      const p = this.pending.get(msg.id);
+      if (!p) return;
+      this.pending.delete(msg.id);
+      if (msg.error) {
+        const d = msg.error.data;
+        const detail = d ? typeof d === "string" ? d : typeof d.message === "string" ? d.message : JSON.stringify(d) : "";
+        const e = new Error((msg.error.message || "JSON-RPC error") + (detail && !String(msg.error.message).includes(detail) ? `: ${detail.slice(0, 600)}` : ""));
+        e.rpcCode = msg.error.code;
+        e.data = msg.error.data;
+        p.reject(e);
+      } else p.resolve(msg.result);
+    } else {
+      this.onProtocolError("unrecognized message", line);
+    }
+  }
+  request(method, params) {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject, method });
+      this.send(JSON.stringify({ jsonrpc: "2.0", id, method, params })).catch((e) => {
+        this.pending.delete(id);
+        reject(e);
+      });
+    });
+  }
+  cancelRequest(id, reason = "Request cancelled") {
+    const pending = this.pending.get(id);
+    if (!pending) return;
+    this.pending.delete(id);
+    pending.reject(Object.assign(new Error(reason), { code: "ECANCELLED" }));
+    void this.notify("$/cancel_request", { requestId: id }).catch(() => {
+    });
+  }
+  notify(method, params) {
+    return this.send(JSON.stringify({ jsonrpc: "2.0", method, params }));
+  }
+  failAll(reason) {
+    for (const [id, p] of this.pending) {
+      const e = new Error(reason);
+      e.code = "ECLOSED";
+      p.reject(e);
+      this.pending.delete(id);
+    }
+  }
+};
+function rpcError(code, message2, data) {
+  const e = new Error(message2);
+  e.rpcCode = code;
+  e.data = data;
+  return e;
+}
+function errMsg(e) {
+  return e && (e.message || String(e)) || "unknown error";
+}
+
+// ../sdk/workflow-provider-options.ts
+function advertisedChoices(session2) {
+  const thought = session2.configOptions?.find((o) => o.category === "thought_level" && o.type !== "boolean");
+  const flatten = (items) => items.flatMap((o) => Array.isArray(o.options) ? flatten(o.options) : [o]);
+  return {
+    models: modelChoices(session2).map((m) => ({ value: m.id, label: m.label })),
+    reasoning: thought ? flatten(thought.options || []).filter((o) => typeof o.value === "string").map((o) => ({ value: o.value, label: o.name || o.value })) : [],
+    reasoningId: thought?.id
+  };
+}
+
+// ../sdk/platform.ts
+var isPosix = (os) => os !== "windows";
+function osOf(platform) {
+  return platform === "windows" ? "windows" : platform === "macos" ? "macos" : platform === "linux" ? "linux" : "posix";
+}
+function hostOs(ctx) {
+  return osOf(ctx.host?.env?.info?.().platform);
+}
+var pathListSeparator = (os) => os === "windows" ? ";" : ":";
+function isAbsolutePath(p) {
+  return p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\");
+}
+var slashPath = (p) => p.replace(/\\/g, "/");
+function dirName(p) {
+  const s = slashPath(p).replace(/\/+$/, "");
+  const i = s.lastIndexOf("/");
+  return i <= 0 ? i === 0 ? "/" : "." : /^[A-Za-z]:$/.test(s.slice(0, i)) ? s.slice(0, i + 1) : s.slice(0, i);
+}
+function knownDirs(ctx) {
+  const info = ctx.host?.env?.info?.();
+  const d = info?.knownDirs || {};
+  const windows = osOf(info?.platform) === "windows";
+  return {
+    home: d.home ?? info?.home ?? null,
+    system: d.system || (windows ? "C:\\Windows" : null),
+    programs: d.programs || (windows ? "C:\\Program Files" : null),
+    localData: d.localData || null,
+    roamingData: d.roamingData || null
+  };
+}
+var systemRoot = (ctx) => knownDirs(ctx).system || "C:\\Windows";
+var windowsPowerShell = (ctx) => `${systemRoot(ctx)}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
+var windowsCmd = (ctx) => `${systemRoot(ctx)}\\System32\\cmd.exe`;
+var windowsWsl = (ctx) => `${systemRoot(ctx)}\\System32\\wsl.exe`;
+var PWSH_UTF8 = "[Console]::InputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);$OutputEncoding=[Console]::OutputEncoding";
+function pwshScript(command) {
+  return `${PWSH_UTF8}
+${command}
+$hatoOk=$?
+if (-not $hatoOk) { if ($LASTEXITCODE) { exit $LASTEXITCODE }; exit 1 }
+exit 0`;
+}
+function executionPolicyHint(output) {
+  if (!/running scripts is disabled on this system|about_Execution_Policies|cannot be loaded because running scripts/i.test(output)) return null;
+  return "PowerShell's execution policy blocked a script (for example npm.ps1). Hato does not change this policy. Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` in PowerShell, or choose Command Prompt as the shell.";
+}
+function posixHeredoc(language, code) {
+  const shell = language === "bash" || language === "zsh" ? language : "sh";
+  let delimiter = "HATO_SCRIPT";
+  while (code.split(/\r?\n/).includes(delimiter)) delimiter += "_";
+  return `${shell} <<'${delimiter}'
+${code}${code.endsWith("\n") ? "" : "\n"}${delimiter}`;
+}
+var POSIX_CODE = { languages: ["sh", "shell", "bash", "zsh"], type: posixHeredoc };
+var asTyped = (_language, code) => code.replace(/\r?\n$/, "");
+var windowsOnly = (os) => os === "windows";
+var powershellProfile = (label2, programs) => ({
+  label: label2,
+  os: windowsOnly,
+  programs: (ctx, c) => c.program ? [c.program] : programs(ctx),
+  terminal: () => ["-NoLogo", "-NoExit", "-Command", PWSH_UTF8],
+  command: (command) => ({ args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", pwshScript(command)] }),
+  code: { languages: ["powershell", "pwsh", "ps1"], type: asTyped },
+  hint: executionPolicyHint
+});
+var SHELL_PROFILES = {
+  // The user's login shell (Linux, macOS, SSH/WSL/Cloud machines). The kernel/daemon picks the program.
+  login: {
+    label: "Login shell",
+    os: isPosix,
+    programs: (_ctx, c) => c.program ? [c.program] : [],
+    terminal: () => ["-l"],
+    command: (command) => ({ args: ["-lc", command] }),
+    code: POSIX_CODE
+  },
+  pwsh: powershellProfile("PowerShell 7 (pwsh)", (ctx) => [`${knownDirs(ctx).programs || "C:\\Program Files"}\\PowerShell\\7\\pwsh.exe`, "pwsh.exe"]),
+  powershell: powershellProfile("Windows PowerShell 5.1", (ctx) => [windowsPowerShell(ctx)]),
+  cmd: {
+    label: "Command Prompt (cmd)",
+    os: windowsOnly,
+    programs: (ctx, c) => c.program ? [c.program] : [windowsCmd(ctx)],
+    terminal: () => ["/K", "chcp 65001>nul"],
+    // `/s /c "<command>"`: cmd strips exactly the outer quotes and runs the rest as typed.
+    command: (command) => ({ args: ["/d", "/s", "/c", `"${command}"`], verbatimArgs: true }),
+    code: { languages: ["cmd", "bat", "batch"], type: asTyped }
+  },
+  "git-bash": {
+    label: "Git Bash",
+    os: windowsOnly,
+    programs: (ctx, c) => {
+      if (c.program) return [c.program];
+      const d = knownDirs(ctx);
+      return [`${d.programs || "C:\\Program Files"}\\Git\\bin\\bash.exe`, ...d.localData ? [`${d.localData}\\Programs\\Git\\bin\\bash.exe`] : []];
+    },
+    terminal: () => ["--login", "-i"],
+    command: (command) => ({ args: ["-lc", command] }),
+    code: POSIX_CODE
+  },
+  wsl: {
+    label: "WSL",
+    os: windowsOnly,
+    programs: (ctx, c) => c.program ? [c.program] : [windowsWsl(ctx)],
+    terminal: (c) => c.distro ? ["-d", c.distro] : [],
+    command: (command, c) => ({ args: [...c.distro ? ["-d", c.distro] : [], "--exec", "/bin/sh", "-lc", command] }),
+    code: POSIX_CODE
+  }
+};
+var RUNNABLE_CODE_LANGUAGES = [...new Set(Object.values(SHELL_PROFILES).flatMap((p) => p.code.languages))];
+var RESOLVE_MARK = "__HATO_RESOLVE__=";
+var RESOLVE_SCRIPT = [
+  "$ErrorActionPreference='SilentlyContinue'",
+  "$m=[Environment]::GetEnvironmentVariable('Path','Machine');$u=[Environment]::GetEnvironmentVariable('Path','User')",
+  "$p=((@($m,$u)|Where-Object {$_}) -join ';');$env:Path=$p",
+  "$n=$env:HATO_RESOLVE;$c=$null",
+  "if ([IO.Path]::IsPathRooted($n)) { if (Test-Path -LiteralPath $n -PathType Leaf) { $c=(Resolve-Path -LiteralPath $n).Path } }",
+  "else { $c=(Get-Command -Name $n -CommandType Application | Select-Object -First 1).Source }",
+  "$s=$null;$nx=$false;$node=$null",
+  "if ($c -and $c -match '\\.(cmd|bat)$') { $s=[IO.File]::ReadAllText($c);$nx=Test-Path -LiteralPath (Join-Path (Split-Path -Parent $c) 'node.exe');$node=(Get-Command -Name node -CommandType Application | Select-Object -First 1).Source }",
+  `[Console]::Out.Write("\`n${RESOLVE_MARK}"+(ConvertTo-Json -Compress @{path=$c;pathEnv=$p;shim=$s;nodeNext=$nx;node=$node}))`
+].join("\n");
+var SAFE_NAME = /^[A-Za-z0-9_.@+\-\\/: ()]+$/;
+async function resolveWindowsExecutable(ctx, grant, cwd, name) {
+  if (!SAFE_NAME.test(name) || /[*?\[\]]/.test(name)) throw new Error(`Unsupported executable name: ${name}`);
+  const r = await ctx.host.process.run(
+    grant,
+    {
+      target: { kind: "local" },
+      executable: windowsPowerShell(ctx),
+      args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", RESOLVE_SCRIPT],
+      cwd,
+      env: { HATO_RESOLVE: name }
+    },
+    { timeoutMs: 3e4, limitBytes: 1 << 20 }
+  );
+  const line = r.stdout.split(/\r?\n/).filter((l) => l.startsWith(RESOLVE_MARK)).pop();
+  if (!line) throw new Error(`Could not query PATH with Windows PowerShell: ${(r.stderr || r.stdout).trim().slice(-400)}`);
+  const found = JSON.parse(line.slice(RESOLVE_MARK.length));
+  if (!found.path) return null;
+  const path = String(found.path), pathEnv = String(found.pathEnv || "");
+  if (!/\.(cmd|bat)$/i.test(path)) return { path, pathEnv, launch: { executable: path, args: [] } };
+  const shim = parseCmdShim(String(found.shim || ""), path, npmNodeExe(path, !!found.nodeNext, found.node || null));
+  return { path, pathEnv, launch: shim || { executable: path, args: [] } };
+}
+function npmNodeExe(shimPath, nodeNext, node) {
+  return nodeNext ? `${dirName(shimPath).replace(/\//g, "\\")}\\node.exe` : node;
+}
+function parseCmdShim(text, shimPath, node) {
+  if (!node) return null;
+  const dir = slashPath(shimPath).replace(/\/[^/]*$/, "");
+  const win = (p) => p.replace(/\//g, "\\");
+  const key = /npx\.cmd$/i.test(shimPath) ? "NPX_CLI_JS" : "NPM_CLI_JS";
+  const npm = new RegExp(`SET\\s+"${key}=%~dp0\\\\?([^"]+\\.c?js)"`, "i").exec(text);
+  if (npm) return { executable: node, args: [win(normalize(`${dir}/${slashPath(npm[1])}`))] };
+  if (!/node\.exe"/i.test(text)) return null;
+  const matches = [...text.matchAll(/"%(?:dp0%|~dp0)\\?([^"%]+)"\s+%\*/gi)];
+  const m = matches[matches.length - 1];
+  if (!m || /node\.exe$/i.test(m[1])) return null;
+  return { executable: node, args: [win(normalize(`${dir}/${slashPath(m[1])}`))] };
+}
+function normalize(p) {
+  const prefix = p.startsWith("//") ? "//" : p.startsWith("/") ? "/" : "";
+  const out = [];
+  for (const part of p.slice(prefix.length).split("/")) {
+    if (part === "..") {
+      if (out.length > 1) out.pop();
+    } else if (part !== "." && part !== "") out.push(part);
+  }
+  return prefix + out.join("/");
+}
+
+// ../sdk/agent-executable.ts
+async function agentExecutable(ctx, grant, root, executable) {
+  if (hostOs(ctx) === "windows") {
+    const found = await resolveWindowsExecutable(ctx, grant, root, executable);
+    if (!found) throw new Error(`ACP adapter '${executable}' was not found on PATH. Install it for this user or configure an absolute executable path.`);
+    return found;
+  }
+  for (const mode of ["-lc", "-ic"]) {
+    const probe = `exec /bin/sh -c 'p=$(command -v -- "$1") || exit; printf "\\n__HATO_EXEC__=%s\\n__HATO_PATH__=%s\\n" "$p" "$PATH"' hato-agent-detect `;
+    const quote = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
+    const result = await ctx.host.process.run(grant, {
+      target: { kind: "local" },
+      executable: "/bin/sh",
+      args: ["-c", 'exec "${SHELL:-/bin/sh}" "$1" "$2"', "hato-agent-shell", mode, probe + quote(executable)],
+      cwd: root
+    }, { timeoutMs: 2e4 });
+    const path = /^__HATO_EXEC__=(.+)$/m.exec(result.stdout)?.[1];
+    const pathEnv = /^__HATO_PATH__=(.+)$/m.exec(result.stdout)?.[1];
+    if (result.code === 0 && path && pathEnv) return { path, pathEnv, launch: { executable: path, args: [] } };
+  }
+  throw new Error(`ACP adapter '${executable}' was not found in the daemon user's login or interactive shell PATH. Install it for that user on this machine or configure an absolute executable path.`);
+}
+
+// ../sdk/text-diff.ts
+function splitLines(text) {
+  if (!text) return { lines: [], noEol: false };
+  const noEol = !text.endsWith("\n");
+  const lines = (noEol ? text : text.slice(0, -1)).split("\n");
+  return { lines, noEol };
+}
+function myers(a, b, maxD) {
+  const n = a.length, m = b.length, max = n + m, offset = max;
+  maxD = Math.min(maxD, Math.floor(8e6 / (2 * max + 2)));
+  const v = new Int32Array(2 * max + 2);
+  const trace = [];
+  for (let d = 0; d <= Math.min(max, maxD); d++) {
+    trace.push(v.slice());
+    for (let k = -d; k <= d; k += 2) {
+      let x = k === -d || k !== d && v[offset + k - 1] < v[offset + k + 1] ? v[offset + k + 1] : v[offset + k - 1] + 1;
+      let y = x - k;
+      while (x < n && y < m && a[x] === b[y]) {
+        x++;
+        y++;
+      }
+      v[offset + k] = x;
+      if (x >= n && y >= m) {
+        const ops = [];
+        let cx = n, cy = m;
+        for (let dd = d; dd > 0; dd--) {
+          const pv = trace[dd], kk = cx - cy;
+          const prevK = kk === -dd || kk !== dd && pv[offset + kk - 1] < pv[offset + kk + 1] ? kk + 1 : kk - 1;
+          const px = pv[offset + prevK], py = px - prevK;
+          while (cx > px && cy > py) {
+            ops.push({ kind: " ", line: a[--cx] });
+            cy--;
+          }
+          if (cx === px) ops.push({ kind: "+", line: b[--cy] });
+          else ops.push({ kind: "-", line: a[--cx] });
+        }
+        while (cx > 0 && cy > 0) {
+          ops.push({ kind: " ", line: a[--cx] });
+          cy--;
+        }
+        return ops.reverse();
+      }
+    }
+  }
+  return null;
+}
+function diffLines(a, b, maxD = 4e3) {
+  let start2 = 0;
+  while (start2 < a.length && start2 < b.length && a[start2] === b[start2]) start2++;
+  let endA = a.length, endB = b.length;
+  while (endA > start2 && endB > start2 && a[endA - 1] === b[endB - 1]) {
+    endA--;
+    endB--;
+  }
+  const midA = a.slice(start2, endA), midB = b.slice(start2, endB);
+  const mid = myers(midA, midB, maxD) ?? [...midA.map((line) => ({ kind: "-", line })), ...midB.map((line) => ({ kind: "+", line }))];
+  return [...a.slice(0, start2).map((line) => ({ kind: " ", line })), ...mid, ...a.slice(endA).map((line) => ({ kind: " ", line }))];
+}
+function unifiedPatch(path, before, after, context = 3) {
+  if (before === after) return "";
+  const header = [`diff --git a/${path} b/${path}`];
+  if (before === null) header.push("new file mode 100644");
+  if (after === null) header.push("deleted file mode 100644");
+  header.push(before === null ? "--- /dev/null" : `--- a/${path}`, after === null ? "+++ /dev/null" : `+++ b/${path}`);
+  const A = splitLines(before ?? ""), B = splitLines(after ?? "");
+  const NO_EOL = "\0";
+  const keyed = (s) => s.noEol ? [...s.lines.slice(0, -1), s.lines[s.lines.length - 1] + NO_EOL] : s.lines;
+  const ops = diffLines(keyed(A), keyed(B)).map((op) => op.line.endsWith(NO_EOL) ? { ...op, line: op.line.slice(0, -1) } : op);
+  const hunks = [];
+  let i = 0, oldNo = 1, newNo = 1;
+  const noEolAt = (op, ai, bi) => op.kind !== "+" && A.noEol && ai === A.lines.length || op.kind !== "-" && B.noEol && bi === B.lines.length;
+  while (i < ops.length) {
+    if (ops[i].kind === " ") {
+      i++;
+      oldNo++;
+      newNo++;
+      continue;
+    }
+    let from = i, lead = 0;
+    while (from > 0 && lead < context && ops[from - 1].kind === " ") {
+      from--;
+      lead++;
+    }
+    let to = i;
+    for (; ; ) {
+      while (to < ops.length && ops[to].kind !== " ") to++;
+      let gap = 0;
+      while (to + gap < ops.length && ops[to + gap].kind === " ") gap++;
+      if (to + gap < ops.length && gap <= 2 * context) {
+        to += gap;
+        continue;
+      }
+      to = Math.min(ops.length, to + Math.min(gap, context));
+      break;
+    }
+    const oStart = oldNo - lead, nStart = newNo - lead;
+    let oCount = 0, nCount = 0, ai = oStart - 1, bi = nStart - 1;
+    const body = [];
+    for (let j = from; j < to; j++) {
+      const op = ops[j];
+      if (op.kind !== "+") {
+        oCount++;
+        ai++;
+      }
+      if (op.kind !== "-") {
+        nCount++;
+        bi++;
+      }
+      body.push(op.kind + op.line);
+      if (noEolAt(op, ai, bi)) body.push("\\ No newline at end of file");
+    }
+    hunks.push(`@@ -${oCount ? oStart : oStart - 1},${oCount} +${nCount ? nStart : nStart - 1},${nCount} @@`, ...body);
+    for (let j = i; j < to; j++) {
+      if (ops[j].kind !== "+") oldNo++;
+      if (ops[j].kind !== "-") newNo++;
+    }
+    i = to;
+  }
+  if (!hunks.length) return "";
+  return [...header, ...hunks].join("\n") + "\n";
+}
+function diffHunks(before, after, maxLines = 400, context = 2) {
+  const patch = unifiedPatch("f", before, after, context);
+  const all = patch ? patch.split("\n").filter((line) => line && !/^(diff --git|new file mode|deleted file mode|--- |\+\+\+ )/.test(line)) : [];
+  let added = 0, removed = 0;
+  for (const line of all) {
+    if (line[0] === "+") added++;
+    else if (line[0] === "-") removed++;
+  }
+  return { lines: all.slice(0, maxLines), added, removed, truncated: all.length > maxLines };
+}
+
+// ../sdk/chat-diffs.ts
+function acpDiffs(content) {
+  const blocks = Array.isArray(content) ? content : content ? [content] : [];
+  const out = [];
+  for (const block of blocks.slice(0, 20)) {
+    if (block?.type !== "diff" || typeof block.path !== "string") continue;
+    const before = typeof block.oldText === "string" ? block.oldText : null;
+    const after = typeof block.newText === "string" ? block.newText : "";
+    if ((before?.length || 0) + after.length > 4e5) {
+      out.push({ path: block.path, lines: [], added: after.split("\n").length, removed: before ? before.split("\n").length : 0, newFile: before === null, truncated: true });
+      continue;
+    }
+    const hunks = diffHunks(before, after, 300);
+    out.push({ path: block.path, ...hunks, ...before === null ? { newFile: true } : {} });
+  }
+  return out;
+}
+
+// ../sdk/library.ts
+var LIBRARY_PREFIX = "library:";
+var isLibraryRef = (path) => typeof path === "string" && path.startsWith(LIBRARY_PREFIX);
+function textDigest(text) {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36) + ":" + text.length.toString(36);
+}
+
+// ../sdk/context-usage.ts
+function reportedUsage(value) {
+  if (!value || typeof value.used !== "number" || !Number.isFinite(value.used) || value.used < 0 || typeof value.size !== "number" || !Number.isFinite(value.size) || value.size < 0) return null;
+  const cost = value.cost && typeof value.cost === "object" && !Array.isArray(value.cost) && typeof value.cost.amount === "number" && Number.isFinite(value.cost.amount) && value.cost.amount >= 0 && typeof value.cost.currency === "string" && value.cost.currency.trim() ? { amount: value.cost.amount, currency: value.cost.currency } : void 0;
+  return { used: value.used, size: value.size, ...cost ? { cost } : {} };
+}
+
+// modules/services/agent-runner/src/index.ts
+var db;
+var limits = NO_AGENT_LIMITS;
+var sessions = /* @__PURE__ */ new Map();
+var live = /* @__PURE__ */ new Map();
+var locks = /* @__PURE__ */ new Map();
+var now = () => (/* @__PURE__ */ new Date()).toISOString();
+var writes = Promise.resolve();
+var pendingWrites = 0;
+var inFlight = 0;
+function serialize(id, f) {
+  const p = (locks.get(id) || Promise.resolve()).catch(() => {
+  }).then(f);
+  locks.set(id, p);
+  void p.finally(() => {
+    if (locks.get(id) === p) locks.delete(id);
+  }).catch(() => {
+  });
+  return p;
+}
+function enqueue(f) {
+  pendingWrites++;
+  const p = writes.catch(() => {
+  }).then(f);
+  writes = p;
+  void p.finally(() => {
+    pendingWrites--;
+  }).catch(() => {
+  });
+  return p;
+}
+function persist(ctx, s) {
+  s.updatedAt = now();
+  s.revision++;
+  const json = JSON.stringify(s);
+  return enqueue(() => ctx.host.db.exec(db, "INSERT INTO sessions(id, data) VALUES(?, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", [s.id, json]));
+}
+function message(ctx, s, role, text, title, status, images, toolCallId, providerMessageId, diffs) {
+  const diffsJson = diffs?.length ? JSON.stringify(diffs) : null;
+  s.revision++;
+  const turn = live.get(s.id)?.turn || 0, providerSessionId = s.sessionId;
+  const messageId = typeof providerMessageId === "string" && providerMessageId ? providerMessageId : null;
+  return enqueue(async () => {
+    if (role === "tool" && toolCallId) {
+      const existing = (await ctx.host.db.query(db, "SELECT seq FROM messages WHERE session_id=? AND turn=? AND tool_call_id=? ORDER BY seq DESC LIMIT 1", [s.id, turn, toolCallId]))[0];
+      if (existing) return ctx.host.db.exec(db, "UPDATE messages SET text=CASE WHEN ?1 = '' THEN text ELSE ?1 END,title=COALESCE(?2,title),status=COALESCE(?3,status),provider_message_id=COALESCE(?5,provider_message_id),provider_session_id=?6,diffs_json=COALESCE(?7,diffs_json) WHERE seq=?4", [text, title || null, status || null, existing.seq, messageId, providerSessionId, diffsJson]);
+    }
+    if (role === "assistant" || role === "thought") {
+      const last = (await ctx.host.db.query(db, "SELECT seq,role,turn,provider_message_id,provider_session_id FROM messages WHERE session_id=? ORDER BY seq DESC LIMIT 1", [s.id]))[0];
+      const sameMessage = last?.role === role && last.turn === turn && last.provider_session_id === providerSessionId && (!messageId && !last.provider_message_id || !!messageId && messageId === last.provider_message_id);
+      if (sameMessage) return ctx.host.db.exec(db, "UPDATE messages SET text=text||?,provider_session_id=? WHERE seq=?", [text, providerSessionId, last.seq]);
+    }
+    return ctx.host.db.exec(db, "INSERT INTO messages(session_id, role, text, title, status, turn, images_json, tool_call_id, provider_message_id, provider_session_id, diffs_json, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", [s.id, role, text, title || null, status || null, turn, images?.length ? JSON.stringify(images) : null, toolCallId || null, messageId, providerSessionId, diffsJson, now()]);
+  });
+}
+function isProviderCommand(s, text) {
+  const name = /^\/([^\s/]+)/.exec(text)?.[1];
+  return !!name && (s.commands || []).some((c) => c.name === name);
+}
+var DESKTOP_MCP_IDS = ["internal-remote-mcp-local", "internal-local-mcp"];
+function providerCommands(list) {
+  if (!Array.isArray(list)) return [];
+  return list.slice(0, 200).filter((c) => c && typeof c.name === "string" && /^[^\s/]{1,80}$/.test(c.name)).map((c) => ({
+    name: c.name,
+    ...typeof c.description === "string" ? { description: c.description.slice(0, 400) } : {},
+    ...c.input && typeof c.input === "object" ? { input: typeof c.input.hint === "string" ? { hint: c.input.hint.slice(0, 200) } : {} } : {}
+  }));
+}
+function publicSession(s) {
+  const { inline, systemPrompt, progressInstruction, ...rest } = s;
+  return { ...rest, inlineDigest: Object.fromEntries(Object.entries(inline || {}).map(([k, v]) => [k, textDigest(v)])), profile: { ...s.profile, envRefs: {} }, mcps: s.mcps.map((m) => ({ ...m, env: [], ...Array.isArray(m.headers) ? { headers: m.headers.map((h) => ({ name: h.name, value: "" })) } : {} })) };
+}
+function session(id) {
+  const s = sessions.get(String(id));
+  if (!s) throw new Error("Unknown persistent agent");
+  return s;
+}
+async function request(c, method, args, ms = 12e4) {
+  let timer;
+  const id = c.peer.nextRequestId;
+  try {
+    return await Promise.race([c.peer.request(method, args), new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        c.peer.cancelRequest(id, `${method} timed out`);
+        reject(new Error(`${method} timed out`));
+      }, ms);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function config(ctx, c, id, value) {
+  if (c.session.status !== "ready") throw new Error("Agent must be idle to change model");
+  if (id === "__model") {
+    await request(c, "session/set_model", { sessionId: c.session.sessionId, modelId: value });
+    c.session.models = { ...c.session.models, currentModelId: value };
+  } else {
+    const r = await request(c, "session/set_config_option", { sessionId: c.session.sessionId, configId: id, value });
+    if (r.configOptions) c.session.configOptions = r.configOptions;
+  }
+  c.session.model = value;
+  await persist(ctx, c.session);
+}
+async function applySetting(c, id, value) {
+  const s = c.session;
+  const option = (s.configOptions || []).find((o) => o.id === id);
+  if (option) {
+    if (option.type === "boolean" && typeof value !== "boolean") throw new Error(`Setting '${id}' requires a boolean value`);
+    if (option.type !== "boolean" && typeof value !== "string") throw new Error(`Setting '${id}' requires a string value`);
+    const r = await request(c, "session/set_config_option", { sessionId: s.sessionId, configId: id, ...option.type === "boolean" ? { type: "boolean", value } : { value } });
+    if (Array.isArray(r?.configOptions)) s.configOptions = r.configOptions;
+  } else if (id === "__mode" && s.modes) {
+    await request(c, "session/set_mode", { sessionId: s.sessionId, modeId: String(value) });
+    s.modes = { ...s.modes, currentModeId: String(value) };
+  } else throw new Error(`Provider does not advertise setting '${id}'`);
+}
+function update(ctx, c, u) {
+  const kind = u.sessionUpdate;
+  const mcpStatus = u._meta?.claudeCode;
+  if (mcpStatus?.kind === "mcpServerStatus" && typeof mcpStatus.server === "string") {
+    const failures = c.mcpStartupFailures ?? (c.mcpStartupFailures = /* @__PURE__ */ Object.create(null));
+    failures[mcpStatus.server] = mcpStatus.status === "needs-auth" ? "Claude could not authenticate this MCP server." : "Claude reported that this MCP server failed to start.";
+  } else if (kind === "tool_call" && u.status === "failed" && typeof u.toolCallId === "string" && u.toolCallId.startsWith("mcp_startup.")) {
+    const name = /^mcp__(.+)__startup$/.exec(u.title)?.[1];
+    if (name) (c.mcpStartupFailures ?? (c.mcpStartupFailures = /* @__PURE__ */ Object.create(null)))[name] = "Codex reported that this MCP server did not start.";
+  }
+  if (kind === "async_task_spawned" && u.taskType === "turn" && typeof u.asyncTaskId === "string" && c.session.status === "ready") {
+    c.providerTurn = { id: u.asyncTaskId, output: "" };
+    c.turn = Math.max(c.turn + 1, Date.now());
+    c.cancelSent = false;
+    c.session.status = "busy";
+    c.session.error = null;
+    c.session.progress = null;
+    c.progressTail = "";
+    emitProviderTurn(ctx, c, { phase: "started", turnId: u.asyncTaskId });
+    void persist(ctx, c.session);
+    return;
+  }
+  if (kind === "async_task_state_update" && c.providerTurn?.id === u.asyncTaskId && ["completed", "failed", "stopped"].includes(u.state)) {
+    finishProviderTurn(ctx, c, u.state);
+    return;
+  }
+  if (kind === "agent_message_chunk" || kind === "agent_thought_chunk") {
+    if (u.content?.type === "text") {
+      const text = String(u.content.text || "");
+      if (kind === "agent_message_chunk" && c.providerTurn) c.providerTurn.output = (c.providerTurn.output + text).slice(-2e5);
+      if (kind === "agent_message_chunk") {
+        const scan = scanProgressChunk(c.progressTail || "", text);
+        c.progressTail = scan.tail;
+        if (scan.progress) c.session.progress = scan.progress;
+      }
+      void message(ctx, c.session, kind === "agent_thought_chunk" ? "thought" : "assistant", text, void 0, void 0, void 0, void 0, u.messageId || null).catch((e) => ctx.log.error(errMsg(e)));
+    }
+  } else if (kind === "tool_call" || kind === "tool_call_update") {
+    if (c.session.workflow) ctx.events.emit("agent-runner.toolActivity", { sessionId: c.session.id, workflow: c.session.workflow, update: u });
+    const text = (u.content || []).map((x) => x.content?.text || x.text || "").join("\n");
+    const titles = c.toolTitles ?? (c.toolTitles = /* @__PURE__ */ new Map());
+    if (u.toolCallId && u.title) titles.set(u.toolCallId, u.title);
+    const title = u.title || titles.get(u.toolCallId) || u.toolCallId || "Tool";
+    if (titles.size > 500) titles.delete(titles.keys().next().value);
+    void message(ctx, c.session, "tool", text, title, u.status, void 0, u.toolCallId, u.messageId || null, acpDiffs(u.content)).catch((e) => ctx.log.error(errMsg(e)));
+  } else if (kind === "plan") {
+    void message(ctx, c.session, "plan", (u.entries || []).map((e) => `- ${e.content} (${e.status})`).join("\n")).catch((e) => ctx.log.error(errMsg(e)));
+  } else if (kind === "config_option_update") {
+    c.session.configOptions = u.configOptions || [];
+    void persist(ctx, c.session);
+  } else if (kind === "current_mode_update" && c.session.modes) {
+    c.session.modes = { ...c.session.modes, currentModeId: u.currentModeId };
+    void persist(ctx, c.session);
+  } else if (kind === "usage_update") {
+    c.session.usage = reportedUsage(u);
+    void persist(ctx, c.session);
+  } else if (kind === "available_commands_update") {
+    c.session.commands = providerCommands(u.availableCommands);
+    void persist(ctx, c.session);
+  }
+}
+function emitProviderTurn(ctx, c, event) {
+  if (c.session.workflow) ctx.events.emit("agent-runner.providerTurn", { ...event, sessionId: c.session.id, workflow: c.session.workflow });
+}
+function finishProviderTurn(ctx, c, state, error) {
+  const turn = c.providerTurn;
+  if (!turn) return;
+  c.providerTurn = void 0;
+  c.session.status = "ready";
+  c.session.error = error ?? null;
+  emitProviderTurn(ctx, c, { phase: "finished", turnId: turn.id, state, output: stripProgressMarkers(turn.output).trim(), error });
+  void persist(ctx, c.session);
+}
+function frontMatter(text, key) {
+  const header = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text)?.[1];
+  if (!header) return "";
+  const lines = header.split(/\r?\n/), i = lines.findIndex((l) => l.startsWith(key + ":"));
+  if (i < 0) return "";
+  const value = lines[i].slice(key.length + 1).trim();
+  if (/^[>|][-+]?$/.test(value)) {
+    const out = [];
+    for (const l of lines.slice(i + 1)) {
+      if (l && !/^\s/.test(l)) break;
+      out.push(l.trim());
+    }
+    return out.join(" ").trim();
+  }
+  return value.replace(/^(["'])([\s\S]*)\1$/, "$2");
+}
+var lazySkills = (s) => !!s.workspaceMcp;
+async function readInstructions(ctx, s) {
+  const paths = [...new Set([s.agentFile, ...s.skills].filter(Boolean))];
+  if (!paths.length) return [];
+  const grant = await ctx.host.capabilities.request({ kind: "fs", root: s.root, target: { kind: "local" } });
+  try {
+    const out = [];
+    let total = 0;
+    for (const path of paths) {
+      let text;
+      if (isLibraryRef(path)) {
+        const t = s.inline?.[path];
+        if (t === void 0) throw new Error(`Library entry ${path} is no longer attached; reselect it in the chat's skills`);
+        text = t;
+      } else {
+        relativeAgentPath(path);
+        const file = await ctx.host.fs.read(grant.grant, path, 128 * 1024);
+        if (file.binary || file.truncated) throw new Error(`Instruction file is binary or too large: ${path}`);
+        text = file.text || "";
+      }
+      const skill = path !== s.agentFile;
+      if (!skill || !lazySkills(s)) total += text.length;
+      if (total > 128 * 1024) throw new Error("Selected instructions exceed the total 128 KiB budget; select fewer skills or enable Workspace tools so skills load on demand");
+      const name = skill ? frontMatter(text, "name") || path.split("/").slice(-2, -1)[0] || path : path;
+      out.push({ path, label: skill ? `skill "${name}" (${path})` : `instruction file (${path})`, text, digest: textDigest(text), skill, name, description: skill ? frontMatter(text, "description") : "" });
+    }
+    return out;
+  } finally {
+    await ctx.host.capabilities.release(grant.grant);
+  }
+}
+function instructionContext(s, current) {
+  const sent = s.contextSent || s.systemPromptSent ? s.sentDigests ?? Object.fromEntries(current.map((i) => [i.path, i.digest])) : {};
+  const parts = [], lazy = lazySkills(s);
+  const changed = current.filter((i) => sent[i.path] !== i.digest);
+  for (const i of changed.filter((i2) => !i2.skill || !lazy))
+    parts.push(`${sent[i.path] ? "UPDATED instructions — replaces any earlier version of" : "Instructions from"} ${i.label} [fingerprint ${i.digest}]:
+${i.text}`);
+  const listed = changed.filter((i) => i.skill && lazy);
+  if (listed.length) parts.push(`${Object.keys(sent).length ? "Skills added or updated" : "Skills available"} (not loaded — when a task matches a skill's description, read its full text with the skills_read tool and the path below before acting; re-read a skill marked updated even if you read it before):
+` + listed.map((i) => `- ${i.name}${sent[i.path] ? " (updated)" : ""}: ${i.description || "no description"} — path ${i.path} [fingerprint ${i.digest}]`).join("\n"));
+  const removed = Object.keys(sent).filter((p) => !current.some((i) => i.path === p));
+  if (removed.length) parts.push(`No longer in effect (stop following them): ${removed.join(", ")}`);
+  const index = current.length ? `[Hato instructions in effect: ${current.map((i) => `${i.label} #${i.digest}`).join("; ")}. ${lazy ? "skills_read returns the current text and fingerprint of any of these; use it when you need a skill or no longer have the text" : "If you no longer have one of these texts with that fingerprint in your context, ask the user to resend it"}.]` : "";
+  return { preamble: parts.join("\n\n"), index, digests: Object.fromEntries(current.map((i) => [i.path, i.digest])) };
+}
+async function stop(ctx, id) {
+  const s = session(id), c = live.get(id);
+  if (c) {
+    c.stopping = true;
+    c.queued = [];
+    finishProviderTurn(ctx, c, "stopped");
+    for (const p of c.permissions.values()) p.resolve({ outcome: { outcome: "cancelled" } });
+    c.permissions.clear();
+    await ctx.host.process.closeStdin(c.process).catch(() => {
+    });
+    await ctx.host.resources.release(c.process).catch(() => {
+    });
+    for (const sub of c.subscriptions) await sub.close().catch(() => {
+    });
+    c.peer.failAll("Agent stopped");
+    live.delete(id);
+  }
+  await ctx.modules.call("internal-remote-mcp", "revoke", { sessionId: s.id }).catch(() => {
+  });
+  await ctx.host.db.exec(db, "UPDATE sessions SET queue_json='[]' WHERE id=?", [id]);
+  await ctx.host.db.exec(db, "UPDATE permissions SET resolved=1 WHERE session_id=?", [id]);
+  s.status = "stopped";
+  s.childSessions = disconnectSubagents(s.childSessions);
+  await persist(ctx, s);
+  return s;
+}
+async function start(ctx, s, preserveConversation = false) {
+  if (live.has(s.id)) return live.get(s.id);
+  s.status = "starting";
+  s.error = null;
+  s.childSessions = disconnectSubagents(s.childSessions);
+  await persist(ctx, s);
+  let c;
+  try {
+    if (limits.maxConcurrent && live.size >= limits.maxConcurrent) throw new Error(`This machine allows ${limits.maxConcurrent} connected agent${limits.maxConcurrent === 1 ? "" : "s"} at once. Stop another agent first.`);
+    const refused = agentRefusal(limits, s.profile?.provider, s.model);
+    if (refused) throw new Error(refused);
+    await readInstructions(ctx, s);
+    let mcpServers = s.mcps.map(({ id, ...server }) => server);
+    if (s.workspaceMcp) {
+      await ctx.modules.call("internal-remote-mcp", "revoke", { sessionId: s.id });
+      const server = await ctx.modules.call("internal-remote-mcp", "endpoint", { sessionId: s.id, workspaceId: s.workspaceId, root: s.root, skills: [...new Set([s.agentFile, ...s.skills].filter(Boolean))], inline: s.inline || {}, daemon: s.daemon });
+      const { id, ...config2 } = server;
+      mcpServers = [...mcpServers, config2];
+    }
+    let sessionServers = mcpServers;
+    const grant = await ctx.host.capabilities.request({ kind: "process", root: s.root, target: { kind: "local" } });
+    let spawned;
+    try {
+      const env = { ...s.profile.envRefs || {} };
+      const envRemove = s.profile.provider === "claude" && s.claudeSubscription ? ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"] : [];
+      envRemove.forEach((k) => delete env[k]);
+      const resolved = await agentExecutable(ctx, grant.grant, s.root, s.profile.executable);
+      const os = hostOs(ctx), windows = os === "windows";
+      let nodePath = "node", pathEnv = resolved.pathEnv;
+      if (s.profile.mcpLaunch && mcpServers.some((server) => !server.type || server.type === "stdio")) {
+        const node = await agentExecutable(ctx, grant.grant, s.root, "node");
+        nodePath = node.launch.executable;
+        pathEnv = `${node.pathEnv}${pathListSeparator(os)}${resolved.pathEnv}`;
+      }
+      const launch = providerMcpLaunch(s.profile.mcpLaunch, resolved.launch.executable, [...resolved.launch.args, ...s.profile.args || []], env, mcpServers, nodePath);
+      sessionServers = launch.sessionServers;
+      spawned = windows ? await ctx.host.process.spawn(grant.grant, { target: { kind: "local" }, executable: launch.executable, args: launch.args, cwd: s.root, env: { ...launch.env, PATH: pathEnv }, envRemove }) : await ctx.host.process.spawn(grant.grant, {
+        target: { kind: "local" },
+        executable: os === "macos" ? "/bin/zsh" : "/bin/sh",
+        args: ["-lc", envRemove.length ? 'exec /usr/bin/env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN "$@"' : 'exec /usr/bin/env "$@"', "hato-agent", `PATH=${pathEnv}`, launch.executable, ...launch.args],
+        cwd: s.root,
+        env: launch.env,
+        envRemove
+      });
+    } finally {
+      await ctx.host.capabilities.release(grant.grant);
+    }
+    c = { session: s, process: spawned.handle, peer: null, subscriptions: [], permissions: /* @__PURE__ */ new Map(), queued: [], cancelSent: false, stopping: false, context: "", firstPrompt: !s.contextSent, turn: Date.now(), stderr: "", steering: false, systemPrompt: false };
+    const connection = c;
+    c.peer = new JsonRpcPeer((line) => ctx.host.process.write(connection.process, line + "\n"));
+    live.set(s.id, c);
+    const trackProviderTurns = s.profile.provider === "claude" && s.trackAutonomousClaudeTurns !== false;
+    const onNotification = (method, params) => {
+      if (!connection.stopping && (method === OPENCODE_CHILD_UPDATE || method === `_${OPENCODE_CHILD_UPDATE}`)) {
+        const next = params?.rootSessionId === s.sessionId ? openCodeChildUpdate(params) : null;
+        if (next) onNotification("session/update", next);
+        return;
+      }
+      if (connection.stopping || method !== "session/update") return;
+      const children = s.childSessions ?? (s.childSessions = {});
+      if (params?.sessionId !== s.sessionId && !knownSubagent(children, params?.sessionId)) return;
+      const u = params.update || {};
+      const childUpdate = knownSubagent(children, params?.sessionId);
+      if (updateSubagents(children, s.sessionId, params, connection.loadingHistory === true)) void persist(ctx, s);
+      if (childUpdate || u.sessionUpdate === "subagent_update" || u.sessionUpdate === "_hato_child_status") return;
+      if (connection.loadingHistory && ["user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan"].includes(u.sessionUpdate)) return;
+      if (!trackProviderTurns && (u.sessionUpdate === "async_task_spawned" || u.sessionUpdate === "async_task_state_update")) return;
+      if (s.status === "starting" && ["user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan", "async_task_spawned", "async_task_state_update"].includes(u.sessionUpdate)) {
+        if (u._meta?.claudeCode?.kind !== "mcpServerStatus" && !String(u.toolCallId || "").startsWith("mcp_startup.")) return;
+      }
+      update(ctx, connection, u);
+    };
+    c.peer.onNotification = trackProviderTurns ? (method, params) => {
+      void Promise.resolve().then(() => onNotification(method, params)).catch((e) => ctx.log.error(errMsg(e)));
+    } : onNotification;
+    c.peer.onRequest = async (method, params) => {
+      if (method !== "session/request_permission") throw rpcError(-32601, "Unsupported agent request");
+      if (params.sessionId !== s.sessionId && !knownSubagent(s.childSessions || {}, params.sessionId)) throw rpcError(-32602, "Wrong session");
+      const tool = params.toolCall || {}, options = params.options || [];
+      const allowOnce = options.find((o) => o.kind === "allow_once") || options.find((o) => String(o.kind).startsWith("allow"));
+      if (limits.deniedToolKinds.includes(tool.kind)) {
+        const reject = options.find((o) => o.kind === "reject_once") || options.find((o) => String(o.kind).startsWith("reject"));
+        await message(ctx, s, "system", `Refused "${tool.title || tool.kind}": ${tool.kind} tools are not allowed on this machine.`);
+        return reject ? { outcome: { outcome: "selected", optionId: reject.optionId } } : { outcome: { outcome: "cancelled" } };
+      }
+      const policy = cappedPolicy(agentPolicy(s), limits);
+      if (allowOnce && (policy === "autopilot" || policy === "auto-low" && LOW_RISK_TOOL_KINDS.has(tool.kind))) {
+        ctx.log.info(`${policy} approved "${tool.title || tool.kind || "tool"}" for ${s.name}`);
+        return { outcome: { outcome: "selected", optionId: allowOnce.optionId } };
+      }
+      const id = crypto.randomUUID();
+      const value = { id, request: params, createdAt: now() };
+      await ctx.host.db.exec(db, "INSERT INTO permissions(id,session_id,data) VALUES(?,?,?)", [id, s.id, JSON.stringify(value)]);
+      s.status = "waiting";
+      await persist(ctx, s);
+      return new Promise((resolve) => connection.permissions.set(id, { value, resolve }));
+    };
+    c.subscriptions.push(await ctx.host.streams.listen(c.process, { channel: "stdout" }, (chunk) => connection.peer.feed(chunk), (error) => {
+      if (connection.stopping) return;
+      const reason = error ? errMsg(error) : `Agent exited${connection.stderr ? ": " + connection.stderr.slice(-600) : ""}`;
+      finishProviderTurn(ctx, connection, "failed", reason);
+      s.status = "interrupted";
+      s.error = reason;
+      s.childSessions = disconnectSubagents(s.childSessions);
+      connection.peer.failAll(s.error);
+      live.delete(s.id);
+      for (const p of connection.permissions.values()) p.resolve({ outcome: { outcome: "cancelled" } });
+      void persist(ctx, s);
+    }));
+    c.subscriptions.push(await ctx.host.streams.listen(c.process, { channel: "stderr" }, (chunk) => {
+      connection.stderr = (connection.stderr + chunk).slice(-4e3);
+    }));
+    const asyncTasks = trackProviderTurns ? { _meta: { jetbrains: { air: { version: 1, capabilities: ["asyncTasks"] } } } } : {};
+    const init = await request(c, "initialize", { protocolVersion: 1, clientCapabilities: { subagents: {}, fs: { readTextFile: false, writeTextFile: false }, terminal: false, session: { configOptions: { boolean: {} } }, ...asyncTasks, _meta: { ...OPENCODE_CHILD_OPT_IN, ...asyncTasks?._meta } }, clientInfo: { name: "hato-agents", version: "0.1.0" } });
+    if (init.protocolVersion !== 1) throw new Error("Unsupported ACP version");
+    c.steering = init._meta?.steering?.supported === true;
+    c.loadSession = init.agentCapabilities?.loadSession === true;
+    c.resumeSession = !!init.agentCapabilities?.sessionCapabilities?.resume;
+    s.promptImages = init.agentCapabilities?.promptCapabilities?.image === true;
+    c.systemPrompt = !!init.agentCapabilities?.sessionCapabilities?.systemPrompt;
+    const currentInstructions = instructionContext(s, await readInstructions(ctx, s));
+    const fullInstructions = instructionContext({ ...s, contextSent: false, systemPromptSent: false, progressInstruction: void 0, sentDigests: void 0 }, await readInstructions(ctx, s));
+    let trustedInstructions = [s.workspaceMcp ? PROGRESS_INSTRUCTION : PROGRESS_MARKER_INSTRUCTION, fullInstructions.preamble, fullInstructions.index].filter(Boolean).join("\n\n");
+    let systemPrompt = acpSystemPrompt(init.agentCapabilities, trustedInstructions);
+    let lifecycle = { cwd: s.root, mcpServers: sessionServers, ...systemPrompt ? { systemPrompt } : {} };
+    const caps = init.agentCapabilities?.mcpCapabilities || {};
+    for (const m of sessionServers) if ((m.type === "http" || m.type === "sse") && !caps[m.type]) throw new Error(`${s.profile.name} cannot connect to ${m.type.toUpperCase()} MCP server “${m.name}”. Use a provider that supports it${m.type === "sse" ? " or switch the server to Streamable HTTP" : ""}.`);
+    let result;
+    if (s.sessionId && !c.loadSession && !c.resumeSession) {
+      if (!preserveConversation) throw new Error("Provider cannot reload this session; create a new agent to avoid losing its context");
+      if (s.contextSent) throw new Error("This provider cannot resume the conversation with new MCP settings.");
+      s.sessionId = null;
+    }
+    if (s.sessionId) {
+      const copilot = s.profile.provider === "copilot";
+      const preferred = copilot && c.loadSession ? ["session/load", "session/resume"] : ["session/resume", "session/load"];
+      const methods = preferred.filter((method, index) => (method === "session/resume" ? !!c?.resumeSession : !!c?.loadSession) && preferred.indexOf(method) === index);
+      let lastError;
+      for (const method of methods) {
+        try {
+          c.loadingHistory = method === "session/load";
+          result = await request(c, method, { ...lifecycle, sessionId: s.sessionId });
+          lastError = null;
+          break;
+        } catch (e) {
+          if (e?.rpcCode !== -32002) throw e;
+          lastError = e;
+          ctx.log.warn(`${method} failed for ${s.name}${methods.indexOf(method) < methods.length - 1 ? "; trying the other resume method" : ""}`, errMsg(e));
+        } finally {
+          c.loadingHistory = false;
+        }
+      }
+      if (lastError) {
+        if (preserveConversation && s.contextSent) throw new Error(`Provider could not resume the conversation with the updated configuration: ${errMsg(lastError)}`);
+        ctx.log.warn(`provider resume failed for ${s.name}; starting a new provider session`, errMsg(lastError));
+        const hadHistory = !!s.contextSent;
+        s.sessionId = null;
+        s.contextSent = false;
+        s.progressInstruction = void 0;
+        c.firstPrompt = true;
+        s.handoffPending = true;
+        s.systemPromptSent = false;
+        trustedInstructions = [s.workspaceMcp ? PROGRESS_INSTRUCTION : PROGRESS_MARKER_INSTRUCTION, currentInstructions.preamble, currentInstructions.index].filter(Boolean).join("\n\n");
+        systemPrompt = acpSystemPrompt(init.agentCapabilities, trustedInstructions);
+        lifecycle = { cwd: s.root, mcpServers: sessionServers, ...systemPrompt ? { systemPrompt } : {} };
+        if (hadHistory) await message(ctx, s, "system", `The provider could not resume its previous session (${errMsg(lastError)}). Started a new one: a bounded dialogue handoff will accompany the next prompt.`);
+      }
+    }
+    if (!s.sessionId) {
+      s.childSessions = {};
+      result = await request(c, "session/new", lifecycle);
+      if (typeof result.sessionId !== "string" || !result.sessionId) throw new Error("Provider did not return a session id");
+      s.sessionId = result.sessionId;
+    }
+    if (systemPrompt) {
+      s.systemPrompt = trustedInstructions;
+      s.sentDigests = fullInstructions.digests;
+      s.systemPromptSent = true;
+    } else {
+      s.systemPrompt = null;
+      s.systemPromptSent = false;
+    }
+    s.configOptions = result.configOptions || [];
+    s.models = result.models || null;
+    s.modes = result.modes || null;
+    s.status = "ready";
+    if (s.model) {
+      const choice = modelChoices(s).find((m) => m.id === s.model);
+      if (!choice) throw new Error(`Provider does not advertise model ${s.model}`);
+      await config(ctx, c, choice.configId, choice.id);
+    }
+    {
+      const current = s.models?.currentModelId;
+      const refused2 = agentRefusal(limits, s.profile?.provider, current ? String(current) : void 0);
+      if (refused2) throw new Error(refused2);
+    }
+    if (s.reasoning) {
+      const choices = advertisedChoices(s);
+      if (!choices.reasoningId || !choices.reasoning.some((o) => o.value === s.reasoning)) throw new Error(`Provider does not advertise reasoning ${s.reasoning} for this model`);
+      const configured = await request(c, "session/set_config_option", { sessionId: s.sessionId, configId: choices.reasoningId, value: s.reasoning });
+      if (configured.configOptions) s.configOptions = configured.configOptions;
+    }
+    for (const [id, value] of Object.entries(agentSettings(s.settings))) {
+      try {
+        await applySetting(c, id, value);
+      } catch (e) {
+        ctx.log.warn(`dropping setting ${id} for ${s.name}: ${errMsg(e)}`);
+        const next = { ...s.settings };
+        delete next[id];
+        s.settings = next;
+      }
+    }
+    await persist(ctx, s);
+    return c;
+  } catch (e) {
+    if (c) {
+      await stop(ctx, s.id);
+    } else if (s.workspaceMcp) await ctx.modules.call("internal-remote-mcp", "revoke", { sessionId: s.id }).catch(() => {
+    });
+    s.status = "error";
+    s.error = errMsg(e);
+    await persist(ctx, s);
+    throw e;
+  }
+}
+async function cancelTurn(ctx, c) {
+  if (c.turnTimer) {
+    clearTimeout(c.turnTimer);
+    c.turnTimer = void 0;
+  }
+  for (const p of c.permissions.values()) p.resolve({ outcome: { outcome: "cancelled" } });
+  c.permissions.clear();
+  await ctx.host.db.exec(db, "UPDATE permissions SET resolved=1 WHERE session_id=?", [c.session.id]);
+  if (c.providerTurn) await request(c, "_session/async_task/stop", { sessionId: c.session.sessionId, asyncTaskId: c.providerTurn.id });
+  else await c.peer.notify("session/cancel", { sessionId: c.session.sessionId });
+}
+function promptBlocks(text, images) {
+  return [...text ? [{ type: "text", text }] : [], ...images.map((i) => ({ type: "image", mimeType: i.mimeType, data: i.data }))];
+}
+async function prompt(ctx, c, text, images = []) {
+  const s = c.session;
+  if (s.status !== "ready") throw new Error("Agent is not idle");
+  const currentInstructions = await readInstructions(ctx, s);
+  const instructions = instructionContext(s, currentInstructions);
+  if (c.systemPrompt) {
+    const full = instructionContext({ ...s, contextSent: false, systemPromptSent: false, progressInstruction: void 0, sentDigests: void 0 }, currentInstructions);
+    const trusted = [s.workspaceMcp ? PROGRESS_INSTRUCTION : PROGRESS_MARKER_INSTRUCTION, full.preamble, full.index].filter(Boolean).join("\n\n");
+    if (!s.systemPromptSent || s.systemPrompt !== trusted) {
+      if (s.sessionId && !c.loadSession && !c.resumeSession) throw new Error("Provider cannot refresh system instructions without a new conversation");
+      await stop(ctx, s.id);
+      return prompt(ctx, await start(ctx, s, true), text, images);
+    }
+  }
+  const handoff = s.handoffPending ? chatHandoff((await ctx.host.db.query(db, "SELECT role,text FROM messages WHERE session_id=? AND role IN ('user','assistant') ORDER BY seq DESC LIMIT 12", [s.id])).reverse()) : "";
+  if (s.status !== "ready" || c.stopping) throw new Error("Agent is not idle");
+  c.turn = Math.max(c.turn + 1, Date.now());
+  c.cancelSent = false;
+  s.status = "busy";
+  s.error = null;
+  s.progress = null;
+  c.progressTail = "";
+  const turn = c.turn;
+  if (c.turnTimer) clearTimeout(c.turnTimer);
+  if (limits.maxTurnMinutes) c.turnTimer = setTimeout(() => {
+    if (live.get(s.id) !== c || c.turn !== turn || !["busy", "waiting"].includes(s.status)) return;
+    void message(ctx, s, "system", `Turn stopped: it ran longer than this machine allows (${limits.maxTurnMinutes} min).`).then(() => cancelTurn(ctx, c)).catch((e) => ctx.log.warn("turn limit", errMsg(e)));
+  }, limits.maxTurnMinutes * 6e4);
+  await message(ctx, s, "user", text, void 0, void 0, images);
+  await persist(ctx, s);
+  const progressInstruction = s.workspaceMcp ? PROGRESS_INSTRUCTION : PROGRESS_MARKER_INSTRUCTION;
+  const context = [!s.systemPromptSent && s.progressInstruction !== progressInstruction ? progressInstruction : "", s.systemPromptSent ? "" : instructions.preamble, handoff].filter(Boolean).join("\n\n");
+  s.handoffPending = false;
+  c.firstPrompt = false;
+  s.contextSent = true;
+  if (!s.systemPromptSent) s.progressInstruction = progressInstruction;
+  s.sentDigests = instructions.digests;
+  await persist(ctx, s);
+  const body = (context ? `${context}
+
+User request:
+${text}` : text) + (instructions.preamble && instructions.index ? `
+
+${instructions.index}` : "");
+  void c.peer.request("session/prompt", { sessionId: s.sessionId, prompt: promptBlocks(body, images) }).then(async (r) => {
+    if (c.turn === turn && c.turnTimer) {
+      clearTimeout(c.turnTimer);
+      c.turnTimer = void 0;
+    }
+    if (c.stopping || live.get(s.id) !== c || c.turn !== turn) return;
+    const cleanup = enqueue(() => ctx.host.db.exec(db, "UPDATE permissions SET resolved=1 WHERE session_id=?", [s.id]));
+    for (const pending of c.permissions.values()) pending.resolve({ outcome: { outcome: "cancelled" } });
+    c.permissions.clear();
+    s.status = "ready";
+    const ended = message(ctx, s, "system", `Turn ended: ${r.stopReason || "complete"}`);
+    await Promise.all([cleanup, ended]);
+    await persist(ctx, s);
+    if (s.status === "ready" && c.queued.length) {
+      const next = c.queued.join("\n\n");
+      c.queued = [];
+      await ctx.host.db.exec(db, "UPDATE sessions SET queue_json='[]' WHERE id=?", [s.id]);
+      await prompt(ctx, c, next);
+    }
+  }, async (e) => {
+    if (c.stopping || c.turn !== turn) return;
+    if (live.get(s.id) !== c) return;
+    s.status = "ready";
+    s.error = errMsg(e);
+    await message(ctx, s, "error", s.error);
+    await persist(ctx, s);
+  }).catch((e) => ctx.log.error(errMsg(e)));
+  return { accepted: true, turn };
+}
+var mod = {
+  id: "agent-runner",
+  moduleApiVersion: 1,
+  async activate(ctx) {
+    db = await ctx.host.db.openNamespace("agent-runner");
+    await ctx.host.db.exec(db, "CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, data TEXT NOT NULL, queue_json TEXT NOT NULL DEFAULT '[]'); CREATE TABLE IF NOT EXISTS messages(seq INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL,role TEXT NOT NULL,text TEXT NOT NULL,title TEXT,status TEXT,turn INTEGER); CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id,seq); CREATE TABLE IF NOT EXISTS permissions(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,data TEXT NOT NULL,resolved INTEGER NOT NULL DEFAULT 0)");
+    const columns = await ctx.host.db.query(db, "PRAGMA table_info(messages)");
+    if (!columns.some((c) => c.name === "tool_call_id")) await ctx.host.db.exec(db, "ALTER TABLE messages ADD COLUMN tool_call_id TEXT");
+    if (!columns.some((c) => c.name === "images_json")) await ctx.host.db.exec(db, "ALTER TABLE messages ADD COLUMN images_json TEXT");
+    if (!columns.some((c) => c.name === "provider_message_id")) await ctx.host.db.exec(db, "ALTER TABLE messages ADD COLUMN provider_message_id TEXT");
+    if (!columns.some((c) => c.name === "provider_session_id")) await ctx.host.db.exec(db, "ALTER TABLE messages ADD COLUMN provider_session_id TEXT");
+    if (!columns.some((c) => c.name === "diffs_json")) await ctx.host.db.exec(db, "ALTER TABLE messages ADD COLUMN diffs_json TEXT");
+    if (!columns.some((c) => c.name === "created_at")) await ctx.host.db.exec(db, "ALTER TABLE messages ADD COLUMN created_at TEXT");
+    for (const row of await ctx.host.db.query(db, "SELECT data FROM sessions")) {
+      const s = JSON.parse(row.data);
+      s.childSessions = disconnectSubagents(s.childSessions);
+      if (["starting", "ready", "busy", "waiting"].includes(s.status)) {
+        s.status = "interrupted";
+        s.error = "Runtime restarted; reconnect to resume. An interrupted turn is never replayed automatically.";
+        await persist(ctx, s);
+      }
+      sessions.set(s.id, s);
+    }
+    await ctx.host.db.exec(db, "UPDATE permissions SET resolved=1 WHERE resolved=0");
+    await ctx.host.db.exec(db, "CREATE TABLE IF NOT EXISTS runtime_settings(key TEXT PRIMARY KEY, value_json TEXT NOT NULL)");
+    const saved = await ctx.host.db.query(db, "SELECT value_json FROM runtime_settings WHERE key='limits'");
+    limits = normalizeAgentLimits(saved.length ? JSON.parse(saved[0].value_json) : null);
+  },
+  canSwap: () => ({ ok: live.size === 0 && locks.size === 0 && pendingWrites === 0 && inFlight === 0, reason: "Stop persistent agents before replacing their runtime" }),
+  methods: {
+    /** Machine limits from the desktop's remote-runtime. Applied to new connections, turns and
+     *  permission requests; agents already connected beyond a new concurrency limit keep running. */
+    async setLimits(ctx, a, meta) {
+      if (!["daemon-client", "remote-runtime"].includes(meta?.caller)) throw new Error("Only the desktop sets machine limits");
+      limits = normalizeAgentLimits(a?.limits);
+      await ctx.host.db.exec(db, "INSERT INTO runtime_settings(key,value_json) VALUES('limits',?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json", [JSON.stringify(limits)]);
+      return { limits, connected: live.size };
+    },
+    limits: () => ({ limits, connected: live.size }),
+    /** report_progress from the agent's workspace MCP endpoint. Sidebar state only: no message is recorded. */
+    setProgress: (ctx, a, meta) => {
+      if (!["internal-remote-mcp", "daemon-client"].includes(meta?.caller)) throw new Error("Only workspace endpoints report progress");
+      const s = sessions.get(String(a?.sessionId));
+      if (!s) throw new Error("Unknown agent session");
+      s.progress = agentProgress(a);
+      return { percent: s.progress.percent };
+    },
+    health: () => ({ ok: true, reasoning: true, mcpActivity: true, toolTitles: true, chatSettings: true, images: true, policy: true, workflowTurnBoundaries: true, connected: live.size }),
+    async fork(ctx, a, meta) {
+      if (!["internal-remote-mcp", "daemon-client"].includes(meta.caller)) throw new Error("Only workspace controllers can create child agents");
+      const parent = session(a.parentId);
+      const spec = { ...parent, id: crypto.randomUUID(), name: String(a.name || "Background worker").slice(0, 120), customName: true, model: String(a.model || parent.model), sessionId: null, contextSent: false, systemPrompt: null, systemPromptSent: false, progressInstruction: void 0, sentDigests: void 0, status: "starting", error: null, createdAt: now(), updatedAt: now(), revision: 0, configOptions: [], models: null, workflow: void 0, trackAutonomousClaudeTurns: void 0 };
+      sessions.set(spec.id, spec);
+      await persist(ctx, spec);
+      const c = await serialize(spec.id, () => start(ctx, spec));
+      if (a.text) await prompt(ctx, c, String(a.text));
+      return publicSession(spec);
+    },
+    list: () => [...sessions.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(publicSession),
+    async create(ctx, a) {
+      const spec = a.spec;
+      if (!spec || typeof spec.id !== "string" || !spec.name?.trim() || !(typeof spec.root === "string" && isAbsolutePath(spec.root)) || !spec.profile?.executable || !Array.isArray(spec.profile.args) || !Array.isArray(spec.skills) || !Array.isArray(spec.mcps)) throw new Error("Invalid agent configuration");
+      if (sessions.has(spec.id)) throw new Error("Agent already exists");
+      const fields = ["id", "name", "workspaceId", "workspaceName", "root", "machineId", "profile", "model", "reasoning", "agentFile", "skills", "mcps", "inline", "claudeSubscription", "workspaceMcp", "daemon", "autopilot", "approvalPolicy", "settings", "customName", "workflow", "trackAutonomousClaudeTurns"];
+      const clean = Object.fromEntries(fields.filter((key) => Object.prototype.hasOwnProperty.call(spec, key)).map((key) => [key, spec[key]]));
+      const s = { ...clean, contextSent: false, systemPrompt: null, systemPromptSent: false, progressInstruction: void 0, sentDigests: void 0, status: "starting", sessionId: null, createdAt: now(), updatedAt: now(), error: null, configOptions: [], models: null, revision: 0 };
+      sessions.set(s.id, s);
+      await persist(ctx, s);
+      await serialize(s.id, () => start(ctx, s));
+      return publicSession(s);
+    },
+    async view(ctx, a) {
+      const s = session(a.id);
+      await writes;
+      const limit = Math.min(Math.max(Number(a.limit) || 100, 1), 200);
+      const rows = await ctx.host.db.query(db, "SELECT * FROM messages WHERE session_id=? AND seq < ? ORDER BY seq DESC LIMIT ?", [s.id, Number(a.before) || Number.MAX_SAFE_INTEGER, limit + 1]);
+      const older = rows.length > limit;
+      if (older) rows.pop();
+      rows.reverse();
+      const messages = [];
+      for (const r of rows) {
+        const last = messages[messages.length - 1];
+        if (last && (r.role === "assistant" || r.role === "thought") && last.role === r.role && last.turn === r.turn && last.providerMessageId === (r.provider_message_id || null) && last.providerSessionId === (r.provider_session_id || null)) last.text += r.text;
+        else {
+          let images;
+          try {
+            images = r.images_json ? imageAttachments(JSON.parse(r.images_json)) : void 0;
+          } catch {
+            images = void 0;
+          }
+          let diffs;
+          try {
+            diffs = r.diffs_json ? JSON.parse(r.diffs_json) : void 0;
+          } catch {
+            diffs = void 0;
+          }
+          messages.push({ key: `agent-msg-${r.seq}`, role: r.role, text: r.text, title: r.title, status: r.status, ...images?.length ? { images } : {}, ...Array.isArray(diffs) && diffs.length ? { diffs } : {}, ...r.created_at ? { at: r.created_at } : {}, turn: r.turn, providerMessageId: r.provider_message_id || null, providerSessionId: r.provider_session_id || null });
+        }
+      }
+      const permissions = await ctx.host.db.query(db, "SELECT data FROM permissions WHERE session_id=? AND resolved=0 ORDER BY rowid", [s.id]);
+      const queue = await ctx.host.db.query(db, "SELECT queue_json FROM sessions WHERE id=?", [s.id]);
+      return { session: publicSession(s), messages, before: older ? rows[0].seq : null, permissions: permissions.map((p) => JSON.parse(p.data)), queued: JSON.parse(queue[0]?.queue_json || "[]"), mcpStartupFailures: live.get(s.id)?.mcpStartupFailures };
+    },
+    send: (ctx, a) => serialize(String(a.id), async () => {
+      const s = session(a.id), text = String(a.text || "").trim(), images = imageAttachments(a.images);
+      if (!text && !images.length || text.length > 128 * 1024) throw new Error("Prompt is empty or too large");
+      if (a.currentTurnOnly === true && s.status !== "busy" && s.status !== "waiting") return { promptRequired: true };
+      const c = await start(ctx, s);
+      if (images.length && !s.promptImages) throw new Error(`${s.profile.name} does not support image prompts. Choose a provider with image support.`);
+      if (s.status === "busy" || s.status === "waiting") {
+        if (a.steer !== true) throw new Error("Agent is busy; use Steer");
+        const command = !images.length && isProviderCommand(s, text);
+        let interrupt = !c.steering && !command;
+        if (c.steering && !c.queued.length && !command) {
+          let outcome = "unsupported";
+          try {
+            const r = await request(c, "_session/steering", { sessionId: s.sessionId, prompt: promptBlocks(text, images), _meta: { steering: { idleBehavior: "promptRequired" } } }, 3e4);
+            outcome = r?.outcome === "promptRequired" ? "promptRequired" : "steered";
+          } catch (e) {
+            ctx.log.warn("steering failed; falling back to interrupt", errMsg(e));
+            interrupt = true;
+          }
+          if (outcome === "steered") {
+            await message(ctx, s, "user", text, void 0, void 0, images);
+            await persist(ctx, s);
+            return { steered: true };
+          }
+          if (outcome === "promptRequired") {
+            if (a.currentTurnOnly === true) return { promptRequired: true };
+            if (s.status === "ready") return prompt(ctx, c, text, images);
+            if (images.length) throw new Error("Wait for the agent to finish its turn before sending pictures");
+            c.queued.push(text);
+            await ctx.host.db.exec(db, "UPDATE sessions SET queue_json=? WHERE id=?", [JSON.stringify(c.queued), s.id]);
+            return { queued: true };
+          }
+        }
+        if (a.currentTurnOnly === true) return { promptRequired: true };
+        if (images.length) throw new Error("Wait for the agent to finish its turn before sending pictures");
+        c.queued.push(text);
+        await ctx.host.db.exec(db, "UPDATE sessions SET queue_json=? WHERE id=?", [JSON.stringify(c.queued), s.id]);
+        if (interrupt && !c.cancelSent) {
+          c.cancelSent = true;
+          for (const p of c.permissions.values()) p.resolve({ outcome: { outcome: "cancelled" } });
+          c.permissions.clear();
+          await ctx.host.db.exec(db, "UPDATE permissions SET resolved=1 WHERE session_id=?", [s.id]);
+          await c.peer.notify("session/cancel", { sessionId: s.sessionId });
+        }
+        return { queued: true };
+      }
+      return prompt(ctx, c, text, images);
+    }),
+    reconnect: (ctx, a) => serialize(String(a.id), async () => {
+      const s = session(a.id);
+      if (["busy", "waiting", "starting"].includes(s.status)) throw new Error("Wait for the agent to finish its turn, or cancel it, before reconnecting");
+      if (live.has(s.id)) await stop(ctx, s.id);
+      if (typeof a.claudeSubscription === "boolean") s.claudeSubscription = a.claudeSubscription;
+      if (s.daemon && typeof a.daemon?.bin === "string" && typeof a.daemon?.dir === "string") s.daemon = { bin: a.daemon.bin, dir: a.daemon.dir };
+      const auth = a.authorization && typeof a.authorization === "object" ? a.authorization : {};
+      s.mcps = s.mcps.map((m) => typeof auth[m.id] === "string" && Array.isArray(m.headers) ? { ...m, headers: [...m.headers.filter((h) => String(h.name).toLowerCase() !== "authorization"), { name: "Authorization", value: auth[m.id] }] } : m);
+      const fresh = new Map((Array.isArray(a.endpoints) ? a.endpoints : []).filter((m) => m && DESKTOP_MCP_IDS.includes(m.id)).map((m) => [m.id, m]));
+      if (fresh.size) s.mcps = s.mcps.map((m) => fresh.get(m.id) ?? m);
+      await start(ctx, s);
+      return s;
+    }),
+    stop: (ctx, a) => serialize(String(a.id), () => stop(ctx, String(a.id))),
+    async cancel(ctx, a) {
+      const c = live.get(String(a.id));
+      if (c) await cancelTurn(ctx, c);
+      return null;
+    },
+    setModel: (ctx, a) => serialize(String(a.id), async () => {
+      const c = live.get(String(a.id));
+      if (!c) throw new Error("Reconnect agent first");
+      const choice = modelChoices(c.session).find((m) => m.id === a.model);
+      if (!choice) throw new Error("Unknown model");
+      const refused = agentRefusal(limits, c.session.profile?.provider, choice.id);
+      if (refused) throw new Error(refused);
+      await config(ctx, c, choice.configId, choice.id);
+      return c.session;
+    }),
+    /** Change one provider option (mode, reasoning, ...) on the connected agent and keep it for reconnects. */
+    setConfig: (ctx, a) => serialize(String(a.id), async () => {
+      const c = live.get(String(a.id));
+      if (!c) throw new Error("Reconnect agent first");
+      if (c.session.status !== "ready") throw new Error("Agent must be idle to change its settings");
+      const id = String(a.configId || ""), value = typeof a.value === "boolean" ? a.value : String(a.value ?? "");
+      const model = modelChoices(c.session).find((m) => m.configId === id && m.id === value);
+      if (id === "__model" || model) {
+        if (!model) throw new Error("Unknown model");
+        const refused = agentRefusal(limits, c.session.profile?.provider, model.id);
+        if (refused) throw new Error(refused);
+        await config(ctx, c, model.configId, model.id);
+        c.session.usage = null;
+        await persist(ctx, c.session);
+        return publicSession(c.session);
+      }
+      await applySetting(c, id, value);
+      c.session.settings = { ...agentSettings(c.session.settings), [id]: value };
+      await persist(ctx, c.session);
+      return publicSession(c.session);
+    }),
+    async setPolicy(ctx, a, meta) {
+      if (meta.caller !== "daemon-client") throw new Error("Only the desktop gateway changes approval policy");
+      const s = session(a.id), wanted = a.policy === "autopilot" ? "autopilot" : a.policy === "auto-low" ? "auto-low" : "ask";
+      const policy = cappedPolicy(wanted, limits);
+      if (policy !== wanted) throw new Error(`This machine allows at most "${limits.approvalCap}" approval for agents.`);
+      if (policy === "autopilot") return mod.methods.setAutopilot(ctx, { id: s.id, enabled: true }, meta);
+      const before = agentPolicy(s);
+      s.approvalPolicy = policy;
+      if (s.autopilot) return mod.methods.setAutopilot(ctx, { id: s.id, enabled: false }, meta);
+      if (before !== policy) {
+        await persist(ctx, s);
+        await message(ctx, s, "system", policy === "auto-low" ? "Auto-approving low-risk tools (read, search, think, fetch); other requests wait for review." : "Approval policy: every permission request waits for review.");
+      }
+      return publicSession(s);
+    },
+    async setAutopilot(ctx, a, meta) {
+      if (meta.caller !== "daemon-client") throw new Error("Only the desktop gateway changes autopilot");
+      const s = session(a.id), enabled = a.enabled === true;
+      if (enabled && limits.approvalCap !== "autopilot") throw new Error(`Autopilot is not allowed on this machine (at most "${limits.approvalCap}" approval).`);
+      if (!!s.autopilot !== enabled) {
+        s.autopilot = enabled;
+        await persist(ctx, s);
+        await message(ctx, s, "system", enabled ? "Autopilot enabled: tool permissions are approved automatically, including Git task creation (which still needs the desktop open)." : "Autopilot disabled: permission requests wait for review.");
+        const c = live.get(s.id);
+        if (enabled && c) for (const p of [...c.permissions.values()]) {
+          const options = p.value.request.options || [];
+          const allowOnce = options.find((o) => o.kind === "allow_once") || options.find((o) => String(o.kind).startsWith("allow"));
+          if (!allowOnce) continue;
+          await ctx.host.db.exec(db, "UPDATE permissions SET resolved=1 WHERE id=?", [p.value.id]);
+          c.permissions.delete(p.value.id);
+          p.resolve({ outcome: { outcome: "selected", optionId: allowOnce.optionId } });
+        }
+        if (c && c.session.status === "waiting" && !c.permissions.size) {
+          c.session.status = "busy";
+          await persist(ctx, c.session);
+        }
+      }
+      return publicSession(s);
+    },
+    /** Change an agent's configuration. Anything besides the name restarts a connected agent; a new
+     *  provider also starts a new provider session. Instructions are re-sent on the next prompt. */
+    update: (ctx, a, meta) => serialize(String(a.id), async () => {
+      const s = session(a.id), p = a.patch || {};
+      if (meta.caller !== "daemon-client" && !(meta.caller === "workflow-runner" && s.workflow)) throw new Error("Only the desktop gateway edits agents");
+      const name = String(p.name || "").trim().slice(0, 120);
+      if (!name) throw new Error("Agent name is required");
+      if (p.profile !== void 0 && (!p.profile?.executable || !Array.isArray(p.profile.args) || !Array.isArray(p.skills) || !Array.isArray(p.mcps))) throw new Error("Invalid agent configuration");
+      const trackAutonomousClaudeTurns = meta.caller === "workflow-runner" && p.profile?.provider === "claude" ? p.trackAutonomousClaudeTurns !== false : s.trackAutonomousClaudeTurns;
+      const configChanged = p.profile !== void 0 && JSON.stringify([s.profile, s.model, s.agentFile, s.skills, s.mcps, !!s.workspaceMcp, s.inline || {}, s.trackAutonomousClaudeTurns]) !== JSON.stringify([p.profile, String(p.model || ""), p.agentFile || null, p.skills, p.mcps, !!p.workspaceMcp, p.inline || {}, trackAutonomousClaudeTurns]);
+      if (configChanged && ["busy", "waiting", "starting"].includes(s.status)) throw new Error("Wait for the agent to finish its turn, or cancel it, before changing its configuration");
+      const wasLive = live.has(s.id);
+      const workflowUpdate = meta.caller === "workflow-runner" && configChanged;
+      const previous = workflowUpdate ? { ...s } : void 0;
+      if (workflowUpdate && s.profile.id === p.profile.id && s.contextSent && live.get(s.id)?.loadSession === false && live.get(s.id)?.resumeSession === false)
+        throw new Error("This provider cannot resume the conversation with new MCP settings.");
+      if (configChanged && wasLive) await stop(ctx, s.id);
+      const newProvider = configChanged && s.profile.id !== p.profile.id;
+      const instructionsChanged = configChanged && JSON.stringify([s.agentFile, s.skills, s.inline || {}]) !== JSON.stringify([p.agentFile || null, p.skills, p.inline || {}]);
+      s.name = name;
+      if (typeof p.customName === "boolean") s.customName = p.customName;
+      if (configChanged) {
+        Object.assign(s, { profile: p.profile, model: String(p.model || ""), agentFile: p.agentFile || null, skills: p.skills, mcps: p.mcps, workspaceMcp: !!p.workspaceMcp, inline: p.inline && typeof p.inline === "object" ? p.inline : {}, trackAutonomousClaudeTurns, contextSent: newProvider || instructionsChanged && !s.sentDigests ? false : s.contextSent });
+        if (newProvider) {
+          s.handoffPending = true;
+          s.sessionId = null;
+          s.configOptions = [];
+          s.models = null;
+          s.modes = null;
+          s.usage = null;
+          s.commands = [];
+          s.systemPrompt = null;
+          s.systemPromptSent = false;
+          s.progressInstruction = void 0;
+          s.sentDigests = void 0;
+          s.reasoning = "";
+          s.settings = {};
+        }
+      }
+      if (workflowUpdate) {
+        try {
+          await start(ctx, s, !newProvider);
+        } catch (e) {
+          Object.assign(s, previous, { status: "stopped", revision: s.revision });
+          if (wasLive) await start(ctx, s, true).catch((e2) => ctx.log.warn("Restoring the previous workflow session failed", errMsg(e2)));
+          else await persist(ctx, s);
+          throw e;
+        }
+      } else {
+        await persist(ctx, s);
+        if (configChanged && wasLive) await start(ctx, s);
+      }
+      return publicSession(s);
+    }),
+    /** Desktop gateway: replace the text of attached Library entries after a Library edit. No restart;
+     *  the next prompt sends the changed text (its fingerprint differs from what was sent). */
+    refreshInline: (ctx, a, meta) => serialize(String(a.id), async () => {
+      if (meta.caller !== "daemon-client") throw new Error("Only the desktop gateway refreshes Library text");
+      const s = session(a.id), next = { ...s.inline || {} };
+      let changed = false;
+      for (const [k, v] of Object.entries(a.inline || {})) if (k in next && typeof v === "string" && next[k] !== v) {
+        next[k] = v;
+        changed = true;
+      }
+      if (!changed) return publicSession(s);
+      s.inline = next;
+      await persist(ctx, s);
+      if (s.workspaceMcp) await ctx.modules.call("internal-remote-mcp", "updateInline", { sessionId: s.id, inline: next }).catch(() => {
+      });
+      return publicSession(s);
+    }),
+    /** Drop the conversation: history, pending permissions and queued steering, then a fresh provider session. */
+    clear: (ctx, a, meta) => serialize(String(a.id), async () => {
+      if (meta.caller !== "daemon-client") throw new Error("Only the desktop gateway clears agents");
+      const s = session(a.id);
+      if (["busy", "waiting", "starting"].includes(s.status)) throw new Error("Cancel the running turn before clearing the session");
+      const wasLive = live.has(s.id);
+      if (wasLive) await stop(ctx, s.id);
+      await writes;
+      await ctx.host.db.exec(db, "DELETE FROM messages WHERE session_id=?", [s.id]);
+      await ctx.host.db.exec(db, "DELETE FROM permissions WHERE session_id=?", [s.id]);
+      Object.assign(s, { sessionId: null, handoffPending: false, contextSent: false, systemPrompt: null, systemPromptSent: false, progressInstruction: void 0, sentDigests: void 0, error: null, configOptions: [], models: null });
+      await persist(ctx, s);
+      if (wasLive) await start(ctx, s);
+      return publicSession(s);
+    }),
+    /** Stop the agent and delete it with its history. */
+    remove: (ctx, a, meta) => serialize(String(a.id), async () => {
+      if (meta.caller !== "daemon-client") throw new Error("Only the desktop gateway removes agents");
+      const s = session(a.id);
+      await stop(ctx, s.id);
+      await writes;
+      sessions.delete(s.id);
+      await ctx.host.db.exec(db, "DELETE FROM messages WHERE session_id=?", [s.id]);
+      await ctx.host.db.exec(db, "DELETE FROM permissions WHERE session_id=?", [s.id]);
+      await ctx.host.db.exec(db, "DELETE FROM sessions WHERE id=?", [s.id]);
+      return null;
+    }),
+    async permission(ctx, a) {
+      const c = live.get(String(a.id)), p = c?.permissions.get(String(a.permissionId));
+      if (!c || !p) throw new Error("Permission request is no longer active");
+      const option = p.value.request.options?.find((o) => o.optionId === a.optionId);
+      if (!option) throw new Error("Invalid permission option");
+      await ctx.host.db.exec(db, "UPDATE permissions SET resolved=1 WHERE id=?", [p.value.id]);
+      c.permissions.delete(p.value.id);
+      c.session.status = c.permissions.size ? "waiting" : "busy";
+      await persist(ctx, c.session);
+      p.resolve({ outcome: { outcome: "selected", optionId: option.optionId } });
+      return null;
+    }
+  }
+};
+for (const [name, method] of Object.entries(mod.methods)) {
+  mod.methods[name] = async (ctx, a, meta) => {
+    inFlight++;
+    try {
+      return await method(ctx, a, meta);
+    } finally {
+      inFlight--;
+    }
+  };
+}
+var index_default = mod;
+export {
+  index_default as default
+};

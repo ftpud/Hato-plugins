@@ -19,7 +19,7 @@
   "stateVersion": 1,
   "description": "Live preview of browser sessions: drive them yourself, watch agents, inspect network requests.",
   "author": "Hato contributors",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "pluginPackage": "browser",
   "pluginType": "Automation",
   "contributes": {
