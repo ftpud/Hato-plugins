@@ -9,7 +9,7 @@
       "type": "System",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.69",
+      "version": "0.1.70",
       "coreVersion": "^0.1.0",
       "description": "Hato essentials services and panels.",
       "dependencies": {},
@@ -32,100 +32,100 @@
       "artifacts": [
         {
           "id": "persistence",
-          "manifest": "packages/foundation/0.1.69/persistence/manifest.json",
-          "bundle": "packages/foundation/0.1.69/persistence/dist/persistence.mjs",
-          "manifestSha256": "10b6246027f7cdbf0db6ee67eba49dca39332f4365d0bbe50a51ad260883459c",
+          "manifest": "packages/foundation/0.1.70/persistence/manifest.json",
+          "bundle": "packages/foundation/0.1.70/persistence/dist/persistence.mjs",
+          "manifestSha256": "34154c9d1bdef03fd17229e35c5ebe90c1ebfc6f69ee286aaa5c460c89b99da0",
           "bundleSha256": "65c8f072de4684cf3b9653713eb087b1104cb0d52f80505bd50a9eba9c574fdb"
         },
         {
           "id": "workspace",
-          "manifest": "packages/foundation/0.1.69/workspace/manifest.json",
-          "bundle": "packages/foundation/0.1.69/workspace/dist/workspace.mjs",
-          "manifestSha256": "3f98cad2ba3a5559b7fe74ac86d1eef36e579e7991d89366ad0c8813aa285ea8",
+          "manifest": "packages/foundation/0.1.70/workspace/manifest.json",
+          "bundle": "packages/foundation/0.1.70/workspace/dist/workspace.mjs",
+          "manifestSha256": "5da1389c2bab519cfc58a837e5c08f747af565cd928ada72b59ee23d099d1057",
           "bundleSha256": "2ee50100da7baefe1c41e67847356c334cf5ff29972d8642ba8cf7b1926a73db"
         },
         {
           "id": "projects",
-          "manifest": "packages/foundation/0.1.69/projects/manifest.json",
-          "bundle": "packages/foundation/0.1.69/projects/dist/projects.mjs",
-          "manifestSha256": "5e25a5a5bcd425607def5efd358e0b5602e3b46d2d3fe6612beaa51bab8e34c5",
+          "manifest": "packages/foundation/0.1.70/projects/manifest.json",
+          "bundle": "packages/foundation/0.1.70/projects/dist/projects.mjs",
+          "manifestSha256": "90b3489a48ef038ff812106e18dce76ea3bac359da7c856da6c1d9dca86543e9",
           "bundleSha256": "bbbd0cf69478708230546bd1c78e6811c128618313eb0759825bfdd376f9c6f5"
         },
         {
           "id": "files",
-          "manifest": "packages/foundation/0.1.69/files/manifest.json",
-          "bundle": "packages/foundation/0.1.69/files/dist/files.mjs",
-          "manifestSha256": "ef750a6b1ba90e2711502dabb657536b4e31a6990711d30070c26c71f81e1912",
+          "manifest": "packages/foundation/0.1.70/files/manifest.json",
+          "bundle": "packages/foundation/0.1.70/files/dist/files.mjs",
+          "manifestSha256": "f3a9dc8f218363242a5900d81c6adb3fed29b59cf062e23f58600e027dc7d464",
           "bundleSha256": "d2a8b1c54c5d2ea2512576753cd38e2c5f41d89e12844176c45a80fef2b7b2de"
         },
         {
           "id": "terminals",
-          "manifest": "packages/foundation/0.1.69/terminals/manifest.json",
-          "bundle": "packages/foundation/0.1.69/terminals/dist/terminals.mjs",
-          "manifestSha256": "20af42d716430f5368918ce18c54c14a46c44473ac99beaaa565d5566c9c7415",
+          "manifest": "packages/foundation/0.1.70/terminals/manifest.json",
+          "bundle": "packages/foundation/0.1.70/terminals/dist/terminals.mjs",
+          "manifestSha256": "ade23cc8d473aca4d996e2f380c03035bd5b09e440b4f8bbd1992dfe4bfb78f7",
           "bundleSha256": "7beedec274546e27976ce1838d3f42c7fbbe93ac17886b4f5feaadda7fefc2bd"
         },
         {
           "id": "workspace-layout",
-          "manifest": "packages/foundation/0.1.69/workspace-layout/manifest.json",
-          "bundle": "packages/foundation/0.1.69/workspace-layout/dist/workspace-layout.mjs",
-          "manifestSha256": "baccdcbad838672770a15c5168ddaaa76e744aff8a4babba519500abaef28037",
+          "manifest": "packages/foundation/0.1.70/workspace-layout/manifest.json",
+          "bundle": "packages/foundation/0.1.70/workspace-layout/dist/workspace-layout.mjs",
+          "manifestSha256": "2942d3b4eb270c2c255a2abd562ce1b3b92858cda52b2c562b202b9b1ff5542f",
           "bundleSha256": "10715f500eb7e23ddac315eba90e9e180f459578fa391b46d1c54bb9929809b7"
         },
         {
           "id": "settings",
-          "manifest": "packages/foundation/0.1.69/settings/manifest.json",
-          "bundle": "packages/foundation/0.1.69/settings/dist/settings.mjs",
-          "manifestSha256": "7cd1b08523f84d09629b8bbb166ee47210e6eca4e08812a65f9d06a5d536bbb0",
-          "bundleSha256": "3cc50dfb434b5c4942d27c9e414ecbba094d60831e05ff530c9bb7f5eb213ec6"
+          "manifest": "packages/foundation/0.1.70/settings/manifest.json",
+          "bundle": "packages/foundation/0.1.70/settings/dist/settings.mjs",
+          "manifestSha256": "076968ff2ae82b84aaf3f85d097209c031e2e925b872233b3239575f2d5b8669",
+          "bundleSha256": "97fcff0e8d07dda2de7680797db578c000877efabf092e97439f45ec5c4e395e"
         },
         {
           "id": "module-dev",
-          "manifest": "packages/foundation/0.1.69/module-dev/manifest.json",
-          "bundle": "packages/foundation/0.1.69/module-dev/dist/module-dev.mjs",
-          "manifestSha256": "76d06c87288da9e91d60fb4a7347d25367bd3783c050629bd8e5c97f07671b4a",
+          "manifest": "packages/foundation/0.1.70/module-dev/manifest.json",
+          "bundle": "packages/foundation/0.1.70/module-dev/dist/module-dev.mjs",
+          "manifestSha256": "bdf47c9d23efbdd487398bf0e7f94be696e893d37a8fd18f969bb66d91737f4e",
           "bundleSha256": "2f4012665097f46a08db6bf352ededd4289dd34a9b0ca419e203ff7148549714"
         },
         {
           "id": "explorer",
-          "manifest": "packages/foundation/0.1.69/explorer/manifest.json",
-          "bundle": "packages/foundation/0.1.69/explorer/dist/explorer.mjs",
-          "manifestSha256": "20de427ac613aeaeea14b47c15f9486f934044b00e9199af45b6baf68ec5f8fe",
+          "manifest": "packages/foundation/0.1.70/explorer/manifest.json",
+          "bundle": "packages/foundation/0.1.70/explorer/dist/explorer.mjs",
+          "manifestSha256": "197a094e1fba66057cb7390367fd194eb5f33f2fd2b5837b0a98b387929fc9e8",
           "bundleSha256": "01f128d8a3d0d45f9f1026377d739df8375deab38d7293039d77e8042e7ba037"
         },
         {
           "id": "viewer",
-          "manifest": "packages/foundation/0.1.69/viewer/manifest.json",
-          "bundle": "packages/foundation/0.1.69/viewer/dist/viewer.mjs",
-          "manifestSha256": "809ea6e061b0fcfc09bf6aea3b4b87047c870d4368122d5349c01ff2d092e75e",
+          "manifest": "packages/foundation/0.1.70/viewer/manifest.json",
+          "bundle": "packages/foundation/0.1.70/viewer/dist/viewer.mjs",
+          "manifestSha256": "5b09ed73631949244ab5a5e238caa22a82206c899b9b596faaa594dcbe61adab",
           "bundleSha256": "d3201f658ed4fae30d132120ef69aed1b417afdbc935c4e91b42dc743604459f"
         },
         {
           "id": "terminal-panel",
-          "manifest": "packages/foundation/0.1.69/terminal-panel/manifest.json",
-          "bundle": "packages/foundation/0.1.69/terminal-panel/dist/terminal-panel.mjs",
-          "manifestSha256": "75503cf943abf26c049851566251b14de7ea1bc94427aa7ba490c513fde400ec",
+          "manifest": "packages/foundation/0.1.70/terminal-panel/manifest.json",
+          "bundle": "packages/foundation/0.1.70/terminal-panel/dist/terminal-panel.mjs",
+          "manifestSha256": "5747b1a5be2888be4163b74ef8cbc24889919b7cd515160efff56ea45d998640",
           "bundleSha256": "b6adcbc50d9fdb4d5d541435ab7006539c4ec4a57eadc9c7b7a975650758b714"
         },
         {
           "id": "projects-panel",
-          "manifest": "packages/foundation/0.1.69/projects-panel/manifest.json",
-          "bundle": "packages/foundation/0.1.69/projects-panel/dist/projects-panel.mjs",
-          "manifestSha256": "8f665496f97f72eca28b0586538f7e00b3fdd7390b21aec7fac04e7878a349f6",
+          "manifest": "packages/foundation/0.1.70/projects-panel/manifest.json",
+          "bundle": "packages/foundation/0.1.70/projects-panel/dist/projects-panel.mjs",
+          "manifestSha256": "5ffb3af8dc10097f4071a59cfaa16abdfa95ed42d1dd562719bd812e0dd33c74",
           "bundleSha256": "fec94b43763f1c3e25c406fa66bc815490105e8eff4a59a4eb5cf92cdaf502f7"
         },
         {
           "id": "left-sidebar",
-          "manifest": "packages/foundation/0.1.69/left-sidebar/manifest.json",
-          "bundle": "packages/foundation/0.1.69/left-sidebar/dist/left-sidebar.mjs",
-          "manifestSha256": "95eac28ecbc037bd1025b3bbafd2e7f5c3de600a1640d710d78bc0bacddf204a",
+          "manifest": "packages/foundation/0.1.70/left-sidebar/manifest.json",
+          "bundle": "packages/foundation/0.1.70/left-sidebar/dist/left-sidebar.mjs",
+          "manifestSha256": "c103bef78e84f0b9e8c4ae950ea7e7223c874e27212f9daa1081e4edb4edb00d",
           "bundleSha256": "160cd412737fbf5c7862db26b6cf73c88e5225d748be11351ac4b2a66f18a706"
         },
         {
           "id": "sidebar",
-          "manifest": "packages/foundation/0.1.69/sidebar/manifest.json",
-          "bundle": "packages/foundation/0.1.69/sidebar/dist/sidebar.mjs",
-          "manifestSha256": "1bac6aa2bbbefa33fd50d54bac9fa5e3711a8d5f57bba2954bc05d731f9de600",
+          "manifest": "packages/foundation/0.1.70/sidebar/manifest.json",
+          "bundle": "packages/foundation/0.1.70/sidebar/dist/sidebar.mjs",
+          "manifestSha256": "3aa89a2394869c248713458fedb265bb4d8903832a60019ed4a2c494fdc71a9d",
           "bundleSha256": "aee1d1a5534b06bcbbab9c782a3314eb902e001b7c9bf9ccb2d2be5e2c06bf2e"
         }
       ]
@@ -136,7 +136,7 @@
       "type": "AI",
       "core": true,
       "author": "Hato contributors",
-      "version": "0.1.26",
+      "version": "0.1.27",
       "coreVersion": "^0.1.0",
       "description": "Provider-independent ACP sessions, chat UI and MCP tools. Install AI providers separately.",
       "dependencies": {
@@ -155,58 +155,58 @@
       "artifacts": [
         {
           "id": "acp",
-          "manifest": "packages/core-acp/0.1.26/acp/manifest.json",
-          "bundle": "packages/core-acp/0.1.26/acp/dist/acp.mjs",
-          "manifestSha256": "067df54324282bac21d4de4b5953b24b591c662fc4e5637f89c93adaedcbeed5",
-          "bundleSha256": "5a8b4e6b75956b7c445959b0a91d11f6196ab4b1beadf9f11d542632320971a3"
+          "manifest": "packages/core-acp/0.1.27/acp/manifest.json",
+          "bundle": "packages/core-acp/0.1.27/acp/dist/acp.mjs",
+          "manifestSha256": "af4c33ffe10b4c9de3265bbeba5343cb6990595dbdd34e6935207c4d2052d4d5",
+          "bundleSha256": "31ad73904672b6096ac6b2de110d81571476df509253f19f977a26120bba7eb7"
         },
         {
           "id": "ai-sessions",
-          "manifest": "packages/core-acp/0.1.26/ai-sessions/manifest.json",
-          "bundle": "packages/core-acp/0.1.26/ai-sessions/dist/ai-sessions.mjs",
-          "manifestSha256": "b183367ee208b755e63231562e748d46e6411cae6d9fbe81c838d95363b4488a",
+          "manifest": "packages/core-acp/0.1.27/ai-sessions/manifest.json",
+          "bundle": "packages/core-acp/0.1.27/ai-sessions/dist/ai-sessions.mjs",
+          "manifestSha256": "9d8e9f7133fafcd72fde65770fd1b8dd2f84b9ae7032486cb5ee453087bd5c8e",
           "bundleSha256": "fb9e88256e4b0629c3493d88783ba28c77f2c35afdfe57a94076bf113a89bbb4"
         },
         {
           "id": "ai",
-          "manifest": "packages/core-acp/0.1.26/ai/manifest.json",
-          "bundle": "packages/core-acp/0.1.26/ai/dist/ai.mjs",
-          "manifestSha256": "e5740b17a643c3b1a3330f50c5cb6e948005ba8081f76f017c507cd187dedee3",
+          "manifest": "packages/core-acp/0.1.27/ai/manifest.json",
+          "bundle": "packages/core-acp/0.1.27/ai/dist/ai.mjs",
+          "manifestSha256": "b8a6539e5164a42de512a8ea2152e2564fe327b730d61c9db97b92602e0a4593",
           "bundleSha256": "085363b451bd212a9d075a6387fabc5e759d7c145a734533156e4b77fca0615d"
         },
         {
           "id": "internal-mcp",
-          "manifest": "packages/core-acp/0.1.26/internal-mcp/manifest.json",
-          "bundle": "packages/core-acp/0.1.26/internal-mcp/dist/internal-mcp.mjs",
-          "manifestSha256": "afe8521473f32637299ac5f4711f5e156daf99dc0542bc0aaabe227ec050dd88",
+          "manifest": "packages/core-acp/0.1.27/internal-mcp/manifest.json",
+          "bundle": "packages/core-acp/0.1.27/internal-mcp/dist/internal-mcp.mjs",
+          "manifestSha256": "762c63326d10487244c68837e1e7013a7287eaf6d81c81b92fa27488ef133d22",
           "bundleSha256": "c89ae44b747c2f5564c9b1d3fa2cf5f5c59a1dd963840948a37dc0dc9c88032a"
         },
         {
           "id": "internal-local-mcp",
-          "manifest": "packages/core-acp/0.1.26/internal-local-mcp/manifest.json",
-          "bundle": "packages/core-acp/0.1.26/internal-local-mcp/dist/internal-local-mcp.mjs",
-          "manifestSha256": "285801f452fbf923ba99f8ff3c80dbe30a369e0cc4cb15fb6a98ee6deb68d485",
+          "manifest": "packages/core-acp/0.1.27/internal-local-mcp/manifest.json",
+          "bundle": "packages/core-acp/0.1.27/internal-local-mcp/dist/internal-local-mcp.mjs",
+          "manifestSha256": "cc71fa54001b133b8edda9041a5f9d1b88c5c0cd14e55d511f2cd525234fda3f",
           "bundleSha256": "6219d4300ac0f4222dc8e121906b78b038945dd12a5d64714af1e7138aeace45"
         },
         {
           "id": "mcp-auth",
-          "manifest": "packages/core-acp/0.1.26/mcp-auth/manifest.json",
-          "bundle": "packages/core-acp/0.1.26/mcp-auth/dist/mcp-auth.mjs",
-          "manifestSha256": "6446d121343ee42503d4d75f3953c962581d8fd7e59b61ab91e9ded6be7257a0",
+          "manifest": "packages/core-acp/0.1.27/mcp-auth/manifest.json",
+          "bundle": "packages/core-acp/0.1.27/mcp-auth/dist/mcp-auth.mjs",
+          "manifestSha256": "484a44dead0941fb276286d43c65dff6ebcf8846d7d539608b18da84ec5fe875",
           "bundleSha256": "4cfb2cb59e29169d5f5bd7139b242600f404edc504c7ac40b4e9cb2dc74b59dd"
         },
         {
           "id": "mcp-panel",
-          "manifest": "packages/core-acp/0.1.26/mcp-panel/manifest.json",
-          "bundle": "packages/core-acp/0.1.26/mcp-panel/dist/mcp-panel.mjs",
-          "manifestSha256": "40802726b072137b603572a393d07118c1994d06f45b6614d2a0a38349f82406",
+          "manifest": "packages/core-acp/0.1.27/mcp-panel/manifest.json",
+          "bundle": "packages/core-acp/0.1.27/mcp-panel/dist/mcp-panel.mjs",
+          "manifestSha256": "9f0ff3e4cbc7efe99ff4eb55619892bde94132e050e8bc6ec8e371ce1589a619",
           "bundleSha256": "623924e10723b8ccb407d470012b9a6efd96b51cf511552c4220776f32cc2475"
         },
         {
           "id": "prompt-history",
-          "manifest": "packages/core-acp/0.1.26/prompt-history/manifest.json",
-          "bundle": "packages/core-acp/0.1.26/prompt-history/dist/prompt-history.mjs",
-          "manifestSha256": "b99a3e236ba9761bcf2b33e25278271519de07fab15897264dffccd165235e0b",
+          "manifest": "packages/core-acp/0.1.27/prompt-history/manifest.json",
+          "bundle": "packages/core-acp/0.1.27/prompt-history/dist/prompt-history.mjs",
+          "manifestSha256": "1b547d2038cf181ec0b6ec79f1690d1066cc1ec2a0526118b3058c0afefe2abc",
           "bundleSha256": "8ac6058907f6eacb971cce36291b14e871f139206eeb454ed5d5d4aa00c50a03"
         }
       ]

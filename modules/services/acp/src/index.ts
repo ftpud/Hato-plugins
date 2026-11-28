@@ -165,6 +165,9 @@ interface Conn {
   stderrTail: string;
   stopping?: boolean;
   activeTurn?: { cancelled?: boolean; timer?: any } | null;
+  /** Autonomous wakeup turn started by the provider after a prompt turn ended (e.g. Claude AIR
+   *  asyncTasks or background activity streaming on an idle session). */
+  providerTurn?: { id: string; idleTimer?: ReturnType<typeof setTimeout> } | null;
   pendingPermissions: Map<number | string, (outcome: any) => void>;
   pendingElicitations: Map<number | string, { params: any; resolve: (value: any) => void; reject: (error: any) => void; timer: any }>;
   mcp: { enabled: boolean; status: string; selection?: string[] };
@@ -475,9 +478,11 @@ async function startConnection(ctx: ModuleContext, a: any) {
   await wire(ctx, c, 1);
   emitStatus(ctx, c);
   try {
+    const airMeta = c.providerId === "claude" || c.profile?.provider === "claude"
+      ? { jetbrains: { air: { version: 1, capabilities: ["asyncTasks"] } } } : {};
     const init: any = await sessionRequest(ctx, c, "initialize", {
       protocolVersion: PROTOCOL_VERSION,
-      clientCapabilities: { ...CLIENT_CAPABILITIES, _meta: { ...OPENCODE_CHILD_OPT_IN }, ...(ctx.host.env.info().hostFeatures?.includes("pty.spawn") ? { auth: { terminal: true }, _meta: { ...OPENCODE_CHILD_OPT_IN, "terminal-auth": true } } : {}) },
+      clientCapabilities: { ...CLIENT_CAPABILITIES, _meta: { ...OPENCODE_CHILD_OPT_IN, ...airMeta }, ...(ctx.host.env.info().hostFeatures?.includes("pty.spawn") ? { auth: { terminal: true }, _meta: { ...OPENCODE_CHILD_OPT_IN, ...airMeta, "terminal-auth": true } } : {}) },
       clientInfo: { name: "hato", title: "Hato", version: "0.1.0" },
     }, 60000);
     c.agentInfo = init.agentInfo || null;
@@ -592,12 +597,50 @@ async function withReplay<T>(ctx: ModuleContext, c: Conn, sessionId: string, req
   }
 }
 
+function clearProviderTurn(c: Conn) {
+  if (c.providerTurn?.idleTimer) clearTimeout(c.providerTurn.idleTimer);
+  c.providerTurn = null;
+}
+
+function finishProviderTurn(ctx: ModuleContext, c: Conn, result: { stopReason?: string; error?: string } = { stopReason: "end_turn" }) {
+  if (!c.providerTurn) return;
+  clearProviderTurn(c);
+  if (c.stopping || c.status === "exited" || c.activeTurn) return;
+  if (c.status === "busy") c.status = "ready";
+  if (result.error) c.error = result.error;
+  emitStatus(ctx, c);
+  ctx.events.emit("acp.turnEnded", {
+    conversationId: c.conversationId,
+    ...(result.error ? { error: result.error } : { stopReason: result.stopReason }),
+  });
+}
+
+function armProviderTurnIdle(ctx: ModuleContext, c: Conn) {
+  const pt = c.providerTurn;
+  if (!pt || pt.id !== "implicit") return;
+  if (pt.idleTimer) clearTimeout(pt.idleTimer);
+  if (c.pendingPermissions.size || c.pendingElicitations.size || hasWorkingSubagents(c.childSessions)) {
+    pt.idleTimer = undefined;
+    return;
+  }
+  pt.idleTimer = setTimeout(() => {
+    if (c.providerTurn !== pt || c.activeTurn) return;
+    if (c.pendingPermissions.size || c.pendingElicitations.size || hasWorkingSubagents(c.childSessions)) {
+      armProviderTurnIdle(ctx, c);
+      return;
+    }
+    finishProviderTurn(ctx, c);
+  }, 1500);
+}
+
+const STREAM_UPDATES = new Set(["agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan"]);
+
 function finishTurn(ctx: ModuleContext, c: Conn, result: { stopReason?: string; usage?: any; error?: string }) {
   if (!c.activeTurn) return;
   if (c.activeTurn.timer) clearTimeout(c.activeTurn.timer);
   c.activeTurn = null;
   if (c.stopping || c.status === "exited") return;
-  if (c.status === "busy") c.status = "ready";
+  if (c.status === "busy" && !c.providerTurn) c.status = "ready";
   if (result.usage) c.turnUsage = result.usage;
   if (result.error) c.error = result.error;
   emitStatus(ctx, c);
@@ -610,6 +653,7 @@ function finishTurn(ctx: ModuleContext, c: Conn, result: { stopReason?: string; 
 
 async function cancelInternal(ctx: ModuleContext, c: Conn) {
   if (c.activeTurn) c.activeTurn.cancelled = true;
+  const pt = c.providerTurn;
   for (const resolve of c.pendingPermissions.values()) resolve({ outcome: { outcome: "cancelled" } });
   c.pendingPermissions.clear();
   for (const pending of c.pendingElicitations.values()) {
@@ -617,7 +661,11 @@ async function cancelInternal(ctx: ModuleContext, c: Conn) {
     pending.resolve({ action: "cancel" });
   }
   c.pendingElicitations.clear();
-  if (c.sessionId) await c.peer.notify("session/cancel", { sessionId: c.sessionId }).catch(() => {});
+  if (c.sessionId) {
+    if (pt && pt.id !== "implicit") await c.peer.request("_session/async_task/stop", { sessionId: c.sessionId, asyncTaskId: pt.id }).catch(() => {});
+    else await c.peer.notify("session/cancel", { sessionId: c.sessionId }).catch(() => {});
+  }
+  if (pt && !c.activeTurn) finishProviderTurn(ctx, c, { stopReason: "cancelled" });
 }
 
 /** Connect the JSON-RPC peer to the process streams (also used after a hot swap). */
@@ -644,7 +692,32 @@ async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
         emitStatus(ctx, c);
       }
       // Child traffic must never overwrite the parent's configuration, usage or transcript.
-      if (childUpdate || u.sessionUpdate === "subagent_update" || u.sessionUpdate === "_hato_child_status") return;
+      if (childUpdate || u.sessionUpdate === "subagent_update" || u.sessionUpdate === "_hato_child_status") {
+        armProviderTurnIdle(ctx, c);
+        return;
+      }
+      if (!c.loadingHistory && u.sessionUpdate === "async_task_spawned" && u.taskType === "turn" && typeof u.asyncTaskId === "string" && !c.activeTurn && c.status === "ready") {
+        clearProviderTurn(c);
+        c.providerTurn = { id: u.asyncTaskId };
+        c.status = "busy";
+        c.error = null;
+        emitStatus(ctx, c);
+        return;
+      }
+      if (u.sessionUpdate === "async_task_state_update" && c.providerTurn?.id === u.asyncTaskId && ["completed", "failed", "stopped"].includes(u.state)) {
+        finishProviderTurn(ctx, c, u.state === "failed" ? { error: "Autonomous turn failed" } : u.state === "stopped" ? { stopReason: "cancelled" } : { stopReason: "end_turn" });
+        return;
+      }
+      if (u.sessionUpdate === "async_task_spawned" || u.sessionUpdate === "async_task_state_update") return;
+      if (!c.loadingHistory && !c.activeTurn && STREAM_UPDATES.has(u.sessionUpdate)) {
+        if (c.status === "ready") {
+          c.providerTurn = { id: "implicit" };
+          c.status = "busy";
+          c.error = null;
+          emitStatus(ctx, c);
+        }
+        armProviderTurnIdle(ctx, c);
+      }
       if (u.sessionUpdate === "config_option_update" && Array.isArray(u.configOptions)) { c.configOptions = u.configOptions; emitStatus(ctx, c); }
       else if (u.sessionUpdate === "current_mode_update" && c.modes) { c.modes = { ...c.modes, currentModeId: u.currentModeId }; emitStatus(ctx, c); }
       else if (u.sessionUpdate === "usage_update") {
@@ -677,12 +750,13 @@ async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
     if (method === "session/request_permission") {
       const pending = deferred<any>();
       c.pendingPermissions.set(id, pending.resolve);
+      armProviderTurnIdle(ctx, c);
       try {
         return await Promise.race([
           ctx.modules.call("ai-sessions", "permissionRequest", { conversationId: c.conversationId, request: params }, { timeoutMs: 30 * 60 * 1000 }),
           pending.promise,
         ]);
-      } finally { c.pendingPermissions.delete(id); }
+      } finally { c.pendingPermissions.delete(id); armProviderTurnIdle(ctx, c); }
     }
     if (method === "elicitation/create") {
       if (params?.mode !== "form") throw rpcError(-32602, "Only form elicitation is supported");
@@ -693,10 +767,11 @@ async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
         pending.resolve({ action: "cancel" });
       }, 30 * 60 * 1000);
       c.pendingElicitations.set(id, { params, resolve: pending.resolve, reject: pending.reject, timer });
+      armProviderTurnIdle(ctx, c);
       ctx.events.emit("acp.elicitation", { conversationId: c.conversationId, requestId: id, request: params });
       try { return await pending.promise; }
       finally {
-        clearTimeout(timer); c.pendingElicitations.delete(id);
+        clearTimeout(timer); c.pendingElicitations.delete(id); armProviderTurnIdle(ctx, c);
         ctx.events.emit("acp.elicitationComplete", { conversationId: c.conversationId, requestId: id });
       }
     }
@@ -710,6 +785,7 @@ async function wire(ctx: ModuleContext, c: Conn, nextId: number, partial = "") {
     c.childSessions = disconnectSubagents(c.childSessions);
     if (c.activeTurn?.timer) clearTimeout(c.activeTurn.timer);
     c.activeTurn = null;
+    clearProviderTurn(c);
     for (const resolve of c.pendingPermissions.values()) resolve({ outcome: { outcome: "cancelled" } });
     c.pendingPermissions.clear();
     for (const pending of c.pendingElicitations.values()) { clearTimeout(pending.timer); pending.resolve({ action: "cancel" }); }
@@ -837,6 +913,7 @@ const mod: AppModule = {
       if (c.activeTurn) throw new Error("A prompt is already running for this session");
       const blocks = promptBlocks(a, c);
       const timeoutMs = Number.isFinite(a.timeoutMs) ? Math.max(1000, Math.min(30 * 60 * 1000, Number(a.timeoutMs))) : 30 * 60 * 1000;
+      clearProviderTurn(c);
       c.status = "busy";
       c.error = null;
       c.turnUsage = null;
@@ -1066,6 +1143,7 @@ const mod: AppModule = {
       c.stopping = true;
       if (c.activeTurn?.timer) clearTimeout(c.activeTurn.timer);
       c.activeTurn = null;
+      clearProviderTurn(c);
       for (const resolve of c.pendingPermissions.values()) resolve({ outcome: { outcome: "cancelled" } });
       c.pendingPermissions.clear();
       for (const pending of c.pendingElicitations.values()) { clearTimeout(pending.timer); pending.resolve({ action: "cancel" }); }
